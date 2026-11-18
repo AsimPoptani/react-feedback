@@ -21,6 +21,8 @@ bun add github:AsimPoptani/react-feedback#<commit-or-tag>
 
 `react` and `react-dom` (18 or newer) are peer dependencies. `modern-screenshot` is a normal dependency. The server and CLI need [Bun](https://bun.sh).
 
+> **Install from git, not the npm registry.** An unrelated package called `react-feedback` exists on npm. `npm install react-feedback` or `bunx react-feedback` without a local install would fetch that one instead.
+
 ## Use in a React app
 
 ```tsx
@@ -46,6 +48,10 @@ const FeedbackWidget = import.meta.env.VITE_FEEDBACK === "1"
   ? lazy(() => import("react-feedback").then((m) => ({ default: m.FeedbackWidget })))
   : null;
 ```
+
+**Server-side rendering:** the widget uses `window` when it loads, so render it on the client only. In Next.js, use `dynamic(() => import("react-feedback").then((m) => m.FeedbackWidget), { ssr: false })` in a client component.
+
+**TypeScript:** the shipped types assume `moduleResolution: "bundler"` (the default for Vite and Next.js). With `node16`/`nodenext` resolution the types don't resolve yet.
 
 Exports: `FeedbackWidget`, `FeedbackErrorBoundary`, and the types `FeedbackWidgetProps`, `Capture`, `CaptureMode`, `ElementTarget`, `FeedbackItem`, `Rect`, `Shot`, `Target`.
 
@@ -75,7 +81,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 ## Run the server
 
 ```sh
-bunx react-feedback serve
+./node_modules/.bin/react-feedback serve   # after installing from git (see Install)
 # or, from a checkout: bun bin/react-feedback.ts serve
 ```
 

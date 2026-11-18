@@ -8,7 +8,7 @@
   "homepage": "https://github.com/AsimPoptani/react-feedback#readme",
   "bugs": { "url": "https://github.com/AsimPoptani/react-feedback/issues" },
   "keywords": ["react", "feedback", "screenshot", "widget", "bun"],
-  "sideEffects": false,
+  "sideEffects": ["*.css"],
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
