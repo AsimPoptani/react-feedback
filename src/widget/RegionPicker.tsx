@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
-import type { Rect } from './types';
-import { focusInto, useModalFocus } from './focus';
-import { nativeButtonActivation } from './shortcuts';
-import { Keycap } from './Keycap';
-import { StepHints } from './StepHints';
-import { SelectionToolbar } from './SelectionToolbar';
+import type { Rect } from './types.js';
+import { focusInto, useModalFocus } from './focus.js';
+import { nativeButtonActivation } from './shortcuts.js';
+import { Keycap } from './Keycap.js';
+import { StepHints } from './StepHints.js';
+import { SelectionToolbar } from './SelectionToolbar.js';
 const handles = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const directions: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 const clamp = (value: number, max: number, min = 0) => Math.max(min, Math.min(max, value));

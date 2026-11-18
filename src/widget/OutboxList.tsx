@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { useOutbox, useOutboxSnapshot } from './useOutbox';
-import type { OutboxStatus } from './outboxQueue';
+import { useOutbox, useOutboxSnapshot } from './useOutbox.js';
+import type { OutboxStatus } from './outboxQueue.js';
 const WORDS: Record<OutboxStatus, string> = {
   capturing: 'Waiting for its picture', queued: 'Waiting to send', sending: 'Sending…',
   retrying: 'Could not reach the feedback server. Waiting to retry', failed: 'Failed',

@@ -1,4 +1,4 @@
-import type { Capture, Rect } from './types';
+import type { Capture, Rect } from './types.js';
 export declare function canvasFor(width: number, height: number): {
     canvas: HTMLCanvasElement;
     ctx: CanvasRenderingContext2D;

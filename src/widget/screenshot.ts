@@ -1,8 +1,8 @@
 import { createContext, domToCanvas } from 'modern-screenshot';
 import type { Context, Options } from 'modern-screenshot';
-import { isWidget } from './elements';
-import { documentClone, viewportClone } from './screenshot-layout';
-import type { Capture, Rect } from './types';
+import { isWidget } from './elements.js';
+import { documentClone, viewportClone } from './screenshot-layout.js';
+import type { Capture, Rect } from './types.js';
 const filter = (node: Node) => !(node instanceof Element) || (!node.closest('noscript') && !isWidget(node));
 // Fetched images, stylesheets and fonts are inlined as data URLs on every capture, which is slow over a
 // tunnel. Keep those results for the page session, so a later capture only fetches what is new.

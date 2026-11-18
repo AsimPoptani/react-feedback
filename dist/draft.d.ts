@@ -1,5 +1,5 @@
-import type { getContext } from './context';
-import type { Capture, CaptureMode, Target } from './types';
+import type { getContext } from './context.js';
+import type { Capture, CaptureMode, Target } from './types.js';
 /** The open note. Its capture runs in the background: `capture` fills in when it lands, `failed` if it never will. */
 export interface Draft {
     mode: CaptureMode;

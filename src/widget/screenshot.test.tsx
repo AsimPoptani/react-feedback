@@ -1,10 +1,10 @@
 import { cleanup, render, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { documentClone, viewportClone } from './screenshot-layout';
-import { cropRect, captureViewport } from './screenshot';
+import { documentClone, viewportClone } from './screenshot-layout.js';
+import { cropRect, captureViewport } from './screenshot.js';
 import { domToCanvas } from 'modern-screenshot';
-import { MarkupEditor } from './MarkupEditor';
-import FeedbackWidget from './FeedbackWidget';
+import { MarkupEditor } from './MarkupEditor.js';
+import FeedbackWidget from './FeedbackWidget.js';
 vi.mock('modern-screenshot', () => ({ domToCanvas: vi.fn(), domToPng: vi.fn(), createContext: vi.fn(async (node: Node, options: object) => ({ node, ...options, requests: new Map(), fontCssTexts: new Map() })) }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it('undoes document restoration once, preserves nested scroll, and anchors fixed content', () => {

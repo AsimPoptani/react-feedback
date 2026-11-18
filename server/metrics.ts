@@ -3,7 +3,7 @@
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as store from './store';
-import { areaLabel, areaOf, sortAreas } from './inbox/areas.js';
+import { areaLabel, areaOf, DEFAULT_AREAS, sortAreas, type AreasConfig } from './inbox/areas.js';
 
 export const WINDOWS = { '24h': 24 * 3600e3, '7d': 7 * 86400e3, all: null } as const;
 export type Window = keyof typeof WINDOWS;
@@ -81,7 +81,7 @@ async function readEvents(dir: string): Promise<{ ts: string; kind: string }[]> 
   return out;
 }
 
-export async function computeMetrics(dir: string, window: Window = '7d', now = new Date()): Promise<Metrics> {
+export async function computeMetrics(dir: string, window: Window = '7d', now = new Date(), areas: AreasConfig = DEFAULT_AREAS): Promise<Metrics> {
   const span = WINDOWS[window];
   const sinceMs = span === null ? null : now.getTime() - span;
   const since = sinceMs === null ? null : new Date(sinceMs).toISOString();
@@ -97,7 +97,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
   const dayRow = (d: string) => days.get(d) ?? days.set(d, { day: d, user: 0, agent: 0, opened: 0, closed: 0 }).get(d)!;
 
   const areaRows = new Map<string, AreaRow & { _agent: number[]; _user: number[] }>();
-  const areaRow = (area: string) => areaRows.get(area) ?? areaRows.set(area, { area, label: areaLabel(area), threads: 0, open: 0, waiting_agent: 0, waiting_you: 0, messages_user: 0, messages_agent: 0,
+  const areaRow = (area: string) => areaRows.get(area) ?? areaRows.set(area, { area, label: areaLabel(area, areas), threads: 0, open: 0, waiting_agent: 0, waiting_you: 0, messages_user: 0, messages_agent: 0,
     agent_response: stats([]), user_response: stats([]), _agent: [], _user: [] }).get(area)!;
   const agentSamples: Sample[] = [], userSamples: Sample[] = [];
   const workload: Metrics['workload'] = { threads: 0, open: 0, waiting_agent: 0, waiting_you: 0, read_only: 0, oldest_waiting: null, checklist: { open: 0, claimed: 0, ticked: 0 } };
@@ -110,7 +110,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
     try { s = await store.summarise(dir, id); } catch { continue; } // a broken folder must not hide the rest
     const { summary, messages, path } = s;
     if (summary.merged_into) continue; // its messages live on in the thread it was merged into
-    const area = areaRow(areaOf({ mode: summary.mode, url: summary.url }).area);
+    const area = areaRow(areaOf({ mode: summary.mode, url: summary.url }, areas).area);
     const real = messages.filter(m => !m.divider);
     if (summary.created_at < firstSeen) firstSeen = summary.created_at;
 
@@ -152,7 +152,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
       else if (prev.author !== m.author) {
         const delta = ms(m.created_at) - ms(runStart!.created_at);
         if (delta >= 0 && inWindow(m.created_at) && (m.author === 'agent' || !summary.read_only)) {
-          (m.author === 'agent' ? agentSamples : userSamples).push({ ms: delta, area: areaOf({ mode: summary.mode, url: summary.url }).area });
+          (m.author === 'agent' ? agentSamples : userSamples).push({ ms: delta, area: areaOf({ mode: summary.mode, url: summary.url }, areas).area });
         }
         runStart = m;
       }
@@ -178,7 +178,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
     velocity: { per_day, per_hour: lastHours.map(h => hours.get(h)!), messages: { user: totals.user, agent: totals.agent }, opened: totals.opened, closed: totals.closed },
     response: { agent: stats(agentSamples.map(x => x.ms)), user: stats(userSamples.map(x => x.ms)) },
     workload,
-    areas: sortAreas([...areaRows.keys()]).map(k => areaRows.get(k)!).filter(a => a.threads > 0 || a._agent.length || a._user.length).map(({ _agent, _user, ...a }) => ({ ...a, agent_response: stats(_agent), user_response: stats(_user) })),
+    areas: sortAreas([...areaRows.keys()], areas).map(k => areaRows.get(k)!).filter(a => a.threads > 0 || a._agent.length || a._user.length).map(({ _agent, _user, ...a }) => ({ ...a, agent_response: stats(_agent), user_response: stats(_user) })),
     events: { count: events.length, by_kind, last_at: events.reduce<string | null>((hi, e) => (hi === null || e.ts > hi ? e.ts : hi), null) },
   };
 }

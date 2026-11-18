@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, PointerEvent } from 'react';
-import { canvasFor, loadImage } from './screenshot';
-import type { Shot } from './types';
-import { isInput, keyboardTarget, nativeButtonActivation, modifiers, keyLabel } from './shortcuts';
-import { Keycap } from './Keycap';
-import { StepHints } from './StepHints';
-import { focusInto, useModalFocus } from './focus';
+import { canvasFor, loadImage } from './screenshot.js';
+import type { Shot } from './types.js';
+import { isInput, keyboardTarget, nativeButtonActivation, modifiers, keyLabel } from './shortcuts.js';
+import { Keycap } from './Keycap.js';
+import { StepHints } from './StepHints.js';
+import { focusInto, useModalFocus } from './focus.js';
 type Tool = 'pen' | 'box' | 'arrow' | 'text';
 interface Point { x: number; y: number }
 interface Mark { tool: Tool; color: string; points: Point[]; text: string }

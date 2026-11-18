@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { isWidget, targetFor, rectFor, selectorFor, componentChain, sectionFor } from './elements';
-import { isWidgetEvent, nativeButtonActivation } from './shortcuts';
-import { focusInto, onAppControl } from './focus';
-import type { ElementTarget, Rect } from './types';
+import { isWidget, targetFor, rectFor, selectorFor, componentChain, sectionFor } from './elements.js';
+import { isWidgetEvent, nativeButtonActivation } from './shortcuts.js';
+import { focusInto, onAppControl } from './focus.js';
+import type { ElementTarget, Rect } from './types.js';
 export interface Highlight { rect: Rect; label: string; locked: boolean }
 export function usePicker(mode: 'element' | 'section' | null, active: boolean, onPick: (target: ElementTarget) => void, onLock?: (target: ElementTarget) => void) {
   const [hover, setHover] = useState<Highlight | null>(null);

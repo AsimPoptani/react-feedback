@@ -1,5 +1,5 @@
-import type { Capture } from './types';
-import type { OutboxRecord, OutboxStore } from './outboxStore';
+import type { Capture } from './types.js';
+import type { OutboxRecord, OutboxStore } from './outboxStore.js';
 type Body = Record<string, unknown>;
 export type OutboxStatus = 'capturing' | 'queued' | 'sending' | 'retrying' | 'failed';
 export interface OutboxView { id: string; label: string; text: string; status: OutboxStatus; reason?: string; attempts: number; stuck: boolean }

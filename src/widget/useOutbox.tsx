@@ -1,6 +1,6 @@
 import { createContext, useContext, useSyncExternalStore } from 'react';
-import { EMPTY } from './outboxQueue';
-import type { Outbox, OutboxSnapshot } from './outboxQueue';
+import { EMPTY } from './outboxQueue.js';
+import type { Outbox, OutboxSnapshot } from './outboxQueue.js';
 export const OutboxContext = createContext<Outbox | null>(null);
 const none = () => () => {};
 export function useOutbox(): Outbox | null { return useContext(OutboxContext); }

@@ -1,9 +1,10 @@
+"use client";
 import { Component, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createContext as createContext$1, domToCanvas } from "modern-screenshot";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 // src/widget/context.ts
 var KEY = Symbol.for("standalone.feedback.capture");
-var host = window;
+var host = typeof window === "undefined" ? {} : window;
 function cleanUrl(raw) {
 	try {
 		const url = new URL(raw, location.href);

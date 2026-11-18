@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { FeedbackList } from './FeedbackList';
+import { FeedbackList } from './FeedbackList.js';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Keycap } from './Keycap';
-import { focusInto } from './focus';
-import type { Rect } from './types';
+import { Keycap } from './Keycap.js';
+import { focusInto } from './focus.js';
+import type { Rect } from './types.js';
 interface Props { rect: Rect; focusKey?: number; onConfirm: () => void; onRedo: () => void; onCancel: () => void }
 /** A selection exists: Write note takes focus (on mount and whenever focusKey changes), so Enter presses it. */
 export function SelectionToolbar({ rect, focusKey = 0, onConfirm, onRedo, onCancel }: Props) {

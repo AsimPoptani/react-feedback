@@ -1,4 +1,4 @@
-import type { Rect, Shot } from './types';
+import type { Rect, Shot } from './types.js';
 interface Props {
     note: string;
     shot: Shot | null;

@@ -1,9 +1,9 @@
 import { useEffect, useRef } from 'react';
-import { Keycap } from './Keycap';
-import { StepHints } from './StepHints';
-import { SelectionToolbar } from './SelectionToolbar';
-import { focusInto, onAppControl } from './focus';
-import type { Highlight } from './usePicker';
+import { Keycap } from './Keycap.js';
+import { StepHints } from './StepHints.js';
+import { SelectionToolbar } from './SelectionToolbar.js';
+import { focusInto, onAppControl } from './focus.js';
+import type { Highlight } from './usePicker.js';
 interface Props {
   step: 'element' | 'section'; hover: Highlight | null; focusKey: number;
   onConfirm: () => void; onRedo: () => void; onCancel: () => void;

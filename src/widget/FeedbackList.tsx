@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Keycap } from './Keycap';
-import { Outbox } from './OutboxList';
-import type { FeedbackItem } from './types';
+import { Keycap } from './Keycap.js';
+import { Outbox } from './OutboxList.js';
+import type { FeedbackItem } from './types.js';
 export function FeedbackList({ endpoint, onClose }: { endpoint: string; onClose: () => void }) {
   const [items, setItems] = useState<FeedbackItem[]>([]);
   const [error, setError] = useState('');

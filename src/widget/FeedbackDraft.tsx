@@ -1,10 +1,10 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { Rect, Shot } from './types';
-import { Keycap } from './Keycap';
-import { modifiers, keyLabel } from './shortcuts';
-import { focusInto, useModalFocus } from './focus';
-import { CAPTURE_FAILED } from './draft';
+import type { Rect, Shot } from './types.js';
+import { Keycap } from './Keycap.js';
+import { modifiers, keyLabel } from './shortcuts.js';
+import { focusInto, useModalFocus } from './focus.js';
+import { CAPTURE_FAILED } from './draft.js';
 interface Props {
   note: string; shot: Shot | null; failed: boolean; annotated: string | null; clipped?: string; rect?: Rect;
   onNote: (value: string) => void; onEdit: () => void; onSave: () => void; onCancel: () => void;

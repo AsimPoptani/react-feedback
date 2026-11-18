@@ -1,4 +1,4 @@
-export { default as FeedbackWidget } from "./FeedbackWidget";
-export type { FeedbackWidgetProps } from "./FeedbackWidget";
-export { FeedbackErrorBoundary } from "./FeedbackErrorBoundary";
-export type { Capture, CaptureMode, ElementTarget, FeedbackItem, Rect, Shot, Target } from "./types";
+export { default as FeedbackWidget } from "./FeedbackWidget.js";
+export type { FeedbackWidgetProps } from "./FeedbackWidget.js";
+export { FeedbackErrorBoundary } from "./FeedbackErrorBoundary.js";
+export type { Capture, CaptureMode, ElementTarget, FeedbackItem, Rect, Shot, Target } from "./types.js";

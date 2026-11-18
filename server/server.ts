@@ -2,6 +2,8 @@ import { readdir, readFile, writeFile, lstat, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import * as store from './store';
 import { computeMetrics, checkWindow } from './metrics';
+import { loadAreas } from './config';
+import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
 
 const PREFIX = '/__feedback';
@@ -235,10 +237,11 @@ async function pinsRoute(req: Request, dir: string, path: string, read: (req: Re
   const data = await read(req);
   return json(await store.setPin(dir, { kind: data.kind, id: data.id, pinned: data.pinned }));
 }
-async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
+async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, areas: AreasConfig): Promise<Response | null> {
   const base = `${PREFIX}/api/threads`;
   if (path === base && req.method === 'GET') return json(await store.listThreads(dir, new URL(req.url).searchParams.get('q') ?? undefined));
-  if (path === `${PREFIX}/api/metrics` && req.method === 'GET') return json(await computeMetrics(dir, checkWindow(new URL(req.url).searchParams.get('window') ?? '7d')));
+  if (path === `${PREFIX}/api/metrics` && req.method === 'GET') return json(await computeMetrics(dir, checkWindow(new URL(req.url).searchParams.get('window') ?? '7d'), new Date(), areas));
+  if (path === `${PREFIX}/api/areas` && req.method === 'GET') return json(areas); // the one source of truth for how the inbox and the metrics group threads
   const profile = await profileRoute(req, dir, path, read);
   if (profile) return profile;
   const pins = await pinsRoute(req, dir, path, read);
@@ -269,7 +272,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   }
   return null;
 }
-export function createHandler(directory: string) {
+export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AREAS) {
   const dir = resolve(directory);
   return async (req: Request): Promise<Response> => {
     try {
@@ -279,7 +282,7 @@ export function createHandler(directory: string) {
       if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dir);
       const match = path.match(/^\/__feedback\/api\/items\/([^/]+)\/([^/]+)$/);
       if (match) return await itemRoute(req, dir, match[1]!, match[2]!);
-      const threads = await threadRoute(req, dir, path, body);
+      const threads = await threadRoute(req, dir, path, body, areas);
       if (threads) return threads;
       const embed = await embedRoute(req, path);
       if (embed) return embed;
@@ -294,7 +297,10 @@ export function createHandler(directory: string) {
   };
 }
 export const handle = createHandler(process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data'));
+// Reads FEEDBACK_AREAS or FEEDBACK_AREAS_JSON here, so a bad config stops the server at startup with a clear message.
 export function serverOptions(env: Record<string, string | undefined> = process.env) {
-  return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: LIMIT, fetch: handle };
+  const areas = loadAreas(env);
+  const fetch = env === process.env && areas === DEFAULT_AREAS ? handle : createHandler(env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data'), areas);
+  return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: LIMIT, fetch };
 }
 if (import.meta.main) Bun.serve(serverOptions());

@@ -10,6 +10,6 @@ export default defineConfig({
     sourcemap: false,
     minify: false,
     lib: { entry: "src/widget/index.ts", formats: ["es"], fileName: () => "index.js" },
-    rollupOptions: { external: ["react", "react-dom", "react/jsx-runtime", "modern-screenshot"] },
+    rollupOptions: { output: { banner: '"use client";' }, external: ["react", "react-dom", "react/jsx-runtime", "modern-screenshot"] },
   },
 });

@@ -1,4 +1,4 @@
-import type { Rect } from './types';
+import type { Rect } from './types.js';
 export declare function RegionPicker({ rect, onChange, onSettle, onCapture, onCancel }: {
     rect: Rect | null;
     onChange: (rect: Rect | null) => void;

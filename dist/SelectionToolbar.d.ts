@@ -1,4 +1,4 @@
-import type { Rect } from './types';
+import type { Rect } from './types.js';
 interface Props {
     rect: Rect;
     focusKey?: number;

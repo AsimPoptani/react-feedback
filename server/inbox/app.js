@@ -1,5 +1,5 @@
 // Feedback inbox. No build, no deps. All text goes through textContent; nothing is injected as HTML.
-import { areaLabel, areaOf, sortAreas } from './areas.js';
+import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas } from './areas.js';
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
 const MAX_IMAGES = 5;
@@ -8,7 +8,7 @@ const TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const $ = id => document.getElementById(id);
 
 const FOLD_KEY = 'fb-inbox-folds';
-const state = { metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, expanded: new Set(), clOpen: {}, clDraft: { agent: '', user: '' }, clEdit: null, clShown: '',
+const state = { metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clOpen: {}, clDraft: { agent: '', user: '' }, clEdit: null, clShown: '',
   view: null, q: '', openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -266,19 +266,19 @@ function drawList() {
   const rows = state.threads.filter(passes).sort(rank);
   const foldDone = state.filter === 'all' && !state.q && !state.view;
   const pinnedAreas = new Set(state.pins.areas);
-  const pinnedOnly = t => isPinned('thread', t.id) && !pinnedAreas.has(areaOf(t).area);
+  const pinnedOnly = t => isPinned('thread', t.id) && !pinnedAreas.has(areaOf(t, state.areaConfig).area);
   const by = new Map();
-  for (const t of rows) if (!pinnedOnly(t)) { const a = areaOf(t).area; (by.get(a) ?? by.set(a, []).get(a)).push(t); }
+  for (const t of rows) if (!pinnedOnly(t)) { const a = areaOf(t, state.areaConfig).area; (by.get(a) ?? by.set(a, []).get(a)).push(t); }
   state.order = [];
   const nodes = [];
-  const pinThreads = rows.filter(pinnedOnly), pinAreas = sortAreas([...by.keys()]).filter(k => pinnedAreas.has(k)).map(k => [k, areaLabel(k)]);
+  const pinThreads = rows.filter(pinnedOnly), pinAreas = sortAreas([...by.keys()], state.areaConfig).filter(k => pinnedAreas.has(k)).map(k => [k, areaLabel(k, state.areaConfig)]);
   if (pinThreads.length || pinAreas.length) {
     const box = el('section', { class: 'group pinned', 'data-group': 'pinned' }, el('h3', {}, el('span', { class: 'pinned-h', text: '★ Pinned' })));
     for (const [k, label] of pinAreas) box.append(groupNode(k, label, by.get(k), foldDone));
     if (pinThreads.length) box.append(el('ul', {}, ...pinThreads.map(threadRow)));
     nodes.push(box);
   }
-  for (const k of sortAreas([...by.keys()])) if (!pinnedAreas.has(k)) nodes.push(groupNode(k, areaLabel(k), by.get(k), foldDone));
+  for (const k of sortAreas([...by.keys()], state.areaConfig)) if (!pinnedAreas.has(k)) nodes.push(groupNode(k, areaLabel(k, state.areaConfig), by.get(k), foldDone));
   $('groups').replaceChildren(...nodes);
   $('list-empty').hidden = rows.length > 0;
   $('list-empty').textContent = state.q ? 'No thread matches that search.' : state.view === 'agent' ? 'Nothing is waiting for the agent.' : state.view === 'you' ? 'Nothing is waiting on you.' : 'No threads here.';
@@ -290,6 +290,10 @@ function drawList() {
 }
 async function refreshPins() {
   try { const p = await api('pins'); if (JSON.stringify(p) !== JSON.stringify(state.pins)) { state.pins = p; drawList(); drawPinThread(); } } catch { /* keep the last pins */ }
+}
+// The area rules come from the server, so the inbox groups threads the way the metrics do.
+async function refreshAreas() {
+  try { state.areaConfig = await api('areas'); } catch { /* keep the default grouping */ }
 }
 async function refreshList() {
   try { state.threads = await api(state.q ? `threads?q=${encodeURIComponent(state.q)}` : 'threads'); drawList(); } catch { /* keep the last list; the next poll retries */ }
@@ -858,4 +862,4 @@ setInterval(poll, POLL_MS);
 document.addEventListener('visibilitychange', poll);
 drawMe();
 refreshPins();
-refreshProfile().then(refreshList).then(route);
+Promise.all([refreshProfile(), refreshAreas()]).then(refreshList).then(route);

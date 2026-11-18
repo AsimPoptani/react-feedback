@@ -3,6 +3,7 @@
 import { appendFile, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { KEY } from './inbox/areas.js';
 
 export const ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
 export const STATUSES = ['open', 'done'] as const;
@@ -538,8 +539,9 @@ export async function openItems(dir: string, filter: 'mine' | 'claimed' | 'all')
 }
 
 // ---- Pins: which threads and which area groups sit in the Pinned section. One file, so they follow the user between devices.
-// An area key is the first path segment of the page (see inbox/areas.js), lower-cased, plus 'home' and 'conversations'.
-const AREA_KEY = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+// An area key is what inbox/areas.js derives: a configured key or the first path segment of the page, lower-cased ('home' and 'conversations' too),
+// optionally with a sub-group after a colon (`key:sub`). The same KEY pattern validates both, so anything the inbox derives can be pinned.
+const AREA_KEY = new RegExp(`^${KEY.source.slice(1, -1)}(?::${KEY.source.slice(1, -1)})?$`);
 export const isAreaKey = (value: unknown): value is string => typeof value === 'string' && AREA_KEY.test(value);
 export interface Pins { threads: string[]; areas: string[] }
 export async function readPins(dir: string): Promise<Pins> {

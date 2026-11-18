@@ -7,7 +7,12 @@ import { Invalid } from "../server/store";
 
 const args = process.argv.slice(2);
 if (args[0] === "serve") {
-  const server = Bun.serve(serverOptions());
+  let options: ReturnType<typeof serverOptions>;
+  try { options = serverOptions(); } catch (error) {
+    console.error(error instanceof Invalid ? error.message : error);
+    process.exit(1);
+  }
+  const server = Bun.serve(options);
   console.log(`react-feedback listening on http://${server.hostname}:${server.port} (inbox at /__feedback/inbox/)`);
 } else {
   run(args)

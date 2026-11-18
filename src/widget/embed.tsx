@@ -2,8 +2,8 @@
 // Mounts the widget on any page, with no build step on the host side.
 import { createRoot } from "react-dom/client";
 import css from "./feedback.css?inline";
-import { FeedbackErrorBoundary } from "./FeedbackErrorBoundary";
-import FeedbackWidget from "./FeedbackWidget";
+import { FeedbackErrorBoundary } from "./FeedbackErrorBoundary.js";
+import FeedbackWidget from "./FeedbackWidget.js";
 
 function mount(endpoint: string) {
   const style = document.createElement("style");

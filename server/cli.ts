@@ -20,9 +20,13 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as store from './store';
 import { checkWindow, computeMetrics, formatMetrics } from './metrics';
+import { loadAreas } from './config';
+import type { AreasConfig } from './inbox/areas.js';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
+  react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON)
+  react-feedback --help
   react-feedback reply <id> "text" [--image path ...]
   react-feedback new "title" "text" [--image path ...]
   react-feedback status <id> open|done   (seen is an alias for open)
@@ -101,8 +105,9 @@ async function list(dir: string, waiting: boolean): Promise<string> {
   if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
   return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}`).join('\n');
 }
-export async function run(argv: string[], dir = defaultDir()): Promise<string> {
+export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig): Promise<string> {
   const [command, ...rest] = argv;
+  if (command === '--help' || command === '-h' || command === 'help') return USAGE;
   const { words, images, flags, options, avatar, window } = split(rest);
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
@@ -110,7 +115,7 @@ export async function run(argv: string[], dir = defaultDir()): Promise<string> {
     return r.merged ? `Merged ${words[0]} into ${words[1]}` : `${words[0]} was already merged into ${words[1]}`;
   }
   if (command === 'todos') return todos(dir, flags);
-  if (command === 'metrics' && words.length === 0) return formatMetrics(await computeMetrics(dir, checkWindow(window ?? '7d')));
+  if (command === 'metrics' && words.length === 0) return formatMetrics(await computeMetrics(dir, checkWindow(window ?? '7d'), new Date(), areas ?? loadAreas()));
   if (command === 'ack' && words.length === 1) { await store.ackThread(dir, words[0]!); return `Acknowledged the latest message on ${words[0]}`; }
   if (command === 'readonly' && words.length === 2 && (words[1] === 'on' || words[1] === 'off')) {
     await store.setReadOnly(dir, words[0]!, words[1] === 'on');

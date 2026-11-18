@@ -247,14 +247,14 @@ test('pins: toggle threads and areas, persisted server-side in _profile/pins.jso
   const id = await start();
   expect(await get('pins')).toEqual({ threads: [], areas: [] });
   expect(await (await call('POST', 'pins', { kind: 'thread', id })).json()).toEqual({ threads: [id], areas: [] }); // omitted pinned toggles
-  expect(await (await call('POST', 'pins', { kind: 'area', id: 'ops', pinned: true })).json()).toEqual({ threads: [id], areas: ['ops'] });
-  await call('POST', 'pins', { kind: 'area', id: 'ops', pinned: true }); // idempotent
-  expect((await get('pins')).areas).toEqual(['ops']);
+  expect(await (await call('POST', 'pins', { kind: 'area', id: 'billing', pinned: true })).json()).toEqual({ threads: [id], areas: ['billing'] });
+  await call('POST', 'pins', { kind: 'area', id: 'billing', pinned: true }); // idempotent
+  expect((await get('pins')).areas).toEqual(['billing']);
   const disk = JSON.parse(await readFile(join(dir, '_profile', 'pins.json'), 'utf8'));
-  expect(disk).toEqual({ threads: [id], areas: ['ops'] });
+  expect(disk).toEqual({ threads: [id], areas: ['billing'] });
   // a new handler (a reload, or another device) sees the same pins
   expect(await (await createHandler(dir)(new Request('http://local/__feedback/api/pins'))).json()).toEqual(disk);
-  expect(await (await call('POST', 'pins', { kind: 'thread', id, pinned: false })).json()).toEqual({ threads: [], areas: ['ops'] });
+  expect(await (await call('POST', 'pins', { kind: 'thread', id, pinned: false })).json()).toEqual({ threads: [], areas: ['billing'] });
   for (const bad of [{ kind: 'thread', id: 'nope' }, { kind: 'area', id: 'Not An Area!' }, { kind: 'cat', id }, { kind: 'thread', id, pinned: 'yes' }, {}]) {
     expect((await call('POST', 'pins', bad)).status).toBe(400);
   }

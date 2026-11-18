@@ -118,8 +118,8 @@ test('velocity: messages by day and hour, threads opened and closed', async () =
 // ---- workload and areas
 test('workload and areas: open, waiting, the oldest waiting thread, checklist counts, merged and read-only threads', async () => {
   await seed('20261118-080000-aaaa', { title: 'Home one', mode: 'element', url: '/', messages: [['user', t(4)], ['user', t(3.5)]] }); // waits for the agent since -4h
-  await seed('20261118-080001-aaab', { title: 'Ops one', mode: 'element', url: '/ops/x', messages: [['user', t(6)], ['agent', t(5), 'needs_you']] }); // waits on you since -5h
-  await seed('20261118-080002-aaac', { title: 'Fields', mode: 'element', url: '/fields/f1', status: 'done', messages: [['user', t(9)], ['agent', t(8), 'done']] });
+  await seed('20261118-080001-aaab', { title: 'Billing one', mode: 'element', url: '/billing/x', messages: [['user', t(6)], ['agent', t(5), 'needs_you']] }); // waits on you since -5h
+  await seed('20261118-080002-aaac', { title: 'Projects', mode: 'element', url: '/projects/p1', status: 'done', messages: [['user', t(9)], ['agent', t(8), 'done']] });
   await seed('20261118-080003-aaad', { title: 'Talk', messages: [['user', t(2)], ['agent', t(1), 'fyi']] });
   await seed('20261118-080004-aaae', { title: 'Updates', readOnly: true, messages: [['agent', t(1)], ['agent', t(0.5), 'needs_you']] });
   const id = '20261118-080001-aaab';
@@ -133,13 +133,13 @@ test('workload and areas: open, waiting, the oldest waiting thread, checklist co
   expect(m.workload.checklist).toEqual({ open: 1, claimed: 1, ticked: 1 });
   expect(m.workload.oldest_waiting).toMatchObject({ id, waiting: 'you', since: t(5), age_ms: 5 * 3600e3 });
   const area = Object.fromEntries(m.areas.map(a => [a.area, a]));
-  expect(m.areas.map(a => a.area)).toEqual(['home', 'fields', 'ops', 'conversations']);
+  expect(m.areas.map(a => a.area)).toEqual(['home', 'billing', 'projects', 'conversations']);
   expect(area.home).toMatchObject({ threads: 1, open: 1, waiting_agent: 1, waiting_you: 0, messages_user: 2, messages_agent: 0 });
-  expect(area.ops).toMatchObject({ threads: 1, waiting_you: 1 });
-  expect(area.fields).toMatchObject({ threads: 1, open: 0 });
+  expect(area.billing).toMatchObject({ threads: 1, waiting_you: 1 });
+  expect(area.projects).toMatchObject({ threads: 1, open: 0 });
   expect(area.conversations).toMatchObject({ threads: 2, open: 2, waiting_agent: 0, waiting_you: 0 });
-  expect(area.fields.agent_response.median).toBe(3600e3);
-  // a read-only thread gives no user response samples; the others give: ops 0 (user first), none for user
+  expect(area.projects.agent_response.median).toBe(3600e3);
+  // a read-only thread gives no user response samples; the others give: billing 0 (user first), none for user
   expect(m.response.user.count).toBe(0);
 });
 

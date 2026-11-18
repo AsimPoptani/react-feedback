@@ -2,9 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import FeedbackWidget from './FeedbackWidget';
-import { getContext, installCapture } from './context';
-import { componentChain, selectorFor, sectionFor } from './elements';
+import FeedbackWidget from './FeedbackWidget.js';
+import { getContext, installCapture } from './context.js';
+import { componentChain, selectorFor, sectionFor } from './elements.js';
 import type { Context, Options } from 'modern-screenshot';
 import { domToCanvas } from 'modern-screenshot';
 // The widget builds one context per capture (createContext) and renders it (domToCanvas(context)); the fake context keeps the options.

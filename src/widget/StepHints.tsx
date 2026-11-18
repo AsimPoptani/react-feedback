@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Keycap } from './Keycap';
-import { modifiers, keyLabel } from './shortcuts';
+import { Keycap } from './Keycap.js';
+import { modifiers, keyLabel } from './shortcuts.js';
 type Hint = { key?: string; word: string; touch?: string; touchOnly?: boolean };
 function hintsFor(step: string, locked: boolean): Hint[] {
   const { alt } = modifiers();

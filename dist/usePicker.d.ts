@@ -1,4 +1,4 @@
-import type { ElementTarget, Rect } from './types';
+import type { ElementTarget, Rect } from './types.js';
 export interface Highlight {
     rect: Rect;
     label: string;

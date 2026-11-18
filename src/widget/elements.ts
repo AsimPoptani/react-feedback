@@ -1,4 +1,4 @@
-import type { ElementTarget, Rect } from './types';
+import type { ElementTarget, Rect } from './types.js';
 export const isWidget = (element: Element) => !!element.closest('[data-feedback-root]');
 function unique(selector: string) { return document.querySelectorAll(selector).length === 1; }
 function preferred(element: Element): string | null {

@@ -1,5 +1,5 @@
-import { isWidget, rectFor, selectorFor } from './elements';
-import type { Rect } from './types';
+import { isWidget, rectFor, selectorFor } from './elements.js';
+import type { Rect } from './types.js';
 interface Positioned { selector: string; rect: Rect; sticky: boolean; clip: string | null }
 // Reset only document scroll restoration; nested scrollers keep their offsets.
 export function documentClone() {

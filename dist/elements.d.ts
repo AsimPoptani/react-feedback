@@ -1,4 +1,4 @@
-import type { ElementTarget, Rect } from './types';
+import type { ElementTarget, Rect } from './types.js';
 export declare const isWidget: (element: Element) => boolean;
 export declare function selectorFor(element: Element): string;
 export declare function componentChain(element: Element): string[];

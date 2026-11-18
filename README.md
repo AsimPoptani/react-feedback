@@ -49,9 +49,9 @@ const FeedbackWidget = import.meta.env.VITE_FEEDBACK === "1"
   : null;
 ```
 
-**Server-side rendering:** the widget uses `window` when it loads, so render it on the client only. In Next.js, use `dynamic(() => import("react-feedback").then((m) => m.FeedbackWidget), { ssr: false })` in a client component.
+**Server-side rendering:** importing the package on the server is safe (nothing touches `window` at load, and the entry carries `"use client"`), but the widget only works in the browser, so mount it on the client. In Next.js, use `dynamic(() => import("react-feedback").then((m) => m.FeedbackWidget), { ssr: false })` in a client component.
 
-**TypeScript:** the shipped types assume `moduleResolution: "bundler"` (the default for Vite and Next.js). With `node16`/`nodenext` resolution the types don't resolve yet.
+**TypeScript:** the shipped types resolve under `bundler`, `node16` and `nodenext` module resolution.
 
 Exports: `FeedbackWidget`, `FeedbackErrorBoundary`, and the types `FeedbackWidgetProps`, `Capture`, `CaptureMode`, `ElementTarget`, `FeedbackItem`, `Rect`, `Shot`, `Target`.
 
@@ -91,6 +91,8 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_HOST` | `127.0.0.1` | bind address (the shell's `HOST` is ignored) |
 | `PORT` | `8099` | port |
 | `FEEDBACK_AGENT_NAME` | `Agent` | display name of the agent in the inbox |
+| `FEEDBACK_AREAS` | none | path to a JSON file that configures the inbox areas (see [Inbox areas](#inbox-areas)) |
+| `FEEDBACK_AREAS_JSON` | none | the same configuration as inline JSON (set only one of the two) |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
 
@@ -172,7 +174,33 @@ Pick a mode, select a target, write one note, press Save. Saving sends at once f
 
 ## The inbox
 
-`/__feedback/inbox/` lists threads grouped by the first segment of the page path they were taken on (`/billing/plans` goes under "Billing", `/` under "Home", threads started without a capture under "Conversations"). It shows status pills and unread dots, a thread view with the original capture and message bubbles, a composer (Cmd/Ctrl+Enter sends, paste or attach images), checklists for the person and the agent, pins, merging, a read-only "updates" thread type, and a **Metrics** page (velocity, response times, workload, by-area table). Press `?` for the inbox shortcuts. Text is escaped; only bold, italics, inline code, `-` lists and http links are rendered.
+`/__feedback/inbox/` lists threads grouped by area. By default an area is the first segment of the page path they were taken on (`/billing/plans` goes under "Billing", `/` under "Home", threads started without a capture under "Conversations"); see [Inbox areas](#inbox-areas) to name and group them yourself. It shows status pills and unread dots, a thread view with the original capture and message bubbles, a composer (Cmd/Ctrl+Enter sends, paste or attach images), checklists for the person and the agent, pins, merging, a read-only "updates" thread type, and a **Metrics** page (velocity, response times, workload, by-area table). Press `?` for the inbox shortcuts. Text is escaped; only bold, italics, inline code, `-` lists and http links are rendered.
+
+### Inbox areas
+
+Out of the box the inbox groups by the first path segment. To use your own groups and labels, give the server a list of rules in a JSON file (`FEEDBACK_AREAS=/path/to/areas.json`) or inline (`FEEDBACK_AREAS_JSON='[...]'`):
+
+```json
+[
+  { "key": "home", "label": "Start page", "match": "/", "exact": true },
+  { "key": "billing", "label": "Billing", "match": "/billing" },
+  { "key": "projects", "label": "Projects", "match": "/projects/", "sub": 1 }
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `key` | the group's id: 1 to 40 characters of `a-z`, `0-9`, `_` or `-`, unique; used for pins. `conversations` is reserved |
+| `label` | the heading shown in the inbox and the metrics (up to 80 characters) |
+| `match` | a path prefix starting with `/`. `/billing` matches `/billing` and everything under it, but not `/billingx`. Case-insensitive; the query string and fragment are ignored |
+| `exact` | optional; match only that exact path (`"/"` with `exact` is the home page alone, without it `"/"` would match every page) |
+| `sub` | optional whole number; make one sub-group per value of the nth path segment after the prefix, so `/projects/p1/tasks` becomes "Projects / p1". A path with no such segment goes in the plain area |
+
+The first rule that matches wins, so put specific rules before general ones. A path that matches no rule falls back to the first-segment grouping. Configured groups are listed first, in the order you wrote them (sub-groups alphabetically), then the fallback groups, then "Conversations".
+
+Threads started without a capture go under "Conversations". To rename that group, write the config as an object: `{ "areas": [ ... ], "conversations": "Chats" }`.
+
+The server checks the config when it starts and refuses to run with a clear message if it is wrong (unknown field, duplicate key, bad `match`, unreadable file). It serves the effective list at `GET /__feedback/api/areas`, which the inbox reads, so the inbox, the pins and the metrics (the `metrics` command included, which reads the same variables) all group the same way. A group key is the rule's `key`, or `key:sub` for a sub-group; both can be pinned.
 
 ## CLI
 
@@ -180,6 +208,7 @@ The CLI writes straight into `FEEDBACK_DIR` through the same store the server us
 
 ```sh
 react-feedback serve                                            # start the server
+react-feedback --help                                           # print the usage
 react-feedback list [--waiting]                                 # threads waiting for the agent
 react-feedback reply <id> "text" [--image a.png --image b.jpg]
 react-feedback new "title" "text" [--image path ...]            # an agent-started thread
@@ -200,7 +229,7 @@ react-feedback metrics [--window 24h|7d|all]
 
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge`; `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/metrics?window=24h|7d|all`.
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge`; `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`.
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 

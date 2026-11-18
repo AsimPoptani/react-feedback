@@ -2,7 +2,8 @@ interface LogEntry { level: 'warn' | 'error'; message: string }
 interface FailedFetch { method: string; url: string; status?: number; error?: string }
 interface Capture { console: LogEntry[]; failedFetches: FailedFetch[] }
 const KEY = Symbol.for('standalone.feedback.capture');
-const host = window as Window & { [KEY]?: Capture };
+// Guarded so that importing the package on a server (SSR) does not throw; the capture is only installed in the browser.
+const host = (typeof window === 'undefined' ? {} : window) as Window & { [KEY]?: Capture };
 export function cleanUrl(raw: string): string {
   try { const url = new URL(raw, location.href); return `${url.origin}${url.pathname}`; }
   catch { return raw.split(/[?#]/)[0] ?? ''; }

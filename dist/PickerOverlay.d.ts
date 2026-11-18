@@ -1,4 +1,4 @@
-import type { Highlight } from './usePicker';
+import type { Highlight } from './usePicker.js';
 interface Props {
     step: 'element' | 'section';
     hover: Highlight | null;
