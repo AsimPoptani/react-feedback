@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "declaration": true, "emitDeclarationOnly": true, "outDir": "dist", "rootDir": "src/widget", "types": ["vite/client"] },
+  "include": ["src/widget"],
+  "exclude": ["src/widget/**/*.test.ts", "src/widget/**/*.test.tsx", "src/widget/embed.tsx"]
+}
