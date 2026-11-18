@@ -1,0 +1,15 @@
+// Biome is the linter only: the formatter and import sorting stay off.
+{
+  "vcs": { "enabled": false },
+  "files": { "includes": ["src/**", "server/*.ts", "bin/**", "*.ts", "!dist"] },
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "style": { "noNonNullAssertion": "off", "useTemplate": "off" },
+      "complexity": { "useMathMinMax": "off", "useOptionalChain": "off" }
+    }
+  }
+}

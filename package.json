@@ -1,0 +1,59 @@
+{
+  "name": "react-feedback",
+  "version": "0.1.0",
+  "description": "A drop-in feedback widget for React apps (region, element, section and page screenshots with a note) plus a small Bun server, inbox and CLI.",
+  "license": "MIT",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/AsimPoptani/react-feedback.git" },
+  "homepage": "https://github.com/AsimPoptani/react-feedback#readme",
+  "bugs": { "url": "https://github.com/AsimPoptani/react-feedback/issues" },
+  "keywords": ["react", "feedback", "screenshot", "widget", "bun"],
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./feedback.css": "./dist/feedback.css",
+    "./embed.js": "./dist/embed.js",
+    "./package.json": "./package.json"
+  },
+  "bin": { "react-feedback": "./bin/react-feedback.ts" },
+  "files": ["dist", "bin", "server", "!server/*.test.ts", "README.md", "LICENSE"],
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
+    "lint": "biome lint --error-on-warnings .",
+    "test": "bun run test:widget && bun run test:server",
+    "test:widget": "vitest run",
+    "test:server": "bun test server",
+    "build": "bun run build:lib && bun run build:embed && bun run build:types && cp src/widget/feedback.css dist/feedback.css",
+    "build:lib": "vite build --config vite.lib.config.ts",
+    "build:embed": "vite build --config vite.embed.config.ts",
+    "build:types": "tsc -p tsconfig.build.json",
+    "serve": "bun bin/react-feedback.ts serve"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "dependencies": {
+    "modern-screenshot": "4.7.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.10",
+    "@types/bun": "^1.3.0",
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "happy-dom": "^21.0.4",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "typescript": "6.0.3",
+    "vite": "^8.3.8",
+    "vitest": "5.0.5"
+  },
+  "packageManager": "bun@1.3.10"
+}
