@@ -1,0 +1,5 @@
+node_modules
+feedback-data
+.tsbuildinfo
+*.log
+.DS_Store
