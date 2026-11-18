@@ -528,6 +528,7 @@ async function changeChecklist<T>(dir: string, id: string, by: Author, fn: (item
     const items = await readChecklist(path);
     const result = fn(items);
     await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
+    if (by === 'agent') { const item = await readItem(path); await stampRead(path, 'agent-read.json', lastAt(await readMessages(path, item), item)); } // acting on the thread means the agent has seen it
     return result;
   });
 }
@@ -730,6 +731,17 @@ async function planChecklistMove(from: string, into: string, only?: Set<string>)
   }
   return { moving, staying, existing, fresh, ids };
 }
+// Advances `into`'s read marker to what `from` had read, stopping short of the target's own oldest message (by the other side) that is still unread.
+async function carryRead(from: string, into: string, targetMessages: Message[], file: string, unreadable: (m: Message) => boolean): Promise<void> {
+  const theirs = await readAt(from, file);
+  if (theirs === null) return;
+  const mine = await readAt(into, file);
+  const blocked = targetMessages.filter(m => unreadable(m) && !m.divider && (mine === null || m.created_at > mine)).map(m => m.created_at).sort()[0];
+  let to = theirs;
+  if (blocked !== undefined && blocked <= to) to = new Date(Date.parse(blocked) - 1).toISOString();
+  if (mine !== null && to <= mine) return;
+  await stampRead(into, file, to);
+}
 async function moveChecklist(from: string, into: string, plan: ChecklistMove): Promise<void> {
   if (!plan.moving.length) return;
   if (plan.existing.length + plan.fresh.length > MAX_ITEMS) throw new Invalid(`The merged checklist would hold more than ${MAX_ITEMS} items`);
@@ -759,6 +771,9 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
   const plan = await planChecklistMove(from, into);
   if (!copied) await copyMessages(from, into, source, target.slice(0, note.base), note.at, divider, plan.ids);
   await moveChecklist(from, into, plan);
+  // What either side had already read in the source stays read in the target (ticks), but never past a message of the target they have not read.
+  await carryRead(from, into, target.slice(0, note.base), 'agent-read.json', m => m.author === 'user');
+  await carryRead(from, into, target.slice(0, note.base), 'read.json', m => m.author === 'agent');
   if (note.await_agent) {
     await writeAtomic(join(into, 'awaiting-agent.json'), JSON.stringify({ at: note.at, from: fromId }));
     await writeStatus(into, 'open');
@@ -798,6 +813,15 @@ export async function moveMessages(dir: string, fromId: string, msgIds: string[]
   const result = await withLock(first, () => withLock(second, () => moveLocked(from, into, fromId, toId, msgIds)));
   if (result.moved.length) await logEvent(dir, { id: fromId, kind: 'move', text: `${result.moved.join(' ')} from ${fromId} into ${toId}`, author: by });
   return { moved: result.moved, into: toId };
+}
+// Whether any of `moving` is a user message (or side question) the agent has not answered in `source`.
+function unansweredUser(source: Message[], moving: Message[]): boolean {
+  const gone = new Set(moving.map(m => m.id));
+  return moving.some(m => {
+    if (m.author !== 'user' || m.answer || m.divider) return false;
+    if (isAside(m)) return !source.some(x => isAside(x) && x.author === 'agent' && x.reply_to === m.id);
+    return !source.slice(source.indexOf(m) + 1).some(x => x.author === 'agent' && !x.divider && !isAside(x) && !gone.has(x.id));
+  });
 }
 async function moveLocked(from: string, into: string, fromId: string, toId: string, msgIds: string[]): Promise<{ moved: string[] }> {
   if (await readMerge(from) || await readMerge(into)) throw new Invalid('A merged thread cannot take part in a move', 409);
@@ -859,6 +883,8 @@ async function moveLocked(from: string, into: string, fromId: string, toId: stri
   const stubText = `Moved to [${titleOf(intoItem, toId)}](#/${toId})`;
   const stubbed = source.map(m => (ids.has(m.id) ? { id: m.id, author: 'agent' as const, text: stubText, images: [], created_at: m.created_at, divider: true as const, moved_to: toId } : m));
   await writeAtomic(join(from, 'thread.jsonl'), stubbed.map(m => `${JSON.stringify(m)}\n`).join(''));
+  // A moved message keeps its old time, so an acknowledgement of the target can wrongly cover it: like a merge, wait for the agent until it answers.
+  if (unansweredUser(source, moving)) await writeAtomic(join(into, 'awaiting-agent.json'), JSON.stringify({ at: new Date().toISOString(), from: fromId }));
   if (moving.some(m => m.author === 'user')) await writeStatus(into, 'open');
   return { moved: moving.map(m => m.id) };
 }
@@ -989,8 +1015,10 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
     agent_read_at: await readAt(path, 'agent-read.json'), open_question: openQuestions(messages).length > 0, waiting: 'done',
     last_flag: lastAgent?.flag ?? null, checklist: checklistCounts(items), open_for_you: items.filter(i => i.owner === 'user' && !i.done && !i.claimed_by_user_at).length,
     merged_into: (await readMerge(path))?.state === 'done' ? (await readMerge(path))!.into : null, read_only: readOnly, acked_through: acked };
-  summary.waiting = main.length === 0 && messages.some(m => m.moved_to) ? (summary.status === 'done' ? 'done' : 'idle') : waitingOn(summary.status, main, items, await readAwait(path), readOnly, acked);
-  const asideWaiting = !readOnly && !summary.merged_into && asideGroups(messages, acked).some(g => !g.answered);
+  const awaitAt = await readAwait(path);
+  summary.waiting = main.length === 0 && messages.some(m => m.moved_to) ? (summary.status === 'done' ? 'done' : 'idle') : waitingOn(summary.status, main, items, awaitAt, readOnly, acked);
+  const awaiting = awaitAt !== null && !messages.some(m => m.author === 'agent' && !m.divider && m.created_at > awaitAt); // a merge or move brought something the agent has not answered: an old ack does not cover it
+  const asideWaiting = !readOnly && !summary.merged_into && asideGroups(messages, awaiting ? null : acked).some(g => !g.answered);
   if (asideWaiting) { summary.waiting_aside = true; if (summary.waiting !== 'you') summary.waiting = 'agent'; }
   return { summary, messages, item, path };
 }

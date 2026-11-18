@@ -9,6 +9,11 @@
 - **Tracker.** `#/tracker` and `GET api/tracker` list every item across the threads, grouped For you, For the agent and Done recently, with a donut, filters and search; CLI `tracker [--mine|--claimed|--open]`.
 - **Markdown in message bodies.** Headings, tables, nested and ordered lists, task lists, blockquotes, rules, code, links (https, mailto, in-app), bold, italic, strikethrough, line breaks; no HTML is ever parsed. Snippets, previews and the tracker show plain text.
 
+### Fixed
+- Markdown: quotes and lists nested more than 8 levels deep are shown as plain text, so a message of thousands of `>` can no longer overflow the stack and stop a thread from opening. Unmatched emphasis, stray brackets and backticks, long space runs and blank-line runs are now linear-time.
+- `move` into a thread the agent had already acknowledged no longer hides an unanswered user message (or side question) from the agent's queue.
+- Merging a thread keeps what the agent (and the user) had already read in it, so ticks carry over, without marking an unread message of the target as read. An agent checklist change marks the thread read for the agent, as a reply does.
+
 ### Changed
 - Links in messages: only https, mailto and in-app `#/` links are made links (plain `http://` links are shown as text).
 - A single line break in a message is a `<br>` instead of a preserved newline; lines that look like a Markdown list, table or heading now render as one.

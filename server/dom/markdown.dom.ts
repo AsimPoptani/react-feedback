@@ -130,6 +130,36 @@ describe('markdown: nothing becomes HTML', () => {
   });
 });
 
+describe('markdown: hostile input stays cheap and cannot overflow the stack', () => {
+  const time = (fn: () => void) => { const t = Date.now(); fn(); return Date.now() - t; };
+  it('10,000 nested ">" renders in well under 50 ms with no throw; deeper levels are plain text', () => {
+    let r!: HTMLElement;
+    expect(time(() => { r = render(`${'>'.repeat(10000)} deep`); })).toBeLessThan(50);
+    expect(r.querySelectorAll('blockquote').length).toBe(8);
+    expect(r.textContent).toContain('> deep'.slice(2));
+    expect(time(() => render(`${'> '.repeat(10000)}x`))).toBeLessThan(50);
+    expect(time(() => render(Array.from({ length: 6000 }, (_, i) => `${'>'.repeat(i % 50 + 1)} line`).join('\n')))).toBeLessThan(500);
+  });
+  it('quotes and lists nested inside each other are capped too', () => {
+    expect(() => render(`${'> - '.repeat(5000)}x`)).not.toThrow();
+    const nest = Array.from({ length: 3000 }, (_, i) => `${' '.repeat(i * 2)}- item ${i}`).join('\n');
+    let r!: HTMLElement;
+    expect(time(() => { r = render(nest); })).toBeLessThan(1000);
+    expect(r.querySelectorAll('ul').length).toBeLessThanOrEqual(10);
+  });
+  it('the slow paths are linear: unmatched emphasis, long space runs, blank lines inside a list, stray brackets and backticks', () => {
+    expect(time(() => render('**a '.repeat(2500)))).toBeLessThan(100);
+    expect(time(() => render('*a '.repeat(3300)))).toBeLessThan(100);
+    expect(time(() => render('[a '.repeat(3300)))).toBeLessThan(100);
+    expect(time(() => render('`a '.repeat(3300)))).toBeLessThan(100);
+    expect(time(() => render('[a](b '.repeat(1600)))).toBeLessThan(100);
+    expect(time(() => render(`- a${'\n'.repeat(10000)}  b`))).toBeLessThan(100);
+    expect(time(() => plainText(`${' '.repeat(10000)}x${' '.repeat(10000)}`))).toBeLessThan(100);
+    expect(time(() => plainText(`a${' '.repeat(10000)}b | c`))).toBeLessThan(100);
+    expect(time(() => firstPlainLine(`${'**'.repeat(5000)}`))).toBeLessThan(100);
+  });
+});
+
 describe('plain text for snippets', () => {
   it('strips Markdown marks', () => {
     expect(plainText('**bold** and `code` and [link](https://x.example) ~~gone~~')).toBe('bold and code and link gone');

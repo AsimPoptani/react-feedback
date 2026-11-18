@@ -8,6 +8,8 @@ const el = (tag, props = {}) => {
   for (const [k, v] of Object.entries(props)) { if (k === 'text') n.textContent = v; else n.setAttribute(k, v); }
   return n;
 };
+const LINK = /\(\s*((?:[^\s()]|\([^\s()]*\))+)(?:\s+"[^"]*")?\s*\)/y; // sticky, so no slice of the rest of the text per attempt
+const AUTO = /https:\/\/[^\s<>"]+/iy;
 const SAFE_LINK = /^(?:https:\/\/[^\s<>"]+|mailto:[^\s<>"]+|#\/[\w-]+(?:\/c\d+)?)$/i;
 export const safeHref = url => SAFE_LINK.test(url);
 const PUNCT = /[!-/:-@[-`{-~]/;
@@ -15,7 +17,13 @@ const isSpace = c => c === undefined || /\s/.test(c);
 const isWord = c => c !== undefined && /[\p{L}\p{N}]/u.test(c);
 
 // ---- Inline: scans left to right; anything that is not a complete, valid construct stays literal text.
-function closer(s, from, delim) { // the next unescaped `delim` after `from` that follows a non-space and (for `*`/`_`) is not part of a longer run
+function closer(s, from, delim, memo) { // the next unescaped `delim` after `from` that follows a non-space and (for `*`/`_`) is not part of a longer run
+  if (memo.failed[delim] !== undefined && from >= memo.failed[delim]) return -1; // a search that found nothing from here finds nothing from any later point
+  const at = scan(s, from, delim);
+  if (at < 0) memo.failed[delim] = Math.min(memo.failed[delim] ?? Infinity, from);
+  return at;
+}
+function scan(s, from, delim) {
   for (let i = from; i < s.length; i++) {
     if (s[i] === '\\') { i++; continue; }
     if (s[i] === '`') { const e = s.indexOf('`', i + 1); if (e > 0) { i = e; continue; } }
@@ -29,6 +37,7 @@ function closer(s, from, delim) { // the next unescaped `delim` after `from` tha
   return -1;
 }
 export function inline(text, parent = document.createDocumentFragment(), depth = 0) {
+  const memo = { failed: {}, tick: {}, noBracket: Infinity }; // what an earlier look-ahead already proved absent, so scanning stays linear
   let lit = '';
   const flush = () => { if (lit) { parent.append(lit); lit = ''; } };
   const s = String(text);
@@ -37,12 +46,16 @@ export function inline(text, parent = document.createDocumentFragment(), depth =
     if (c === '\\' && PUNCT.test(s[i + 1] ?? '')) { lit += s[i + 1]; i += 2; continue; }
     if (c === '`') {
       let n = 1; while (s[i + n] === '`') n++;
-      const end = s.indexOf('`'.repeat(n), i + n);
+      const end = memo.tick[n] !== undefined && i + n >= memo.tick[n] ? -1 : s.indexOf('`'.repeat(n), i + n);
+      if (end < 0) memo.tick[n] = Math.min(memo.tick[n] ?? Infinity, i + n);
       if (end > 0) { flush(); parent.append(el('code', { text: s.slice(i + n, end).replace(/^ (.*) $/, '$1') })); i = end + n; continue; }
       lit += '`'.repeat(n); i += n; continue;
     }
     if (c === '[' && depth < 3) {
-      const close = s.indexOf(']', i + 1), m = close > 0 && s[close + 1] === '(' ? /^\(\s*((?:[^\s()]|\([^\s()]*\))+)(?:\s+"[^"]*")?\s*\)/.exec(s.slice(close + 1)) : null;
+      const close = i + 1 >= memo.noBracket ? -1 : s.indexOf(']', i + 1);
+      if (close < 0) memo.noBracket = Math.min(memo.noBracket, i + 1);
+      LINK.lastIndex = close + 1;
+      const m = close > 0 && s[close + 1] === '(' ? LINK.exec(s) : null;
       if (m && close > i + 1) {
         flush();
         const label = s.slice(i + 1, close);
@@ -56,13 +69,14 @@ export function inline(text, parent = document.createDocumentFragment(), depth =
       }
     }
     if (c === 'h' && depth < 3 && /^https:\/\//i.test(s.slice(i, i + 8)) && !isWord(s[i - 1])) {
-      const m = /^https:\/\/[^\s<>"]+/i.exec(s.slice(i));
+      AUTO.lastIndex = i;
+      const m = AUTO.exec(s);
       const url = m[0].replace(/[.,;:!?)\]*_~]+$/, '');
       flush(); const a = el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: url }); parent.append(a); i += url.length; continue;
     }
     const delim = s.startsWith('**', i) ? '**' : s.startsWith('__', i) ? '__' : s.startsWith('~~', i) ? '~~' : c === '*' || c === '_' ? c : null;
     if (delim && depth < 6 && !isSpace(s[i + delim.length]) && !(delim[0] === '_' && isWord(s[i - 1]))) {
-      const end = closer(s, i + delim.length, delim);
+      const end = closer(s, i + delim.length, delim, memo);
       if (end > 0) {
         flush();
         const node = el(delim === '~~' ? 'del' : delim.length === 2 ? 'strong' : 'em');
@@ -89,10 +103,11 @@ function cells(line) {
   const t = line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '');
   return t.split(/(?<!\\)\|/).map(c => c.replace(/\\\|/g, '|').trim());
 }
-const startsBlock = (l, next) => FENCE.test(l) || HEADING.test(l) || HR.test(l) || QUOTE.test(l) || (ITEM.test(l) && (!/^\s*\d/.test(l) || /^\s*1[.)]/.test(l))) || isTable(l, next);
+export const MAX_DEPTH = 8; // quotes and lists nest this far; deeper marks are plain text, so a hostile message cannot exhaust the stack
+const startsBlock = (l, next, depth) => FENCE.test(l) || HEADING.test(l) || HR.test(l) || (depth < MAX_DEPTH && (QUOTE.test(l) || (ITEM.test(l) && (!/^\s*\d/.test(l) || /^\s*1[.)]/.test(l))))) || isTable(l, next);
 const isTable = (l, next) => next !== undefined && l.includes('|') && DELIM_ROW.test(next) && next.includes('-') && (next.includes('|') || cells(l).length === 1) && cells(l).length === cells(next).length;
 
-function parseList(lines, i, parent) {
+function parseList(lines, i, parent, depth) {
   const first = ITEM.exec(lines[i]), base = indentOf(lines[i]), ordered = /\d/.test(first[2]);
   const list = el(ordered ? 'ol' : 'ul');
   if (ordered && Number(first[2].replace(/\D/g, '')) !== 1) list.setAttribute('start', String(Number(first[2].replace(/\D/g, ''))));
@@ -112,21 +127,25 @@ function parseList(lines, i, parent) {
     const child = [];
     while (i < lines.length) {
       const l = lines[i];
-      if (!l.trim()) { const nx = lines.slice(i + 1).find(x => x.trim()); if (nx !== undefined && indentOf(nx) > base) { child.push(''); i++; continue; } break; }
+      if (!l.trim()) {
+        let j = i + 1; while (j < lines.length && !lines[j].trim()) j++; // one look-ahead over the whole blank run
+        if (j < lines.length && indentOf(lines[j]) > base) { child.push(''); i = j; continue; }
+        break;
+      }
       if (indentOf(l) > base + 1 || (indentOf(l) > base && !ITEM.test(l))) { child.push(l); i++; continue; }
       break;
     }
     withBreaks(own, li);
     if (child.length) {
-      const pad = Math.min(...child.filter(x => x.trim()).map(indentOf));
-      parseBlocks(child.map(x => x.replace(/\t/g, '    ').slice(Math.min(pad, indentOf(x)))), li);
+      const pad = child.reduce((lo, x) => (x.trim() ? Math.min(lo, indentOf(x)) : lo), Infinity);
+      parseBlocks(child.map(x => x.replace(/\t/g, '    ').slice(Math.min(pad, indentOf(x)))), li, depth + 1);
     }
     list.append(li);
   }
   parent.append(list);
   return i;
 }
-export function parseBlocks(lines, parent) {
+export function parseBlocks(lines, parent, depth = 0) {
   for (let i = 0; i < lines.length;) {
     const l = lines[i];
     if (!l.trim()) { i++; continue; }
@@ -140,10 +159,10 @@ export function parseBlocks(lines, parent) {
     }
     if ((m = HEADING.exec(l))) { const h = el('div', { class: `md-h md-h${m[1].length}`, role: 'heading', 'aria-level': String(m[1].length + 2) }); inline(m[2], h); parent.append(h); i++; continue; }
     if (HR.test(l)) { parent.append(el('hr')); i++; continue; }
-    if (QUOTE.test(l)) {
+    if (depth < MAX_DEPTH && QUOTE.test(l)) {
       const inner = [];
       while (i < lines.length && QUOTE.test(lines[i])) inner.push(QUOTE.exec(lines[i++])[1]);
-      const bq = el('blockquote'); parseBlocks(inner, bq); parent.append(bq); continue;
+      const bq = el('blockquote'); parseBlocks(inner, bq, depth + 1); parent.append(bq); continue;
     }
     if (isTable(l, lines[i + 1])) {
       const head = cells(l), align = cells(lines[i + 1]).map(c => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : ''));
@@ -157,9 +176,9 @@ export function parseBlocks(lines, parent) {
       table.append(thead, tbody);
       const wrap = el('div', { class: 'md-table', tabindex: '0', role: 'region', 'aria-label': 'Table' }); wrap.append(table); parent.append(wrap); continue;
     }
-    if (ITEM.test(l)) { i = parseList(lines, i, parent); continue; }
+    if (depth < MAX_DEPTH && ITEM.test(l)) { i = parseList(lines, i, parent, depth); continue; }
     const para = [l]; i++;
-    while (i < lines.length && lines[i].trim() && !startsBlock(lines[i], lines[i + 1])) para.push(lines[i++]);
+    while (i < lines.length && lines[i].trim() && !startsBlock(lines[i], lines[i + 1], depth)) para.push(lines[i++]);
     parent.append(withBreaks(para, el('p')));
   }
 }
@@ -170,12 +189,19 @@ export function markdown(text) {
 }
 
 // ---- Plain text for snippets, previews and lists: the same input with the Markdown marks taken out. No DOM.
-export function plainText(text) {
-  return String(text ?? '')
-    .replace(/```[\w+-]*/g, '').replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '').replace(/^[ \t]{0,3}>[ \t]?/gm, '').replace(/^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/gm, '')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/`+([^`]*)`+/g, '$1').replace(/(\*\*|__|~~)(.*?)\1/g, '$2').replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=$|[\s).,;:!?])/g, '$1$2')
-    .replace(/^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*$/gm, '').replace(/^[ \t]*\|/gm, '').replace(/[ \t]*\|[ \t]*/g, ' · ').replace(/(?: · )+$/gm, '')
-    .replace(/^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, '').replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/^[ \t]+|[ \t]+$/gm, '');
-}
+const MAX_LINE = 2000; // snippets never need more, and it keeps every pass below cheap
+const plainLine = line => {
+  let t = line.slice(0, MAX_LINE)
+    .replace(/```[\w+-]*/g, '').replace(/^[ \t]{0,3}#{1,6}[ \t]+/, '').replace(/^[ \t]{0,3}>[ \t]?/, '').replace(/^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?/, '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/`+([^`]*)`+/g, '$1').replace(/(\*\*|__|~~)(.*?)\1/g, '$2').replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=$|[\s).,;:!?])/g, '$1$2');
+  if (/^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*$/.test(t)) return ''; // a table's delimiter row
+  if (/^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(t)) return ''; // a rule
+  if (t.includes('|')) { const cells = t.split('|').map(c => c.trim()); if (cells[0] === '') cells.shift(); while (cells.length && cells[cells.length - 1] === '') cells.pop(); t = cells.join(' · '); }
+  return t.replace(/\\([!-/:-@[-`{-~])/g, '$1').trim();
+};
+export const plainText = text => String(text ?? '').split('\n').map(plainLine).join('\n');
 // The first line that still has words once the marks are gone.
-export const firstPlainLine = text => (plainText(text).split('\n').map(l => l.trim()).find(Boolean) ?? '');
+export function firstPlainLine(text) {
+  for (const raw of String(text ?? '').split('\n', 400)) { const line = plainLine(raw); if (line) return line; }
+  return '';
+}

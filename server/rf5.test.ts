@@ -506,3 +506,117 @@ test('transcript tolerates an orphan aside answer', () => {
   const out = transcript([{ id: 'm1', author: 'agent', text: 'lost', images: [], created_at: '2026-01-01T00:00:00Z', aside: true, reply_to: 'm9' }] as never);
   expect(out).toContain('Side question (orphan)');
 });
+
+// ---- Review fixes
+test('moving an unanswered user message into a thread the agent already acked keeps it in the agent queue', async () => {
+  const b = await start('B', 'b first');
+  const c = await start('C', 'c first');
+  await user(b, 'older, unanswered question'); // m2 in B, nobody answers it
+  await store.appendMessage(dir, c, { author: 'agent', text: 'reply', flag: 'fyi' });
+  await user(c, 'ok thanks');
+  await store.ackThread(dir, c);
+  expect((await summary(c)).waiting).toBe('idle');
+  await run(['move', b, 'm2', '--to', c], dir);
+  const s = await summary(c);
+  expect(s.waiting).toBe('agent');
+  expect((await run(['list', '--waiting'], dir))).toContain(c);
+  // the agent answers: it stops waiting
+  await run(['reply', c, 'answered'], dir);
+  expect((await summary(c)).waiting).toBe('idle');
+});
+
+test('moving an answered user message does not make the target wait', async () => {
+  const b = await start('B', 'b first');
+  const c = await start('C', 'c first');
+  await user(b, 'asked');
+  await store.appendMessage(dir, b, { author: 'agent', text: 'answered', flag: 'fyi' });
+  await store.appendMessage(dir, c, { author: 'agent', text: 'reply', flag: 'fyi' });
+  await user(c, 'ok');
+  await store.ackThread(dir, c);
+  await run(['move', b, 'm2', '--to', c], dir);
+  expect((await summary(c)).waiting).toBe('idle');
+});
+
+test('moving an unanswered aside into an acked thread keeps the aside waiting', async () => {
+  const b = await start('B', 'b first');
+  const c = await start('C', 'c first');
+  await user(b, 'side q', { aside: true });
+  await store.appendMessage(dir, c, { author: 'agent', text: 'reply', flag: 'fyi' });
+  await user(c, 'ok');
+  await store.ackThread(dir, c);
+  await run(['move', b, 'm2', '--to', c], dir);
+  const s = await summary(c);
+  expect(s.waiting_aside).toBe(true);
+  expect(s.waiting).toBe('agent');
+});
+
+test('merging keeps what the agent had read, so the user sees the double tick', async () => {
+  const a = await start('A', 'a first');
+  const b = await start('B', 'b first');
+  await store.appendMessage(dir, b, { author: 'agent', text: 'b reply', flag: 'fyi' });
+  await store.markAgentRead(dir, b);
+  await user(a, 'a second, newer than b\'s read marker');
+  await store.markAgentRead(dir, a);
+  const lateA = (await detail(a)).messages.find((m: { text: string }) => m.text.startsWith('a second')).created_at;
+  expect(((await detail(b)).agent_read_at as string) < lateA).toBe(true);
+  await store.mergeThreads(dir, a, b, 'agent');
+  const d = await detail(b);
+  expect(d.agent_read_at >= lateA).toBe(true);
+  for (const m of d.messages.filter((x: { author: string; divider?: boolean }) => x.author === 'user' && !x.divider)) expect(d.agent_read_at >= m.created_at).toBe(true);
+});
+
+test('merging does not mark an unread message of the target as read', async () => {
+  const a = await start('A', 'a first');
+  const b = await start('B', 'b first');
+  await store.markAgentRead(dir, b);
+  await user(b, 'b unread by the agent'); // newer than B's marker
+  await new Promise(r => setTimeout(r, 5));
+  await user(a, 'a later');
+  await store.markAgentRead(dir, a);
+  await store.mergeThreads(dir, a, b, 'agent');
+  const d = await detail(b);
+  const unread = d.messages.find((m: { text: string }) => m.text === 'b unread by the agent');
+  expect(d.agent_read_at < unread.created_at).toBe(true);
+});
+
+test('merging carries the user\'s read marker for the agent messages they had seen', async () => {
+  const a = await start('A', 'a first');
+  const b = await start('B', 'b first');
+  await store.appendMessage(dir, b, { author: 'agent', text: 'b reply', flag: 'fyi' });
+  await store.markRead(dir, b);
+  await new Promise(r => setTimeout(r, 5));
+  await store.appendMessage(dir, a, { author: 'agent', text: 'a agent msg', flag: 'fyi' });
+  await store.markRead(dir, a);
+  const seen = (await detail(a)).messages.find((m: { text: string }) => m.text === 'a agent msg').created_at;
+  await store.mergeThreads(dir, a, b, 'agent');
+  expect((await detail(b)).user_read_at >= seen).toBe(true);
+});
+
+test('an agent reply, an ask and a todo change each mark the thread read for the agent', async () => {
+  const id = await start('T', 'first');
+  await new Promise(r => setTimeout(r, 5));
+  await user(id, 'second');
+  const newest = (await detail(id)).messages[1].created_at;
+  expect((await detail(id)).agent_read_at === null || (await detail(id)).agent_read_at < newest).toBe(true);
+  await run(['reply', id, 'hi'], dir);
+  expect((await detail(id)).agent_read_at >= newest).toBe(true);
+  const ask = await start('Q', 'first');
+  await new Promise(r => setTimeout(r, 5));
+  await user(ask, 'second');
+  const askNewest = (await detail(ask)).messages[1].created_at;
+  await run(['ask', ask, 'Pick?', '--option', 'x'], dir);
+  expect((await detail(ask)).agent_read_at >= askNewest).toBe(true);
+  const todo = await start('D', 'first');
+  await new Promise(r => setTimeout(r, 5));
+  await user(todo, 'second');
+  const todoNewest = (await detail(todo)).messages[1].created_at;
+  await run(['todo', todo, 'add', 'agent', 'do it'], dir);
+  expect((await detail(todo)).agent_read_at >= todoNewest).toBe(true);
+  const tick = await start('K', 'first');
+  await run(['todo', tick, 'add', 'agent', 'x'], dir);
+  await new Promise(r => setTimeout(r, 5));
+  await user(tick, 'later');
+  const tickNewest = (await detail(tick)).messages[1].created_at;
+  await run(['todo', tick, 'done', 'c1'], dir);
+  expect((await detail(tick)).agent_read_at >= tickNewest).toBe(true);
+});
