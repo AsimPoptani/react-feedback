@@ -299,7 +299,8 @@ export interface NewMessage { author: Author; text: unknown; images?: Image[]; q
 export function checkReplyTo(messages: Message[], value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || !value) throw new Invalid('reply_to must be the id of a message in this thread');
-  if (!messages.some(m => m.id === value)) throw new Invalid('reply_to must be the id of a message in this thread');
+  const target = messages.find(m => m.id === value);
+  if (!target || target.divider === true) throw new Invalid('reply_to must be the id of a message in this thread');
   return value;
 }
 // Only the agent flags messages. A question is `needs_you` unless said otherwise; anything else is `fyi`.

@@ -45,7 +45,7 @@ export function Root() {
 
 Other props:
 
-- `position`: `"bottom-left"` (default) or `"bottom-right"`, the corner that holds the launcher, its panels and the "Queued" toast.
+- `position`: `"bottom-left"` (default) or `"bottom-right"`, the corner that holds the launcher, its panels and the "Queued" toast. It is only where the launcher starts: people can drag the button (or the toolbar) anywhere, it snaps to the nearest edge, the spot is remembered per origin in `localStorage`, Alt+arrow keys nudge it, and **Reset position** in the toolbar puts it back.
 - `hints`: `"off"` (default) or `"on"`. While Region, Element or Section is active the widget shows no step banner, so nothing sits over the page you are capturing; press `?` for the shortcuts. `"on"` brings the banner back. To ship it only in development, render it behind your own flag and lazy-load it:
 
 ```tsx
@@ -81,7 +81,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 <script src="https://your-host/__feedback/embed.js" data-endpoint="/__feedback"></script>
 ```
 
-`dist/embed.js` is a standalone bundle (React and the CSS are inside it). The server also serves it at `/__feedback/embed.js`, and the inbox loads it, so you can capture feedback about the inbox itself. `data-endpoint` defaults to `/__feedback`. `data-position="bottom-right"` moves the launcher to the right corner (default `bottom-left`), and `data-hints="on"` shows the step banner during capture modes (default off).
+`dist/embed.js` is a standalone bundle (React and the CSS are inside it). The server also serves it at `/__feedback/embed.js`, and the inbox loads it, so you can capture feedback about the inbox itself. `data-endpoint` defaults to `/__feedback`. `data-position="bottom-right"` moves the launcher to the right corner (default `bottom-left`; the starting spot, since the button can be dragged), and `data-hints="on"` shows the step banner during capture modes (default off).
 
 ## Run the server
 
@@ -181,7 +181,7 @@ Pick a mode, select a target, write one note, press Save. Saving sends at once f
 
 ## The inbox
 
-`/__feedback/inbox/` lists threads grouped by area. By default an area is the first segment of the page path they were taken on (`/billing/plans` goes under "Billing", `/` under "Home", threads started without a capture under "Conversations"); see [Inbox areas](#inbox-areas) to name and group them yourself. It shows status pills and unread dots, a thread view with the original capture and message bubbles, a composer (Cmd/Ctrl+Enter sends, paste or attach images), checklists for the person and the agent, pins, merging, a read-only "updates" thread type, and a **Metrics** page (velocity, response times, workload, by-area table). Press `?` for the inbox shortcuts. Text is escaped; only bold, italics, inline code, `-` lists and http links are rendered.
+`/__feedback/inbox/` lists threads grouped by area. By default an area is the first segment of the page path they were taken on (`/billing/plans` goes under "Billing", `/` under "Home", threads started without a capture under "Conversations"); see [Inbox areas](#inbox-areas) to name and group them yourself. It shows status pills and unread dots, a thread view with the original capture and message bubbles, a composer (Cmd/Ctrl+Enter sends, paste or attach images), a checklist side panel for the person and the agent (a donut on each thread row shows progress; **L** shows or hides it, and on a phone it is a bottom sheet), pins, merging, a read-only "updates" thread type, and a **Metrics** page (velocity, response times, workload, by-area table). Press `?` for the inbox shortcuts. Text is escaped; only bold, italics, inline code, `-` lists and http links are rendered.
 
 ### Inbox areas
 
@@ -283,7 +283,8 @@ This is meant for **local or development use**. The server has **no authenticati
 ```sh
 bun install
 bun run typecheck && bun run lint
-bun run test        # vitest (widget) and bun test (server, store, CLI)
+bun run test        # vitest (widget and the inbox page in happy-dom) and bun test (server, store, CLI)
+bun run test:e2e    # optional browser smoke test (needs Playwright and a built dist/)
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

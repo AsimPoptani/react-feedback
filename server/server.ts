@@ -178,7 +178,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {

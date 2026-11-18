@@ -20,10 +20,12 @@
 .fb-root h2 { font: bold 19px/1.2 var(--rf-font, system-ui, sans-serif); margin: 0; }
 .fb-root p { margin: 8px 0; }
 .fb-launchers { position: absolute; bottom: max(12px, env(safe-area-inset-bottom)); left: 12px; display: flex; gap: 8px; pointer-events: auto; }
-.fb-launcher { border-radius: 999px; box-shadow: 0 2px 12px #0003; }
+.fb-launcher { border-radius: 999px; box-shadow: 0 2px 12px #0003; touch-action: none; cursor: grab; }
+.fb-root.fb-dragging, .fb-root.fb-dragging * { cursor: grabbing; user-select: none; -webkit-user-select: none; }
 .fb-panel { position: absolute; left: 12px; bottom: calc(64px + env(safe-area-inset-bottom)); width: min(370px, calc(100vw - 24px)); max-height: calc(100dvh - 140px); overflow: auto; overscroll-behavior: contain; padding: 16px; border: 1px solid var(--fb-border); border-radius: 14px; background: var(--fb-bg); box-shadow: 0 8px 35px #0004; pointer-events: auto; overflow-wrap: anywhere; }
 .fb-panel header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
 .fb-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.fb-capture-toolbar .fb-toolbar { touch-action: none; }
 .fb-hint { font-size: 12px; }
 .fb-preview { display: block; max-width: 100%; max-height: 180px; margin: 12px auto; object-fit: contain; }
 .fb-root .fb-save { margin-top: 8px; width: 100%; background: var(--fb-accent); color: var(--fb-accent-ink); }

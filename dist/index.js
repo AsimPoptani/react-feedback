@@ -2075,6 +2075,219 @@ function RegionPicker({ rect, onChange, onSettle, onCapture, onCancel }) {
 		]
 	});
 }
+var clampTo = (v, max) => Math.min(Math.max(12, v), Math.max(12, max));
+/** Turn a saved position into on-screen coordinates, kept inside the viewport. */
+function resolve(pos, { vw, vh, w, h }) {
+	const maxX = vw - w - 12, maxY = vh - h - 12;
+	const x = pos.ex === "l" ? 12 : pos.ex === "r" ? maxX : pos.x;
+	const y = pos.ey === "t" ? 12 : pos.ey === "b" ? maxY : pos.y;
+	return {
+		x: clampTo(x, maxX),
+		y: clampTo(y, maxY)
+	};
+}
+/** On release: clamp, then pin to the nearest edge (the other coordinate stays where it was let go). */
+function snap(x, y, size) {
+	const { vw, vh, w, h } = size;
+	const p = resolve({
+		x,
+		y
+	}, size);
+	const dist = {
+		l: p.x - 12,
+		r: vw - w - 12 - p.x,
+		t: p.y - 12,
+		b: vh - h - 12 - p.y
+	};
+	const nearest = Object.keys(dist).reduce((a, b) => dist[b] < dist[a] ? b : a);
+	return nearest === "l" || nearest === "r" ? {
+		x: p.x,
+		y: p.y,
+		ex: nearest
+	} : {
+		x: p.x,
+		y: p.y,
+		ey: nearest
+	};
+}
+/** Alt+arrow: move by `step` px along one axis, free of any edge pin on that axis. */
+function nudge(pos, key, size, step = 10) {
+	const at = resolve(pos, size);
+	const next = {
+		x: at.x,
+		y: at.y,
+		...pos.ex ? { ex: pos.ex } : {},
+		...pos.ey ? { ey: pos.ey } : {}
+	};
+	if (key === "ArrowLeft" || key === "ArrowRight") {
+		next.x = at.x + (key === "ArrowLeft" ? -step : step);
+		delete next.ex;
+	} else {
+		next.y = at.y + (key === "ArrowUp" ? -step : step);
+		delete next.ey;
+	}
+	const c = resolve({
+		x: next.x,
+		y: next.y
+	}, size);
+	return {
+		...next,
+		x: c.x,
+		y: c.y
+	};
+}
+var storageKey = () => `react-feedback:position:${location.origin}`;
+function loadPos() {
+	try {
+		const v = JSON.parse(localStorage.getItem(storageKey()) || "null");
+		if (!v || typeof v.x !== "number" || typeof v.y !== "number" || !Number.isFinite(v.x) || !Number.isFinite(v.y)) return null;
+		return {
+			x: v.x,
+			y: v.y,
+			...v.ex === "l" || v.ex === "r" ? { ex: v.ex } : {},
+			...v.ey === "t" || v.ey === "b" ? { ey: v.ey } : {}
+		};
+	} catch {
+		return null;
+	}
+}
+function savePos(pos) {
+	try {
+		if (pos) localStorage.setItem(storageKey(), JSON.stringify(pos));
+		else localStorage.removeItem(storageKey());
+	} catch {}
+}
+/** Dragging, edge snapping, keyboard nudging and a remembered position for the launcher (the toolbar drags it too). */
+function useLauncherPosition(ref) {
+	const [pos, setPos] = useState(loadPos);
+	const [placed, setPlaced] = useState(null);
+	const [dragging, setDragging] = useState(false);
+	const drag = useRef(null);
+	const justDragged = useRef(false);
+	const size = useCallback(() => {
+		const r = ref.current?.getBoundingClientRect();
+		return {
+			vw: window.innerWidth,
+			vh: window.innerHeight,
+			w: r?.width ?? 0,
+			h: r?.height ?? 0
+		};
+	}, [ref]);
+	const current = useCallback(() => {
+		const r = ref.current?.getBoundingClientRect();
+		return {
+			x: r?.left ?? 12,
+			y: r?.top ?? 12
+		};
+	}, [ref]);
+	const commit = useCallback((next) => {
+		setPos(next);
+		savePos(next);
+	}, []);
+	const place = useCallback(() => {
+		if (drag.current?.moved) return;
+		if (!pos) {
+			setPlaced(null);
+			return;
+		}
+		const p = resolve(pos, size());
+		setPlaced((prev) => prev && prev.x === p.x && prev.y === p.y ? prev : p);
+	}, [pos, size]);
+	useLayoutEffect(place);
+	useEffect(() => {
+		window.addEventListener("resize", place);
+		return () => window.removeEventListener("resize", place);
+	}, [place]);
+	const onPointerDown = useCallback((event) => {
+		if (event.button !== 0 && event.pointerType === "mouse") return;
+		const at = current();
+		drag.current = {
+			id: event.pointerId,
+			sx: event.clientX,
+			sy: event.clientY,
+			ox: at.x,
+			oy: at.y,
+			moved: false
+		};
+		try {
+			event.currentTarget.setPointerCapture?.(event.pointerId);
+		} catch {}
+	}, [current]);
+	const onPointerMove = useCallback((event) => {
+		const d = drag.current;
+		if (!d || d.id !== event.pointerId) return;
+		const dx = event.clientX - d.sx, dy = event.clientY - d.sy;
+		if (!d.moved && Math.hypot(dx, dy) < 5) return;
+		if (!d.moved) {
+			d.moved = true;
+			setDragging(true);
+		}
+		setPlaced(resolve({
+			x: d.ox + dx,
+			y: d.oy + dy
+		}, size()));
+	}, [size]);
+	const end = useCallback((event) => {
+		const d = drag.current;
+		if (!d || d.id !== event.pointerId) return;
+		drag.current = null;
+		try {
+			event.currentTarget.releasePointerCapture?.(event.pointerId);
+		} catch {}
+		if (!d.moved) return;
+		setDragging(false);
+		justDragged.current = true;
+		setTimeout(() => {
+			justDragged.current = false;
+		}, 0);
+		const next = snap(d.ox + (event.clientX - d.sx), d.oy + (event.clientY - d.sy), size());
+		commit(next);
+		setPlaced(resolve(next, size()));
+	}, [commit, size]);
+	const onKeyDown = useCallback((event) => {
+		if (!event.altKey || event.ctrlKey || event.metaKey || ![
+			"ArrowLeft",
+			"ArrowRight",
+			"ArrowUp",
+			"ArrowDown"
+		].includes(event.key)) return;
+		event.preventDefault();
+		const next = nudge(pos ?? {
+			x: current().x,
+			y: current().y
+		}, event.key, size(), event.shiftKey ? 50 : 10);
+		commit(next);
+		setPlaced(resolve(next, size()));
+	}, [
+		commit,
+		current,
+		pos,
+		size
+	]);
+	const reset = useCallback(() => {
+		commit(null);
+		setPlaced(null);
+	}, [commit]);
+	/** True once, right after a drag ends, so the launcher's click handler can ignore it. */
+	const wasDrag = useCallback(() => justDragged.current, []);
+	const side = placed ? placed.x + size().w / 2 > window.innerWidth / 2 ? "right" : "left" : null;
+	return {
+		custom: pos !== null,
+		placed,
+		side,
+		dragging,
+		handlers: {
+			onPointerDown,
+			onPointerMove,
+			onPointerUp: end,
+			onPointerCancel: end
+		},
+		onKeyDown,
+		reset,
+		wasDrag,
+		size
+	};
+}
 // src/widget/PickerOverlay.tsx
 /**
 * Element and Section modes. With nothing locked, focus sits on the picker panel, where Enter
@@ -2240,6 +2453,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 	const generation = useRef(0);
 	const job = useRef(null);
 	const launcher = useRef(null);
+	const place = useLauncherPosition(launcher);
 	const previousStep = useRef(step);
 	const root = useRef(null);
 	const opener = useRef(null);
@@ -2420,21 +2634,54 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 		savedClose.current = true;
 		setStep("closed");
 	}
+	const side = place.side ?? (position === "bottom-right" ? "right" : "left");
+	const launcherStyle = place.placed ? {
+		left: place.placed.x,
+		top: place.placed.y,
+		right: "auto",
+		bottom: "auto"
+	} : void 0;
+	const toolbarStyle = (() => {
+		if (!place.placed) return void 0;
+		const { vw, vh, h } = place.size();
+		const width = Math.min(370, vw - 24);
+		const left = Math.max(12, Math.min(place.placed.x, vw - width - 12));
+		return place.placed.y > vh / 2 ? {
+			left,
+			right: "auto",
+			top: "auto",
+			bottom: vh - place.placed.y + 8
+		} : {
+			left,
+			right: "auto",
+			bottom: "auto",
+			top: place.placed.y + h + 8
+		};
+	})();
+	const dragToolbar = (event) => {
+		if (!event.target.closest("button, input, textarea, a, summary, aside")) place.handlers.onPointerDown(event);
+	};
 	return /* @__PURE__ */ jsxs("div", {
-		className: `fb-root${position === "bottom-right" ? " fb-right" : ""}`,
+		className: `fb-root${side === "right" ? " fb-right" : ""}${place.dragging ? " fb-dragging" : ""}`,
 		"data-feedback-root": true,
-		"data-position": position,
+		"data-position": side === "right" ? "bottom-right" : "bottom-left",
 		ref: root,
 		children: [
 			/* @__PURE__ */ jsx("div", {
 				className: "fb-launchers",
+				style: launcherStyle,
 				children: /* @__PURE__ */ jsxs("button", {
 					ref: launcher,
 					type: "button",
 					className: `fb-launcher${queue.failed ? " fb-launcher-warn" : ""}`,
 					"aria-expanded": step !== "closed",
 					"aria-keyshortcuts": "Alt+Shift+F",
-					onClick: toggle,
+					"aria-description": "Drag to move, or Alt plus the arrow keys",
+					...place.handlers,
+					onKeyDown: place.onKeyDown,
+					onClick: () => {
+						if (!place.wasDrag()) toggle();
+					},
 					children: [
 						"Feedback ",
 						/* @__PURE__ */ jsx(Keycap, { children: keyLabel("Alt", "Shift", "F") }),
@@ -2453,6 +2700,11 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 			step === "toolbar" && /* @__PURE__ */ jsxs("section", {
 				className: "fb-panel fb-capture-toolbar",
 				"aria-label": "Feedback toolbar",
+				style: toolbarStyle,
+				onPointerDown: dragToolbar,
+				onPointerMove: place.handlers.onPointerMove,
+				onPointerUp: place.handlers.onPointerUp,
+				onPointerCancel: place.handlers.onPointerCancel,
 				children: [
 					/* @__PURE__ */ jsxs("div", {
 						className: "fb-toolbar",
@@ -2494,6 +2746,12 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 								"aria-expanded": help,
 								onClick: () => setHelp((value) => !value),
 								children: [/* @__PURE__ */ jsx(Keycap, { children: "?" }), " Shortcuts"]
+							}),
+							place.custom && /* @__PURE__ */ jsx("button", {
+								type: "button",
+								"data-choice": "reset-position",
+								onClick: place.reset,
+								children: "Reset position"
 							})
 						]
 					}),
@@ -2566,6 +2824,11 @@ function ShortcutHelp() {
 				"+Shift+R/E/S/P: Region / Element / Section / Full page · ",
 				alt,
 				"+Shift+L: My feedback"
+			] }),
+			/* @__PURE__ */ jsxs("p", { children: [
+				"Move it: drag the Feedback button or the toolbar · ",
+				alt,
+				"+arrows (button focused): nudge · Reset position: back to the corner"
 			] }),
 			/* @__PURE__ */ jsx("p", { children: "Toolbar: R/E/S/P or 1–4: modes · L: My feedback · ?: shortcuts" }),
 			/* @__PURE__ */ jsx("p", { children: "Selection: Enter: Write note · Esc: back · ↑/↓: parent/child · Region arrows: move 1 px, Shift: 10 px, Alt: resize" }),

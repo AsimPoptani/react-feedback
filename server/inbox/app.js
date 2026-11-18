@@ -1,6 +1,7 @@
 // Feedback inbox. No build, no deps. All text goes through textContent; nothing is injected as HTML.
 import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas, subHeading } from './areas.js';
 import { isReplySwipe, resolveQuote, snippetOf } from './quote.js';
+import { donutLabel, donutNode } from './donut.js';
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
 const MAX_IMAGES = 5;
@@ -9,11 +10,14 @@ const TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const $ = id => document.getElementById(id);
 
 const FOLD_KEY = 'fb-inbox-folds';
-const state = { metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clOpen: {}, clDraft: { agent: '', user: '' }, clEdit: null, clShown: '',
+const CL_KEY = 'fb-inbox-checklist';
+const state = { metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
+function loadClPref() { try { const v = JSON.parse(localStorage.getItem(CL_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
+function saveClPref() { try { localStorage.setItem(CL_KEY, JSON.stringify(state.clPref)); } catch { /* storage may be blocked */ } }
 function saveFolds() { try { localStorage.setItem(FOLD_KEY, JSON.stringify(state.folds)); } catch { /* storage may be blocked */ } }
 
 async function api(path, options) {
@@ -82,7 +86,7 @@ const kbd = keys => el('kbd', { 'data-keys': keys, text: keyLabel(keys) });
 const SHORTCUTS = [
   ['mod+Enter', 'Send the message (or start the thread)'], ['mod+I', 'Attach an image'], ['mod+V', 'Paste an image'], ['mod+K', 'Search threads'],
   ['J / ↓', 'Next thread'], ['K / ↑', 'Previous thread'], ['E', 'Mark the open thread done, or reopen it'], ['N', 'New thread'], ['P', 'Pin or unpin the open thread'],
-  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'],
+  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'],
   ['1–9, Enter', 'Pick an option on the latest open question, then answer'], ['← / →', 'Flip images in the viewer'], ['?', 'This cheat sheet'], ['Esc', 'Close the viewer or a dialog']];
 
 // ---- Profile and avatars
@@ -230,12 +234,11 @@ function pinButton(kind, id, label) {
 function checklistSummary(c) { return c.total ? `${c.done} of ${c.total} done${c.claimed ? ` · ${c.claimed} claimed` : ''}` : ''; }
 function threadRow(t) {
   const badge = t.last_flag ? flagBadge(t.last_flag) : null;
-  const tally = checklistSummary(t.checklist || { total: 0 });
   state.order.push(t.id);
   const link = el('a', { href: `#/${t.id}`, ...(t.id === state.openId ? { 'aria-current': 'true' } : {}) },
     el('div', { class: 'row-title' }, ...(t.unread_for_user ? [el('span', { class: 'dot', role: 'img', 'aria-label': t.read_only ? 'Unread update' : 'Unread: needs you' })] : []), el('span', { class: 't', text: t.title })),
     el('div', { class: 'meta' }, t.read_only && t.status !== 'done' ? el('span', { class: 'pill upd', text: 'Updates' }) : el('span', { class: `pill ${t.waiting}`, text: PILL[t.waiting] }), ...(badge ? [badge] : []), ...(t.open_question ? [el('span', { class: 'pill q', text: 'Question' })] : []),
-      ...(tally ? [el('span', { class: 'tally', text: tally })] : []),
+      ...((t.checklist?.total) ? [el('span', { class: 'tally', title: checklistSummary(t.checklist) }, donutNode(t.checklist), `${t.checklist.done}/${t.checklist.total}`)] : []),
       el('time', { datetime: t.last_message_at, text: when(t.last_message_at) })));
   return el('li', { class: 'row' }, link, pinButton('thread', t.id, t.title));
 }
@@ -435,7 +438,7 @@ function messageNode(d, m) {
   if (m.author === 'user' && d.acked_through === m.created_at) head.append(el('span', { class: 'acked-note', text: `· ${state.profile.agent.name} acknowledged` }));
   const ticks = ticksFor(d, m); if (ticks) head.append(ticks);
   if (!d.read_only) head.append(el('button', { type: 'button', class: 'reply-btn', 'aria-label': `Reply to ${who.name}, ${when(m.created_at)}`, onclick: () => startReply(m.id) }, 'Reply'));
-  const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '0', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
+  const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '-1', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
@@ -451,6 +454,7 @@ function drawMessages(d) {
   const stick = first || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   state.shown = key;
   $('msgs').replaceChildren(...d.messages.map(m => messageNode(d, m)));
+  applyStop();
   if (stick) scroll.scrollTop = scroll.scrollHeight;
 }
 
@@ -462,6 +466,18 @@ function quoteNode(d, m) {
   const name = state.profile[q.original.author].name;
   return el('button', { type: 'button', class: `quote ${q.original.author}`, 'aria-label': `In reply to ${name}: ${q.snippet || 'message'}. Go to the original.`, onclick: () => jumpTo(q.original.id) },
     el('strong', { text: name }), el('span', { class: 'snip', text: q.snippet }));
+}
+// Roving tabindex: one message is the tab stop (the last focused, else the newest); arrow keys move between them.
+const msgNodes = () => [...$('msgs').querySelectorAll(':scope > .msg[data-mid]')];
+function applyStop() {
+  const nodes = msgNodes(); if (!nodes.length) return;
+  const stop = nodes.find(n => n.dataset.mid === state.msgStop) || nodes[nodes.length - 1];
+  for (const n of nodes) n.tabIndex = n === stop ? 0 : -1;
+}
+function moveMsg(from, by) {
+  const nodes = msgNodes(), i = nodes.indexOf(from); if (i < 0) return;
+  const to = nodes[by === 'start' ? 0 : by === 'end' ? nodes.length - 1 : Math.max(0, Math.min(nodes.length - 1, i + by))];
+  to.focus();
 }
 function messageEl(id) { return [...$('msgs').children].find(n => n.dataset.mid === id) || null; }
 function jumpTo(id) {
@@ -545,43 +561,102 @@ function itemNode(i) {
     el('button', { type: 'button', 'aria-label': `Delete: ${i.text}`, onclick: () => clChange('DELETE', `/${i.id}`) }, 'Delete'));
   return el('li', { class: `cl-item${i.done ? ' is-done' : ''}`, 'data-item': i.id }, box, el('div', { class: 'cl-main' }, text, ...(meta ? [el('span', { class: 'cl-meta', text: meta })] : [])), actions);
 }
-function listNode(owner, title, placeholder, items) {
+function listNode(owner, title, items) {
   const mineItems = items.filter(i => i.owner === owner);
-  const input = el('input', { type: 'text', id: `cl-add-${owner}`, maxlength: '300', placeholder, 'aria-label': placeholder });
-  input.value = state.clDraft[owner];
-  input.addEventListener('input', () => { state.clDraft[owner] = input.value; });
-  input.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); input.blur(); } });
-  const form = el('form', { class: 'cl-add' }, input, el('button', { type: 'submit' }, 'Add'));
-  form.addEventListener('submit', async e => {
-    e.preventDefault();
-    const text = input.value.trim(); if (!text) return;
-    state.clDraft[owner] = ''; await clChange('POST', '', { owner, text });
-    $(`cl-add-${owner}`)?.focus();
-  });
-  return el('section', { class: 'cl-list', 'data-owner': owner }, el('h3', {}, title, el('small', { text: mineItems.length ? `${mineItems.filter(i => i.done).length} of ${mineItems.length}` : '' })),
-    el('ul', {}, ...mineItems.map(itemNode)), ...(mineItems.length ? [] : [el('p', { class: 'hint', text: 'Nothing here yet.' })]), ...(state.detail?.read_only ? [] : [form]));
+  return el('section', { class: 'cl-list', 'data-owner': owner }, el('h4', { class: 'cl-sec' }, title, el('small', { text: mineItems.length ? ` ${mineItems.filter(i => i.done).length} of ${mineItems.length}` : '' })),
+    el('ul', {}, ...mineItems.map(itemNode)), ...(mineItems.length ? [] : [el('p', { class: 'hint', text: 'Nothing here yet.' })]));
+}
+// Panel layout. Wide (>= 900px): a column beside the messages that Hide collapses to a slim tab, remembered per thread.
+// Narrow: a "Checklist 2/11" button in the thread header that opens the same panel as a bottom sheet (a dialog).
+const narrowQuery = '(max-width: 899px)';
+const isNarrow = () => matchMedia(narrowQuery).matches;
+const sheetOpen = () => state.sheet && isNarrow();
+const clCount = d => { const c = d.checklist || { total: 0, done: 0 }; return c.total ? `${c.done}/${c.total}` : ''; };
+function panelWanted(d) { return !!d && !(d.read_only && !(d.checklist_items || []).length); } // an updates thread with no items has nothing to show
+function panelOpen(d) { // wide only
+  const pref = state.clPref[d.id];
+  return pref === 'open' || (pref === undefined && (d.checklist_items || []).length > 0);
+}
+function setPanel(d, open) { state.clPref[d.id] = open ? 'open' : 'hidden'; saveClPref(); applyLayout(d); }
+let sheetReturn = null;
+function openSheet() {
+  const d = state.detail; if (!d || !panelWanted(d) || !isNarrow() || state.sheet) return;
+  state.sheet = true; sheetReturn = $('cl-btn'); applyLayout(d);
+  $('cl-close').focus();
+}
+function closeSheet(restore = true) {
+  if (!state.sheet) return;
+  state.sheet = false; $('checklist').style.transform = ''; if (state.detail) applyLayout(state.detail);
+  if (restore && !$('cl-btn').hidden) $('cl-btn').focus();
+}
+function applyLayout(d) {
+  const panel = $('checklist'), want = panelWanted(d), narrow = isNarrow();
+  if (!want || !narrow) state.sheet = false;
+  const sheet = want && narrow && state.sheet;
+  const open = want && !narrow && panelOpen(d);
+  panel.hidden = !(open || sheet);
+  panel.classList.toggle('sheet', sheet);
+  if (sheet) { panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); } else { panel.setAttribute('role', 'region'); panel.removeAttribute('aria-modal'); }
+  $('cl-backdrop').hidden = !sheet;
+  $('thread-main').inert = sheet;
+  $('app').querySelector('.list').inert = sheet; document.querySelector('#open > .thread-head').inert = sheet;
+  const count = clCount(d);
+  const tab = $('cl-tab');
+  tab.hidden = !(want && !narrow && !open);
+  tab.replaceChildren(donutNode(d.checklist || { total: 0 }), `Checklist${count ? ` ${count}` : ''} ‹`);
+  tab.setAttribute('aria-label', `Show checklist${count ? `, ${count} done` : ''}`);
+  $('cl-hide').setAttribute('aria-expanded', String(open)); $('cl-hide').hidden = narrow; $('cl-close').hidden = !narrow;
+  const btn = $('cl-btn');
+  btn.hidden = !(want && narrow);
+  btn.replaceChildren(donutNode(d.checklist || { total: 0 }), `Checklist${count ? ` ${count}` : ''}`);
+  btn.setAttribute('aria-expanded', String(sheet));
+  $('cl-foot').hidden = d.read_only === true;
 }
 function drawChecklist(d, force = false) {
-  const box = $('checklist');
-  if (!d) { box.hidden = true; return; }
-  box.hidden = false;
+  if (!d) { $('checklist').hidden = true; $('cl-tab').hidden = true; $('cl-btn').hidden = true; $('cl-backdrop').hidden = true; return; }
+  applyLayout(d);
   const items = d.checklist_items || [];
   const key = JSON.stringify([d.id, items, state.clEdit, state.profile.agent.name, d.read_only === true]);
   if (key === state.clShown) return;
-  const typing = box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+  const typing = $('cl-body').contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
   if (typing && !force) return; // never pull the field out from under the user; the next poll catches up
   state.clShown = key;
   const c = d.checklist || { total: 0, done: 0, claimed: 0 };
-  $('cl-summary').textContent = c.total ? checklistSummary(c) : 'no items yet';
-  if (state.clOpen[d.id] === undefined) state.clOpen[d.id] = items.length > 0 && innerWidth > 759; // on a phone it starts folded
-  box.open = !!state.clOpen[d.id];
-  $('cl-body').replaceChildren(...OWNERS.map(([o, title, ph]) => listNode(o, title, ph, items)));
+  $('cl-summary').textContent = c.total ? `· ${c.done} of ${c.total}` : '· no items yet';
+  $('cl-donut').replaceChildren(donutNode(c));
+  const bar = $('cl-progress'); bar.setAttribute('aria-valuemax', String(c.total)); bar.setAttribute('aria-valuenow', String(c.done)); bar.setAttribute('aria-valuetext', donutLabel(c));
+  bar.firstElementChild.style.width = c.total ? `${Math.round((c.done / c.total) * 100)}%` : '0%';
+  $('cl-body').replaceChildren(...OWNERS.map(([o, title]) => listNode(o, title, items)));
+}
+function setOwner(owner) {
+  state.clOwner = owner;
+  $('cl-owner-agent').setAttribute('aria-pressed', String(owner === 'agent')); $('cl-owner-user').setAttribute('aria-pressed', String(owner === 'user'));
+  $('cl-add').placeholder = OWNERS.find(o => o[0] === owner)[2];
 }
 function focusAdd(owner) {
   const d = state.detail; if (!d || d.read_only) return false;
-  state.clOpen[d.id] = true; $('checklist').open = true; drawChecklist(d, true);
-  $(`cl-add-${owner}`).focus(); return true;
+  setOwner(owner);
+  if (isNarrow()) { openSheet(); } else if (!panelOpen(d)) setPanel(d, true);
+  $('cl-add').focus(); return true;
 }
+function toggleChecklist() {
+  const d = state.detail; if (!d || !panelWanted(d)) return;
+  if (isNarrow()) { if (state.sheet) closeSheet(); else openSheet(); } else setPanel(d, !panelOpen(d));
+}
+const hiddenWithin = (n, root) => { for (let x = n; x && x !== root; x = x.parentElement) if (x.hidden) return true; return false; };
+function trapTab(e) { // keep Tab inside the sheet while it is open
+  if (!sheetOpen() || e.key !== 'Tab') return;
+  const nodes = [...$('checklist').querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])')].filter(n => !n.disabled && !hiddenWithin(n, $('checklist')));
+  if (!nodes.length) return;
+  const first = nodes[0], last = nodes[nodes.length - 1];
+  if (!$('checklist').contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+let sheetDrag = null; // swipe down on the sheet header to close it
+function dragStart(e) { if (!sheetOpen() || e.target.closest('button')) return; sheetDrag = { y: e.touches[0].clientY, dy: 0 }; }
+function dragMove(e) { if (!sheetDrag) return; sheetDrag.dy = Math.max(0, e.touches[0].clientY - sheetDrag.y); $('checklist').style.transform = `translateY(${sheetDrag.dy}px)`; }
+function dragEnd() { if (!sheetDrag) return; const far = sheetDrag.dy > 70; sheetDrag = null; if (far) closeSheet(); else $('checklist').style.transform = ''; }
 
 // A read-only thread only carries updates: no composer, and a note saying why.
 function drawReadOnly(d) {
@@ -662,7 +737,7 @@ function route() {
   const metrics = raw === 'metrics', id = metrics ? null : raw;
   if (id === state.openId && metrics === state.metricsOn) return;
   state.metricsOn = metrics;
-  state.openId = id; state.detail = null; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true;
+  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true;
   $('text').value = ''; drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
@@ -837,6 +912,7 @@ function onKey(e) {
     return;
   }
   if (mod) return;
+  if (e.key === 'Escape' && sheetOpen() && !anyDialog()) { e.preventDefault(); closeSheet(); return; }
   if (lightOpen()) {
     if (e.key === 'ArrowLeft') { e.preventDefault(); flip(-1); } else if (e.key === 'ArrowRight') { e.preventDefault(); flip(1); }
     return;
@@ -852,6 +928,8 @@ function onKey(e) {
   }
   if (e.key === '?') { e.preventDefault(); $('help-dialog').showModal(); return; }
   if (e.shiftKey) return;
+  if (e.target.classList?.contains('msg') && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) { e.preventDefault(); moveMsg(e.target, e.key === 'Home' ? 'start' : e.key === 'End' ? 'end' : e.key === 'ArrowDown' ? 1 : -1); return; }
+  if (e.key === 'l' && state.detail) { e.preventDefault(); toggleChecklist(); return; }
   if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); step(1); }
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
   else if (e.key === 'e' && state.detail) { e.preventDefault(); toggleDone(); }
@@ -881,11 +959,29 @@ $('merge-cancel').addEventListener('click', () => $('merge-dialog').close());
 $('merge-q').addEventListener('input', drawMergeList);
 $('merge-back').addEventListener('click', () => { mergeTarget = null; $('merge-confirm').hidden = true; });
 $('merge-go').addEventListener('click', () => { if (mergeTarget) doMerge(mergeTarget); });
-$('checklist').addEventListener('toggle', () => { if (state.detail) state.clOpen[state.detail.id] = $('checklist').open; });
+$('cl-hide').addEventListener('click', () => { if (state.detail) setPanel(state.detail, false); });
+$('cl-tab').addEventListener('click', () => { if (state.detail) { setPanel(state.detail, true); $('cl-hide').focus(); } });
+$('cl-btn').addEventListener('click', toggleChecklist);
+$('cl-close').addEventListener('click', () => closeSheet());
+$('cl-backdrop').addEventListener('click', () => closeSheet());
+$('checklist').addEventListener('keydown', trapTab);
+for (const o of ['agent', 'user']) $(`cl-owner-${o}`).addEventListener('click', () => { setOwner(o); $('cl-add').focus(); });
+$('cl-add').addEventListener('keydown', e => { if (e.key === 'Escape' && !sheetOpen()) { e.stopPropagation(); $('cl-add').blur(); } });
+$('cl-foot').addEventListener('submit', async e => {
+  e.preventDefault();
+  const text = $('cl-add').value.trim(); if (!text) return;
+  $('cl-add').value = ''; await clChange('POST', '', { owner: state.clOwner, text });
+  $('cl-add').focus();
+});
+$('cl-head').addEventListener('touchstart', dragStart, { passive: true });
+$('cl-head').addEventListener('touchmove', dragMove, { passive: true });
+$('cl-head').addEventListener('touchend', dragEnd);
+$('cl-head').addEventListener('touchcancel', dragEnd);
+$('msgs').addEventListener('focusin', e => { const n = e.target.closest?.('.msg[data-mid]'); if (n && n.parentElement === $('msgs')) { state.msgStop = n.dataset.mid; applyStop(); } });
 $('back').addEventListener('click', () => { location.hash = '#/'; });
 $('metrics-back').addEventListener('click', () => { location.hash = '#/'; });
 let resizeTimer;
-window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.metricsOn && state.mdata) { state.mdrawn = ''; drawMetrics(); } }, 120); });
+window.addEventListener('resize', () => { if (state.detail) applyLayout(state.detail); clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.metricsOn && state.mdata) { state.mdrawn = ''; drawMetrics(); } }, 120); });
 $('new-thread').addEventListener('click', openNew);
 $('new-cancel').addEventListener('click', () => $('new-dialog').close());
 $('new-form').addEventListener('submit', startThread);

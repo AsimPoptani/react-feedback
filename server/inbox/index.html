@@ -208,12 +208,9 @@ table.keys td:first-child { white-space: nowrap; width: 1%; }
 .show { min-height: 28px; padding: 0 10px; border-width: 1px; border-radius: 999px; font-size: 13px; }
 .divider { display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px dashed var(--ink-2); }
-.checklist { border-bottom: 1px solid var(--rule); background: var(--panel); padding: 6px 16px; max-height: 42vh; overflow-y: auto; }
-.checklist summary { cursor: pointer; min-height: 32px; display: flex; gap: 8px; align-items: center; }
-.checklist summary span { color: var(--ink-2); font-size: 14px; }
-.cl-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 6px 0 8px; }
-.cl-list h3 { margin: 0 0 4px; font: 800 15px var(--f-display); display: flex; gap: 8px; align-items: baseline; }
-.cl-list h3 small { color: var(--ink-2); font-weight: 600; }
+.cl-list { margin-bottom: 14px; }
+.cl-list h4 { margin: 8px 0 4px; font: 800 12px var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+.cl-list h4 small { font-weight: 600; text-transform: none; letter-spacing: 0; }
 .cl-list ul { list-style: none; margin: 0; padding: 0; }
 .cl-item { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--rule); align-items: flex-start; flex-wrap: wrap; }
 .box { width: 22px; height: 22px; border: 2px solid var(--ink); border-radius: 6px; flex: none; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; background: var(--white); margin-top: 2px; }
@@ -224,8 +221,45 @@ table.keys td:first-child { white-space: nowrap; width: 1%; }
 .cl-meta { font-size: 12px; color: var(--ink-2); }
 .cl-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .cl-actions button, .cl-add button { min-height: 30px; padding: 0 10px; border-width: 1px; border-radius: 8px; font-size: 13px; }
-.cl-add { display: flex; gap: 6px; margin-top: 8px; }
+.cl-add { display: flex; gap: 6px; }
 .cl-add input, .cl-edit { flex: 1; min-width: 0; border: 2px solid var(--ink); border-radius: 8px; padding: 4px 8px; background: var(--white); min-height: 32px; }
+/* RF4: the checklist side panel (wide), the tab that reopens it, and the bottom sheet (narrow) */
+.thread-body { flex: 1; display: flex; min-height: 0; min-width: 0; position: relative; }
+.thread-main { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.cl-panel { width: clamp(260px, 26vw, 340px); flex: none; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--rule); background: var(--panel); }
+.cl-panel[hidden], .cl-tab[hidden], .cl-btn[hidden], .cl-backdrop[hidden] { display: none; }
+.cl-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px 6px; }
+.cl-head h3 { margin: 0; font: 800 17px var(--f-display); flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.cl-head h3 .cl-count { color: var(--ink-2); font: 600 14px var(--f-body); }
+.cl-head button[hidden] { display: none; }
+.cl-head button { min-height: 30px; padding: 0 10px; border-width: 1px; border-radius: 8px; font-size: 13px; }
+.cl-grab { display: none; }
+.cl-progress { height: 6px; margin: 0 14px 6px; border-radius: 999px; background: var(--rule); overflow: hidden; }
+.cl-progress > span { display: block; height: 100%; background: var(--teal); }
+.cl-panel .error { margin: 0 14px 6px; }
+.cl-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 14px 8px; }
+.cl-foot { border-top: 1px solid var(--rule); padding: 8px 14px 64px; background: var(--panel); }
+.cl-foot[hidden] { display: none; }
+.cl-owner { display: flex; gap: 6px; margin-bottom: 6px; }
+.cl-owner button { min-height: 28px; padding: 0 10px; border-width: 1px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.cl-owner button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.cl-tab { flex: none; width: 38px; border: 0; border-left: 1px solid var(--rule); border-radius: 0; background: var(--panel); padding: 12px 0; min-height: 0; writing-mode: vertical-rl; display: flex; align-items: center; justify-content: flex-start; gap: 8px; font-weight: 700; font-size: 14px; }
+.cl-btn { display: none; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; }
+.cl-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .5); z-index: 50; }
+.donut { flex: none; display: inline-block; vertical-align: middle; }
+.donut-track { stroke: var(--rule); }
+.donut-claimed { stroke: var(--ochre); opacity: .65; }
+.donut-done { stroke: var(--teal); }
+.tally { display: inline-flex; align-items: center; gap: 4px; }
+.cl-tab .donut, .cl-btn .donut { width: 16px; height: 16px; }
+@media (max-width: 899px) {
+  .cl-btn { display: inline-flex; }
+  .cl-tab { display: none; }
+  .cl-panel { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 82vh; z-index: 60; border-left: 0; border-top: 2px solid var(--ink); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(0, 0, 0, .3); }
+  .cl-grab { display: block; width: 44px; height: 5px; border-radius: 999px; background: var(--ink-2); margin: 8px auto 0; }
+  .cl-head { padding-top: 8px; touch-action: none; }
+  .cl-close { font-size: 20px; line-height: 1; min-width: 36px; }
+}
 #pin-thread[aria-pressed="true"] { background: var(--ochre-tint); border-color: var(--ochre); }
 .merge-list { list-style: none; margin: 10px 0 0; padding: 0; max-height: 40vh; overflow-y: auto; border-top: 1px solid var(--rule); }
 .merge-pick { width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; display: flex; flex-direction: column; background: transparent; }
@@ -282,8 +316,9 @@ table.areas th { color: var(--ink-2); font-weight: 700; font-size: 12px; white-s
 table.areas tbody th { font-size: 14px; color: var(--ink); font-weight: 600; }
 table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 @media (max-width: 759px) { .tiles.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } table.areas th, table.areas td { padding: 6px 5px; font-size: 13px; } table.areas th { font-size: 11px; } .thread-head .winbar { order: 3; flex: 1 1 100%; } .two { grid-template-columns: 1fr; } .tiles.four .big { font-size: 18px; } .tile .big { font-size: 22px; } }
-@media (max-width: 759px) { .cl-cols { grid-template-columns: 1fr; } .checklist { max-height: 46vh; } .thread-head { gap: 6px; } .thread-head h2 { flex: 1 1 100%; order: 2; } .thread-head .back { order: 0; } .thread-head button { order: 1; } }
+@media (max-width: 759px) { .thread-head { gap: 6px; } .thread-head h2 { flex: 1 1 100%; order: 2; } .thread-head .back { order: 0; } .thread-head button { order: 1; } }
 @media (max-width: 759px) {
+  .me-panel { padding-bottom: 64px; } /* the launcher sits bottom-right over the profile button otherwise */
   .app { grid-template-columns: 1fr; }
   .thread { display: none; }
   .app.has-thread .list { display: none; }
@@ -332,36 +367,56 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
         <button type="button" id="pin-thread" aria-pressed="false"></button>
         <button type="button" id="merge-open">Merge into…</button>
         <button type="button" id="toggle-done"></button>
+        <button type="button" class="cl-btn" id="cl-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="checklist" hidden></button>
       </div>
-      <details class="checklist" id="checklist" hidden>
-        <summary><strong>Checklist</strong> <span id="cl-summary"></span></summary>
-        <p class="error" id="cl-error" role="alert" hidden></p>
-        <div class="cl-cols" id="cl-body"></div>
-      </details>
-      <div class="scroll" id="scroll">
-        <section class="capture" id="capture" aria-label="Original capture" hidden></section>
-        <div class="msgs" id="msgs" aria-live="polite"></div>
+      <div class="thread-body" id="thread-body">
+        <div class="thread-main" id="thread-main">
+          <div class="scroll" id="scroll">
+            <section class="capture" id="capture" aria-label="Original capture" hidden></section>
+            <div class="msgs" id="msgs" aria-live="polite"></div>
+          </div>
+          <form class="composer" id="composer">
+            <div class="replybar" id="replybar" hidden>
+              <span class="replybar-text" id="replybar-text"></span>
+              <button type="button" class="replybar-x" id="replybar-x" aria-label="Cancel reply">&times;</button>
+            </div>
+            <label class="sr" for="text">Message</label>
+            <textarea id="text" placeholder="Write a message. Paste an image to attach it (Ctrl/Cmd+V)." maxlength="10000"></textarea>
+            <div class="previews" id="previews"></div>
+            <p class="error" id="error" role="alert" hidden></p>
+            <div class="bar">
+              <button type="button" id="attach">Attach image<kbd data-keys="mod+I">I</kbd></button>
+              <input type="file" id="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+              <span class="hint grow"></span>
+              <button type="submit" class="primary" id="send">Send<kbd data-keys="mod+Enter">↵</kbd></button>
+            </div>
+          </form>
+          <div class="ro-note" id="ro-note" role="note" hidden></div>
+        </div>
+        <aside class="cl-panel" id="checklist" role="region" aria-labelledby="cl-h" hidden>
+          <div class="cl-grab" aria-hidden="true"></div>
+          <div class="cl-head" id="cl-head">
+            <h3 id="cl-h"><span id="cl-donut"></span><span>Checklist</span><span class="cl-count" id="cl-summary"></span></h3>
+            <button type="button" class="cl-hide" id="cl-hide" aria-expanded="true" aria-controls="checklist">Hide ›</button>
+            <button type="button" class="cl-close" id="cl-close" aria-label="Close checklist">&times;</button>
+          </div>
+          <div class="cl-progress" id="cl-progress" role="progressbar" aria-label="Checklist progress" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><span></span></div>
+          <p class="error" id="cl-error" role="alert" hidden></p>
+          <div class="cl-body" id="cl-body"></div>
+          <form class="cl-foot" id="cl-foot">
+            <div class="cl-owner" role="group" aria-label="Add an item for">
+              <button type="button" id="cl-owner-agent" aria-pressed="true">For the agent</button>
+              <button type="button" id="cl-owner-user" aria-pressed="false">For you</button>
+            </div>
+            <div class="cl-add"><input type="text" id="cl-add" maxlength="300" aria-label="Add a checklist item" placeholder="Add something for the agent to do"><button type="submit">Add</button></div>
+          </form>
+        </aside>
+        <button type="button" class="cl-tab" id="cl-tab" aria-expanded="false" aria-controls="checklist" hidden></button>
       </div>
-      <form class="composer" id="composer">
-        <div class="replybar" id="replybar" hidden>
-          <span class="replybar-text" id="replybar-text"></span>
-          <button type="button" class="replybar-x" id="replybar-x" aria-label="Cancel reply">&times;</button>
-        </div>
-        <label class="sr" for="text">Message</label>
-        <textarea id="text" placeholder="Write a message. Paste an image to attach it (Ctrl/Cmd+V)." maxlength="10000"></textarea>
-        <div class="previews" id="previews"></div>
-        <p class="error" id="error" role="alert" hidden></p>
-        <div class="bar">
-          <button type="button" id="attach">Attach image<kbd data-keys="mod+I">I</kbd></button>
-          <input type="file" id="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
-          <span class="hint grow"></span>
-          <button type="submit" class="primary" id="send">Send<kbd data-keys="mod+Enter">↵</kbd></button>
-        </div>
-      </form>
-      <div class="ro-note" id="ro-note" role="note" hidden></div>
     </div>
   </main>
 </div>
+<div class="cl-backdrop" id="cl-backdrop" hidden></div>
 <dialog id="lightbox" class="light" aria-label="Image viewer">
   <p class="light-cap" id="light-cap" aria-live="polite"></p>
   <img alt="">

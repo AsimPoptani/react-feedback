@@ -1,6 +1,6 @@
 {
   "name": "react-feedback",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A drop-in feedback widget for React apps (region, element, section and page screenshots with a note) plus a small Bun server, inbox and CLI.",
   "license": "MIT",
   "type": "module",
@@ -26,6 +26,7 @@
     "test": "bun run test:widget && bun run test:server",
     "test:widget": "vitest run",
     "test:server": "bun test server",
+    "test:e2e": "bun e2e/smoke.mjs",
     "build": "bun run build:lib && bun run build:embed && bun run build:types && cp src/widget/feedback.css dist/feedback.css",
     "build:lib": "vite build --config vite.lib.config.ts",
     "build:embed": "vite build --config vite.embed.config.ts",

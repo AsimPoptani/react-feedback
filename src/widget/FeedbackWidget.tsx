@@ -7,6 +7,7 @@ import { FeedbackDraft } from './FeedbackDraft.js';
 import { FeedbackList } from './FeedbackList.js';
 import { MarkupEditor } from './MarkupEditor.js';
 import { RegionPicker } from './RegionPicker.js';
+import { useLauncherPosition, MARGIN } from './launcherPosition.js';
 import { useShortcuts, modifiers, keyLabel } from './shortcuts.js';
 import { Keycap } from './Keycap.js';
 import { FirstRunTip, HintsContext } from './StepHints.js';
@@ -59,6 +60,7 @@ function FeedbackPanel({ outbox, endpoint, position }: { outbox: Outbox; endpoin
   const generation = useRef(0);
   const job = useRef<Job | null>(null);
   const launcher = useRef<HTMLButtonElement>(null);
+  const place = useLauncherPosition(launcher);
   const previousStep = useRef<Step>(step);
   const root = useRef<HTMLDivElement>(null);
   // Focus before the widget opened. A Save returns there (the launcher if that control is gone);
@@ -146,12 +148,23 @@ function FeedbackPanel({ outbox, endpoint, position }: { outbox: Outbox; endpoin
     outbox.enqueue({ id: newId(), label: text.trim().split('\n')[0]!.slice(0, 80), text, capture: taken.capture ?? taken.pending, build: result => feedbackBody(taken, result, text, drawn, live) });
     reset(); setMode(null); setSaved(true); savedClose.current = true; setStep('closed');
   }
-  return <div className={`fb-root${position === 'bottom-right' ? ' fb-right' : ''}`} data-feedback-root data-position={position} ref={root}>
-    <div className="fb-launchers"><button ref={launcher} type="button" className={`fb-launcher${queue.failed ? ' fb-launcher-warn' : ''}`} aria-expanded={step !== 'closed'} aria-keyshortcuts="Alt+Shift+F" onClick={toggle}>Feedback <Keycap>{keyLabel('Alt', 'Shift', 'F')}</Keycap>{queue.items.length > 0 && <span className="fb-pill-count"> · {pillText(queue)}</span>}</button></div>
+  const side = place.side ?? (position === 'bottom-right' ? 'right' : 'left');
+  const launcherStyle = place.placed ? { left: place.placed.x, top: place.placed.y, right: 'auto', bottom: 'auto' } as const : undefined;
+  // The toolbar follows a dragged launcher: above it in the lower half of the screen, below it in the upper half.
+  const toolbarStyle = (() => {
+    if (!place.placed) return undefined;
+    const { vw, vh, h } = place.size();
+    const width = Math.min(370, vw - 24);
+    const left = Math.max(MARGIN, Math.min(place.placed.x, vw - width - MARGIN));
+    return place.placed.y > vh / 2 ? { left, right: 'auto', top: 'auto', bottom: vh - place.placed.y + 8 } as const : { left, right: 'auto', bottom: 'auto', top: place.placed.y + h + 8 } as const;
+  })();
+  const dragToolbar = (event: React.PointerEvent<HTMLElement>) => { if (!(event.target as Element).closest('button, input, textarea, a, summary, aside')) place.handlers.onPointerDown(event); };
+  return <div className={`fb-root${side === 'right' ? ' fb-right' : ''}${place.dragging ? ' fb-dragging' : ''}`} data-feedback-root data-position={side === 'right' ? 'bottom-right' : 'bottom-left'} ref={root}>
+    <div className="fb-launchers" style={launcherStyle}><button ref={launcher} type="button" className={`fb-launcher${queue.failed ? ' fb-launcher-warn' : ''}`} aria-expanded={step !== 'closed'} aria-keyshortcuts="Alt+Shift+F" aria-description="Drag to move, or Alt plus the arrow keys" {...place.handlers} onKeyDown={place.onKeyDown} onClick={() => { if (!place.wasDrag()) toggle(); }}>Feedback <Keycap>{keyLabel('Alt', 'Shift', 'F')}</Keycap>{queue.items.length > 0 && <span className="fb-pill-count"> · {pillText(queue)}</span>}</button></div>
     {saved && <div className="fb-toast" role="status">Queued</div>}
-    {step === 'toolbar' && <section className="fb-panel fb-capture-toolbar" aria-label="Feedback toolbar">
+    {step === 'toolbar' && <section className="fb-panel fb-capture-toolbar" aria-label="Feedback toolbar" style={toolbarStyle} onPointerDown={dragToolbar} onPointerMove={place.handlers.onPointerMove} onPointerUp={place.handlers.onPointerUp} onPointerCancel={place.handlers.onPointerCancel}>
       <div className="fb-toolbar">{modes.map((mode, index) => <button type="button" key={mode} data-choice={mode} aria-label={['Region', 'Element', 'Section', 'Full page'][index]} aria-keyshortcuts={`${modeKeys[index]} ${index + 1}`} onClick={() => choose(mode)}>{['Region', 'Element', 'Section', 'Full page'][index]} <Keycap>{modeKeys[index]}</Keycap></button>)}
-        <button type="button" data-choice="list" aria-label="My feedback" aria-keyshortcuts="L" onClick={() => setStep('list')}>My feedback <Keycap>L</Keycap></button><button type="button" aria-label="Shortcuts" aria-keyshortcuts="?" aria-expanded={help} onClick={() => setHelp(value => !value)}><Keycap>?</Keycap> Shortcuts</button></div>
+        <button type="button" data-choice="list" aria-label="My feedback" aria-keyshortcuts="L" onClick={() => setStep('list')}>My feedback <Keycap>L</Keycap></button><button type="button" aria-label="Shortcuts" aria-keyshortcuts="?" aria-expanded={help} onClick={() => setHelp(value => !value)}><Keycap>?</Keycap> Shortcuts</button>{place.custom && <button type="button" data-choice="reset-position" onClick={place.reset}>Reset position</button>}</div>
       <FirstRunTip />
       {help && <ShortcutHelp />}
     </section>}
@@ -168,6 +181,7 @@ function ShortcutHelp() {
   const { command, alt } = modifiers();
   return <aside className="fb-shortcut-help" aria-label="Keyboard shortcuts">
     <p>{alt}+Shift+F: toolbar · {alt}+Shift+R/E/S/P: Region / Element / Section / Full page · {alt}+Shift+L: My feedback</p>
+    <p>Move it: drag the Feedback button or the toolbar · {alt}+arrows (button focused): nudge · Reset position: back to the corner</p>
     <p>Toolbar: R/E/S/P or 1–4: modes · L: My feedback · ?: shortcuts</p>
     <p>Selection: Enter: Write note · Esc: back · ↑/↓: parent/child · Region arrows: move 1 px, Shift: 10 px, Alt: resize</p>
     <p>Note: {command}↵: Save · {alt}+D: Draw on it · Esc: back</p>
