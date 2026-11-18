@@ -9,7 +9,7 @@ import { MarkupEditor } from './MarkupEditor.js';
 import { RegionPicker } from './RegionPicker.js';
 import { useShortcuts, modifiers, keyLabel } from './shortcuts.js';
 import { Keycap } from './Keycap.js';
-import { FirstRunTip } from './StepHints.js';
+import { FirstRunTip, HintsContext } from './StepHints.js';
 import { PickerOverlay } from './PickerOverlay.js';
 import { focusInto, restoreFocus } from './focus.js';
 import { feedbackBody } from './draft.js';
@@ -30,18 +30,24 @@ function startCapture(mode: CaptureMode, target: Target) {
 function pillText({ pending, failed }: { pending: number; failed: number }) {
   return [pending ? `${pending} sending` : '', failed ? `${failed} failed` : ''].filter(Boolean).join(', ');
 }
+export type LauncherPosition = 'bottom-left' | 'bottom-right';
+export const positionOf = (value: unknown): LauncherPosition => (value === 'bottom-right' ? 'bottom-right' : 'bottom-left');
 export interface FeedbackWidgetProps {
   /** Base URL of the feedback server. Defaults to "/__feedback". */
   endpoint?: string;
+  /** Which bottom corner holds the launcher and its panels. Defaults to "bottom-left". */
+  position?: LauncherPosition;
+  /** "on" shows the step-by-step shortcut banner while a capture mode is active. Defaults to "off" (press ? for the shortcuts). */
+  hints?: 'on' | 'off';
 }
-export default function FeedbackWidget({ endpoint = "/__feedback" }: FeedbackWidgetProps) {
+export default function FeedbackWidget({ endpoint = "/__feedback", position = "bottom-left", hints = "off" }: FeedbackWidgetProps) {
   const base = endpoint.replace(/\/$/, '');
   const [outbox] = useState(() => new Outbox(base, openStore()));
   outbox.endpoint = base;
   useEffect(() => { outbox.start(); return () => outbox.stop(); }, [outbox]);
-  return <OutboxContext.Provider value={outbox}><FeedbackPanel outbox={outbox} endpoint={base} /></OutboxContext.Provider>;
+  return <OutboxContext.Provider value={outbox}><HintsContext.Provider value={hints === 'on'}><FeedbackPanel outbox={outbox} endpoint={base} position={positionOf(position)} /></HintsContext.Provider></OutboxContext.Provider>;
 }
-function FeedbackPanel({ outbox, endpoint }: { outbox: Outbox; endpoint: string }) {
+function FeedbackPanel({ outbox, endpoint, position }: { outbox: Outbox; endpoint: string; position: LauncherPosition }) {
   const [step, setStep] = useState<Step>('closed');
   const [mode, setMode] = useState<CaptureMode | null>(null);
   const [region, setRegion] = useState<Rect | null>(null);
@@ -140,7 +146,7 @@ function FeedbackPanel({ outbox, endpoint }: { outbox: Outbox; endpoint: string 
     outbox.enqueue({ id: newId(), label: text.trim().split('\n')[0]!.slice(0, 80), text, capture: taken.capture ?? taken.pending, build: result => feedbackBody(taken, result, text, drawn, live) });
     reset(); setMode(null); setSaved(true); savedClose.current = true; setStep('closed');
   }
-  return <div className="fb-root" data-feedback-root ref={root}>
+  return <div className={`fb-root${position === 'bottom-right' ? ' fb-right' : ''}`} data-feedback-root data-position={position} ref={root}>
     <div className="fb-launchers"><button ref={launcher} type="button" className={`fb-launcher${queue.failed ? ' fb-launcher-warn' : ''}`} aria-expanded={step !== 'closed'} aria-keyshortcuts="Alt+Shift+F" onClick={toggle}>Feedback <Keycap>{keyLabel('Alt', 'Shift', 'F')}</Keycap>{queue.items.length > 0 && <span className="fb-pill-count"> · {pillText(queue)}</span>}</button></div>
     {saved && <div className="fb-toast" role="status">Queued</div>}
     {step === 'toolbar' && <section className="fb-panel fb-capture-toolbar" aria-label="Feedback toolbar">

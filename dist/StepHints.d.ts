@@ -1,3 +1,4 @@
+export declare const HintsContext: import("react").Context<boolean>;
 export declare function StepHints({ step, locked }: {
     step: string;
     locked?: boolean;

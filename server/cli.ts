@@ -1,9 +1,9 @@
 // Agent CLI (react-feedback <command>). Writes straight into FEEDBACK_DIR through the same store the server uses.
-//   react-feedback reply <id> "text" [--image path ...]
+//   react-feedback reply <id> "text" [--image path ...] [--to <message-id>]   (quote one of the thread's messages)
 //   react-feedback new "title" "text" [--image path ...]
 //   react-feedback status <id> open|done   (seen is an alias for open)
 //   react-feedback list [--waiting]   (--unread is an alias)
-//   react-feedback read <id>
+//   react-feedback read <id>   (marks it read, then prints the thread with each quote's context)
 //   react-feedback ask <id> "prompt" --option "Label|description" ... [--multi] [--no-other]
 //   react-feedback ask-new "title" "prompt" --option ... [--multi] [--no-other]
 //   react-feedback profile agent --avatar path
@@ -27,12 +27,12 @@ export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(
 const USAGE = `Usage:
   react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON)
   react-feedback --help
-  react-feedback reply <id> "text" [--image path ...]
+  react-feedback reply <id> "text" [--image path ...] [--to <message-id>]
   react-feedback new "title" "text" [--image path ...]
   react-feedback status <id> open|done   (seen is an alias for open)
   react-feedback list [--waiting]   (--unread is an alias)
-  react-feedback read <id>
-  react-feedback ask <id> "prompt" --option "Label|optional description" ... [--multi] [--no-other]
+  react-feedback read <id>   (marks it read and prints the thread)
+  react-feedback ask <id> "prompt" --option "Label|optional description" ... [--multi] [--no-other] [--to <message-id>]
   react-feedback ask-new "title" "prompt" --option ... [--multi] [--no-other]
   react-feedback profile agent --avatar path
   react-feedback reply|new|ask ... [--needs-you | --done | --fyi]
@@ -45,23 +45,23 @@ const USAGE = `Usage:
   react-feedback ack <id>
   react-feedback metrics [--window 24h|7d|all]`;
 
-function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null } {
+function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null } {
   const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [];
-  let avatar: string | null = null, window: string | null = null;
+  let avatar: string | null = null, window: string | null = null, to: string | null = null;
   let collecting = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--image') { collecting = true; continue; }
-    if (arg === '--option' || arg === '--avatar' || arg === '--window') {
+    if (arg === '--option' || arg === '--avatar' || arg === '--window' || arg === '--to') {
       const value = args[++i];
       if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
-      if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else avatar = value;
+      if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else avatar = value;
       collecting = false; continue;
     }
     if (arg.startsWith('--')) { flags.push(arg); collecting = false; continue; }
     (collecting ? images : words).push(arg);
   }
-  return { words, images, flags, options, avatar, window };
+  return { words, images, flags, options, avatar, window, to };
 }
 function question(prompt: string, options: string[], flags: string[]): store.QuestionInput {
   return { prompt, multi: flags.includes('--multi'), allow_other: !flags.includes('--no-other'),
@@ -100,6 +100,17 @@ async function todos(dir: string, flags: string[]): Promise<string> {
   if (!rows.length) return filter === 'claimed' ? 'Nothing is waiting for your check.' : filter === 'mine' ? 'No open items for the agent.' : 'No open checklist items.';
   return rows.map(r => `${r.thread}  ${describe(r.item)}  <${r.title}>`).join('\n');
 }
+// What `read` prints for one message: who, when, the quoted message if it quotes one, then the text.
+const firstLine = (m: store.Message) => (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : '')).slice(0, 120);
+export function transcript(messages: store.Message[], names: Record<store.Author, string> = { user: 'user', agent: 'agent' }): string {
+  const byId = new Map(messages.map(m => [m.id, m]));
+  return messages.map(m => {
+    const quoted = m.reply_to ? byId.get(m.reply_to) : undefined;
+    const quote = m.reply_to ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
+    const body = m.divider ? `--- ${m.text} ---` : (m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n');
+    return `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${quote}\n${body}`;
+  }).join('\n');
+}
 async function list(dir: string, waiting: boolean): Promise<string> {
   const rows = (await store.listThreads(dir)).filter(t => !waiting || t.waiting === 'agent');
   if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
@@ -108,7 +119,7 @@ async function list(dir: string, waiting: boolean): Promise<string> {
 export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig): Promise<string> {
   const [command, ...rest] = argv;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
-  const { words, images, flags, options, avatar, window } = split(rest);
+  const { words, images, flags, options, avatar, window, to } = split(rest);
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
     const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
@@ -128,13 +139,17 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     return `${words[0]} ${status}`;
   }
   if (command === 'reply' && words.length === 2) {
-    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), flag: flagOf(flags) });
+    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), flag: flagOf(flags), reply_to: to ?? undefined });
     const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, words[0]!))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
     return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${closed})`;
   }
-  if (command === 'read' && words.length === 1) { await store.markAgentRead(dir, words[0]!); return `Marked ${words[0]} read`; }
+  if (command === 'read' && words.length === 1) {
+    await store.markAgentRead(dir, words[0]!);
+    const { messages } = await store.summarise(dir, words[0]!);
+    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages)}` : ''}`;
+  }
   if (command === 'ask' && words.length === 2) {
-    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags), flag: flagOf(flags) });
+    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags), flag: flagOf(flags), reply_to: to ?? undefined });
     return `Asked on ${words[0]} (${message.id}, question ${message.question!.id})`;
   }
   if (command === 'ask-new' && words.length === 2) {

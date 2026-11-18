@@ -1,6 +1,6 @@
 {
   "name": "react-feedback",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A drop-in feedback widget for React apps (region, element, section and page screenshots with a note) plus a small Bun server, inbox and CLI.",
   "license": "MIT",
   "type": "module",
@@ -19,7 +19,7 @@
     "./package.json": "./package.json"
   },
   "bin": { "react-feedback": "./bin/react-feedback.ts" },
-  "files": ["dist", "bin", "server", "!server/*.test.ts", "README.md", "LICENSE"],
+  "files": ["dist", "bin", "server", "!server/*.test.ts", "!server/dom", "README.md", "LICENSE"],
   "scripts": {
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
     "lint": "biome lint --error-on-warnings .",

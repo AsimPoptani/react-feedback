@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+- **Quote replies.** A message may carry an optional `reply_to` (the id of an earlier message in the same thread). The server validates it (400 for an unknown id), stores it, returns it from the thread API and adds it to the user's `_events.jsonl` line. The inbox has a Reply action on every message (hover or focus, **R** on a focused message, swipe right on touch with a visible Reply button as the fallback), a quote bar above the composer, and a compact quoted snippet on the reply that scrolls to and highlights the original ("Original message unavailable" if it is gone). CLI: `reply <id> "text" --to <message-id>` (also `ask`); `read <id>` now also prints the thread with each quote's context. Merging keeps and remaps the links. Waiting and unread logic is unchanged.
+- `position` prop on the widget (`"bottom-left"`, the default, or `"bottom-right"`) and `data-position` on the embed script.
+- `hints` prop (`"off"` default, `"on"`) and `data-hints` on the embed script, for the step banner.
+- `FEEDBACK_FOLD_FYI=1` folds the agent's FYI and Done messages in the inbox (off by default).
+
+### Changed
+- The step banner is no longer shown while Region, Element or Section is active, because it covered the page being captured. Pass `hints="on"` for the old behaviour; `?` still lists every shortcut. The markup editor keeps its hints.
+- The inbox shows every message in full by default; FYI and Done messages used to fold to one line.
+- The inbox page puts the launcher bottom-right and keeps a clear strip under the composer so the launcher does not cover Send.
+
 ## 0.3.0
 
 ### Added

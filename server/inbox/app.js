@@ -1,5 +1,6 @@
 // Feedback inbox. No build, no deps. All text goes through textContent; nothing is injected as HTML.
 import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas, subHeading } from './areas.js';
+import { isReplySwipe, resolveQuote, snippetOf } from './quote.js';
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
 const MAX_IMAGES = 5;
@@ -9,7 +10,7 @@ const $ = id => document.getElementById(id);
 
 const FOLD_KEY = 'fb-inbox-folds';
 const state = { metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clOpen: {}, clDraft: { agent: '', user: '' }, clEdit: null, clShown: '',
-  view: null, q: '', openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
+  view: null, q: '', replyTo: null, openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -81,7 +82,7 @@ const kbd = keys => el('kbd', { 'data-keys': keys, text: keyLabel(keys) });
 const SHORTCUTS = [
   ['mod+Enter', 'Send the message (or start the thread)'], ['mod+I', 'Attach an image'], ['mod+V', 'Paste an image'], ['mod+K', 'Search threads'],
   ['J / ↓', 'Next thread'], ['K / ↑', 'Previous thread'], ['E', 'Mark the open thread done, or reopen it'], ['N', 'New thread'], ['P', 'Pin or unpin the open thread'],
-  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'],
+  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'],
   ['1–9, Enter', 'Pick an option on the latest open question, then answer'], ['← / →', 'Flip images in the viewer'], ['?', 'This cheat sheet'], ['Esc', 'Close the viewer or a dialog']];
 
 // ---- Profile and avatars
@@ -412,7 +413,9 @@ function ticksFor(d, m) {
   return null;
 }
 // FYI and Done messages from the agent fold to one line; Needs you messages and questions stay open. A read-only (updates) thread never folds.
-const quiet = (d, m) => !d.read_only && m.author === 'agent' && (m.flag === 'fyi' || m.flag === 'done') && !m.question && !m.divider;
+// Off by default: every message shows in full. FEEDBACK_FOLD_FYI=1 on the server sets data-fold-fyi on <body> to fold agent FYI and Done messages to one line.
+const FOLD_FYI = document.body.hasAttribute('data-fold-fyi');
+const quiet = (d, m) => FOLD_FYI && !d.read_only && m.author === 'agent' && (m.flag === 'fyi' || m.flag === 'done') && !m.question && !m.divider;
 const expandKey = (d, m) => `${d.id}:${m.id}`;
 function toggleExpanded(d, m) { const k = expandKey(d, m); if (state.expanded.has(k)) state.expanded.delete(k); else state.expanded.add(k); state.shown = ''; drawMessages(d); }
 function messageNode(d, m) {
@@ -423,7 +426,7 @@ function messageNode(d, m) {
   const badge = m.author === 'agent' ? flagBadge(m.flag) : null;
   if (folded) {
     const first = (m.text.split('\n').find(l => l.trim()) || (m.images.length ? '[image]' : '')).slice(0, 160);
-    return el('article', { class: 'msg agent collapsed', 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
+    return el('article', { class: 'msg agent collapsed', 'data-mid': m.id, 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
       avatar(m.author), ...(badge ? [badge] : []), el('span', { class: 'peek', text: first }), el('time', { datetime: m.created_at, text: when(m.created_at) }),
       el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Show'));
   }
@@ -431,7 +434,9 @@ function messageNode(d, m) {
   if (quiet(d, m) && !farewell) head.append(el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Hide'));
   if (m.author === 'user' && d.acked_through === m.created_at) head.append(el('span', { class: 'acked-note', text: `· ${state.profile.agent.name} acknowledged` }));
   const ticks = ticksFor(d, m); if (ticks) head.append(ticks);
-  const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
+  if (!d.read_only) head.append(el('button', { type: 'button', class: 'reply-btn', 'aria-label': `Reply to ${who.name}, ${when(m.created_at)}`, onclick: () => startReply(m.id) }, 'Reply'));
+  const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '0', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
+  const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
   return node;
@@ -447,6 +452,57 @@ function drawMessages(d) {
   state.shown = key;
   $('msgs').replaceChildren(...d.messages.map(m => messageNode(d, m)));
   if (stick) scroll.scrollTop = scroll.scrollHeight;
+}
+
+// ---- Quote replies: a Reply action on each message, a quote bar above the composer, and a quoted snippet on the reply.
+function quoteNode(d, m) {
+  const q = resolveQuote(d.messages, m);
+  if (!q) return null;
+  if (!q.found) return el('span', { class: 'quote missing', role: 'note', text: q.snippet });
+  const name = state.profile[q.original.author].name;
+  return el('button', { type: 'button', class: `quote ${q.original.author}`, 'aria-label': `In reply to ${name}: ${q.snippet || 'message'}. Go to the original.`, onclick: () => jumpTo(q.original.id) },
+    el('strong', { text: name }), el('span', { class: 'snip', text: q.snippet }));
+}
+function messageEl(id) { return [...$('msgs').children].find(n => n.dataset.mid === id) || null; }
+function jumpTo(id) {
+  const node = messageEl(id);
+  if (!node) return;
+  node.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  node.focus({ preventScroll: true });
+  node.classList.remove('flash'); void node.offsetWidth; node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1700);
+}
+function drawReplyBar() {
+  const d = state.detail, m = state.replyTo && d ? d.messages.find(x => x.id === state.replyTo) : null;
+  if (state.replyTo && !m && d) state.replyTo = null; // the original is gone
+  $('replybar').hidden = !m;
+  if (!m) return;
+  $('replybar-text').replaceChildren(el('strong', { text: state.profile[m.author].name }), snippetOf(m));
+}
+function startReply(id) {
+  const d = state.detail; if (!d || d.read_only || !d.messages.some(m => m.id === id && !m.divider)) return;
+  state.replyTo = id; drawReplyBar(); $('text').focus();
+}
+function cancelReply() { state.replyTo = null; drawReplyBar(); }
+// Swipe a message to the right to reply (touch). The Reply button stays for anyone who cannot swipe.
+const swipe = { node: null, x: 0, y: 0 };
+function swipeStart(e) {
+  const node = e.target.closest && e.target.closest('.msg[data-mid]');
+  if (!node || e.touches.length !== 1 || state.detail?.read_only) { swipe.node = null; return; }
+  swipe.node = node; swipe.x = e.touches[0].clientX; swipe.y = e.touches[0].clientY;
+}
+function swipeMove(e) {
+  if (!swipe.node) return;
+  const dx = e.touches[0].clientX - swipe.x, dy = e.touches[0].clientY - swipe.y;
+  if (dx > 8 && dx > Math.abs(dy)) { swipe.node.classList.add('swiping'); swipe.node.style.transform = `translateX(${Math.min(dx, 72)}px)`; }
+}
+function swipeEnd(e) {
+  const node = swipe.node; swipe.node = null;
+  if (!node) return;
+  const t = e.changedTouches[0], dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+  node.classList.remove('swiping'); node.classList.add('swipe-back'); node.style.transform = '';
+  setTimeout(() => node.classList.remove('swipe-back'), 200);
+  if (isReplySwipe(dx, dy)) startReply(node.dataset.mid);
 }
 
 // ---- Checklist: "For you" and "For the agent". Only the agent ticks; you can say "I've done this".
@@ -583,7 +639,7 @@ function drawThread() {
   if (state.captureFor !== d.id) { drawCapture(d); state.captureFor = d.id; }
   $('merge-open').hidden = !!d.merged_into || d.read_only === true;
   drawPinThread(); drawChecklist(d);
-  drawMessages(d);
+  drawMessages(d); drawReplyBar();
 }
 async function loadThread(id, { quiet = false } = {}) {
   try {
@@ -606,7 +662,7 @@ function route() {
   const metrics = raw === 'metrics', id = metrics ? null : raw;
   if (id === state.openId && metrics === state.metricsOn) return;
   state.metricsOn = metrics;
-  state.openId = id; state.detail = null; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = [];
+  state.openId = id; state.detail = null; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true;
   $('text').value = ''; drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
@@ -743,8 +799,8 @@ async function send(event) {
   if (state.busy || !id || (!text.trim() && !state.images.length)) return;
   state.busy = true; $('send').disabled = true; showError($('error'), '');
   try {
-    await post(`threads/${id}/messages`, { text, images: state.images });
-    if (id === state.openId) { $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); }
+    await post(`threads/${id}/messages`, { text, images: state.images, ...(state.replyTo ? { reply_to: state.replyTo } : {}) });
+    if (id === state.openId) { state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); }
     await Promise.all([loadThread(id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
   finally { state.busy = false; $('send').disabled = false; $('text').focus(); }
@@ -801,6 +857,7 @@ function onKey(e) {
   else if (e.key === 'e' && state.detail) { e.preventDefault(); toggleDone(); }
   else if (e.key === 'n') { e.preventDefault(); openNew(); }
   else if (e.key === 'p' && state.openId) { e.preventDefault(); togglePin('thread', state.openId); }
+  else if (e.key === 'r' && state.detail && !state.detail.read_only && e.target.closest?.('.msg[data-mid]')) { e.preventDefault(); startReply(e.target.closest('.msg').dataset.mid); }
   else if ((e.key === 'c' || e.key === 'y') && state.detail) { e.preventDefault(); focusAdd(e.key === 'c' ? 'agent' : 'user'); }
 }
 
@@ -808,7 +865,12 @@ function onKey(e) {
 paintKeys();
 $('help-rows').replaceChildren(...SHORTCUTS.map(([k, what]) => el('tr', {}, el('td', {}, ...k.split(' / ').flatMap((part, i) => [...(i ? [' or '] : []), kbd(part)])), el('td', { text: what }))));
 $('composer').addEventListener('submit', send);
-$('text').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('composer').requestSubmit(); } });
+$('text').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('composer').requestSubmit(); } else if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); cancelReply(); } });
+$('replybar-x').addEventListener('click', () => { cancelReply(); $('text').focus(); });
+$('msgs').addEventListener('touchstart', swipeStart, { passive: true });
+$('msgs').addEventListener('touchmove', swipeMove, { passive: true });
+$('msgs').addEventListener('touchend', swipeEnd);
+$('msgs').addEventListener('touchcancel', () => { if (swipe.node) { swipe.node.classList.remove('swiping'); swipe.node.style.transform = ''; swipe.node = null; } });
 $('text').addEventListener('paste', e => { const files = pastedImages(e); if (files.length) { e.preventDefault(); addImages(state.images, files, $('error'), redrawComposer); } });
 $('attach').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', e => { addImages(state.images, [...e.target.files], $('error'), redrawComposer); e.target.value = ''; });

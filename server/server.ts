@@ -178,7 +178,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -189,6 +189,7 @@ async function embedRoute(req: Request, path: string): Promise<Response | null> 
 }
 // FEEDBACK_INBOX_WIDGET=0 (or off, false, no) leaves the capture widget off the inbox page itself.
 const WIDGET_TAG = /<script src="\.\.\/embed\.js"[^>]*><\/script>\n?/;
+const foldFyiOn = () => /^(1|on|true|yes)$/i.test(process.env.FEEDBACK_FOLD_FYI?.trim() ?? '');
 const inboxWidgetOn = () => !/^(0|off|false|no)$/i.test(process.env.FEEDBACK_INBOX_WIDGET?.trim() ?? '');
 async function inboxRoute(req: Request, path: string): Promise<Response | null> {
   if (req.method !== 'GET' && req.method !== 'HEAD') return null;
@@ -199,7 +200,12 @@ async function inboxRoute(req: Request, path: string): Promise<Response | null> 
   const type = Object.hasOwn(INBOX_FILES, name) ? INBOX_FILES[name] : undefined;
   if (!type) return json({ kind: 'not_found' }, 404);
   const file = await readFile(join(INBOX, name));
-  const body = name === 'index.html' && !inboxWidgetOn() ? Buffer.from(file.toString('utf8').replace(WIDGET_TAG, '')) : file;
+  let html = file.toString('utf8');
+  if (name === 'index.html') {
+    if (!inboxWidgetOn()) html = html.replace(WIDGET_TAG, '');
+    if (foldFyiOn()) html = html.replace('<body>', '<body data-fold-fyi>');
+  }
+  const body = name === 'index.html' ? Buffer.from(html) : file;
   return new Response(body, { headers: { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 }
 async function threadDetail(dir: string, id: string) {
@@ -265,7 +271,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (req.method !== 'POST') return null;
   if (action === 'messages') {
     const data = await read(req);
-    return json(await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images) }), 201);
+    return json(await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), reply_to: data.reply_to }), 201);
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
   if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user'));

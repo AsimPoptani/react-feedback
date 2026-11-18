@@ -1299,6 +1299,12 @@ function FeedbackList({ endpoint, onClose }) {
 	});
 }
 // src/widget/StepHints.tsx
+var HintsContext = createContext(false);
+var CAPTURE_STEPS = [
+	"region",
+	"element",
+	"section"
+];
 function hintsFor(step, locked) {
 	const { alt } = modifiers();
 	const cancel = {
@@ -1397,7 +1403,7 @@ function hintsFor(step, locked) {
 function StepHints({ step, locked = false }) {
 	const [coarse, setCoarse] = useState(() => window.matchMedia("(pointer: coarse)").matches);
 	const root = useRef(null);
-	const hints = hintsFor(step, locked).filter((hint) => coarse ? hint.touch : !hint.touchOnly);
+	const hints = useContext(HintsContext) || !CAPTURE_STEPS.includes(step) ? hintsFor(step, locked).filter((hint) => coarse ? hint.touch : !hint.touchOnly) : [];
 	useEffect(() => {
 		const media = window.matchMedia("(pointer: coarse)");
 		const update = () => setCoarse(media.matches);
@@ -2201,7 +2207,8 @@ function startCapture(mode, target) {
 function pillText({ pending, failed }) {
 	return [pending ? `${pending} sending` : "", failed ? `${failed} failed` : ""].filter(Boolean).join(", ");
 }
-function FeedbackWidget({ endpoint = "/__feedback" }) {
+var positionOf = (value) => value === "bottom-right" ? "bottom-right" : "bottom-left";
+function FeedbackWidget({ endpoint = "/__feedback", position = "bottom-left", hints = "off" }) {
 	const base = endpoint.replace(/\/$/, "");
 	const [outbox] = useState(() => new Outbox$1(base, openStore()));
 	outbox.endpoint = base;
@@ -2211,13 +2218,17 @@ function FeedbackWidget({ endpoint = "/__feedback" }) {
 	}, [outbox]);
 	return /* @__PURE__ */ jsx(OutboxContext.Provider, {
 		value: outbox,
-		children: /* @__PURE__ */ jsx(FeedbackPanel, {
-			outbox,
-			endpoint: base
+		children: /* @__PURE__ */ jsx(HintsContext.Provider, {
+			value: hints === "on",
+			children: /* @__PURE__ */ jsx(FeedbackPanel, {
+				outbox,
+				endpoint: base,
+				position: positionOf(position)
+			})
 		})
 	});
 }
-function FeedbackPanel({ outbox, endpoint }) {
+function FeedbackPanel({ outbox, endpoint, position }) {
 	const [step, setStep] = useState("closed");
 	const [mode, setMode] = useState(null);
 	const [region, setRegion] = useState(null);
@@ -2410,8 +2421,9 @@ function FeedbackPanel({ outbox, endpoint }) {
 		setStep("closed");
 	}
 	return /* @__PURE__ */ jsxs("div", {
-		className: "fb-root",
+		className: `fb-root${position === "bottom-right" ? " fb-right" : ""}`,
 		"data-feedback-root": true,
+		"data-position": position,
 		ref: root,
 		children: [
 			/* @__PURE__ */ jsx("div", {

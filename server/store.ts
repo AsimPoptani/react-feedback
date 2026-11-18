@@ -33,7 +33,8 @@ export const checkFlag = (value: unknown): Flag => {
   if (typeof value !== 'string' || !(FLAGS as readonly string[]).includes(value)) throw new Invalid('flag must be needs_you, done or fyi');
   return value as Flag;
 };
-export interface Message { id: string; author: Author; text: string; images: string[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer }
+// `reply_to` is the id of an earlier message in the same thread that this one quotes. It is only metadata: it changes nothing about who is waiting or what is unread.
+export interface Message { id: string; author: Author; text: string; images: string[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string }
 export interface Image { bytes: Buffer; ext: Extension }
 export type ItemData = Record<string, unknown>;
 
@@ -177,7 +178,8 @@ function parseMessages(raw: string | null): Message[] {
         const answer = m.author === 'user' ? parseAnswer(m.answer) : undefined;
         const flag: Flag | undefined = m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
         out.push({ id: m.id, author: m.author, text: m.text, images: m.images.filter((f): f is string => typeof f === 'string' && MESSAGE_IMAGE.test(f)), created_at: m.created_at,
-          ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}) });
+          ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}),
+          ...(typeof m.reply_to === 'string' && m.reply_to ? { reply_to: m.reply_to } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
   }
@@ -253,10 +255,10 @@ async function saveImages(path: string, images: Image[]): Promise<string[]> {
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge'; text: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge'; text: string; reply_to?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
-  await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: 'user', kind: event.kind, first_line })}\n`);
+  await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: 'user', kind: event.kind, first_line, ...(event.reply_to ? { reply_to: event.reply_to } : {}) })}\n`);
 }
 async function writeStatus(path: string, status: Status) { await writeFile(join(path, 'status.json'), JSON.stringify({ status })); }
 export async function readStatus(path: string): Promise<Status> {
@@ -292,7 +294,14 @@ async function readAcked(path: string): Promise<string | null> {
 const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) => (m.created_at > hi ? m.created_at : hi), item.created_at as string);
 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
-export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown }
+export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown }
+// A quote must name a message that already exists in this thread. Absent (or null) means a plain message.
+export function checkReplyTo(messages: Message[], value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !value) throw new Invalid('reply_to must be the id of a message in this thread');
+  if (!messages.some(m => m.id === value)) throw new Invalid('reply_to must be the id of a message in this thread');
+  return value;
+}
 // Only the agent flags messages. A question is `needs_you` unless said otherwise; anything else is `fyi`.
 function messageFlag(author: Author, flag: unknown, asking: boolean): Flag | undefined {
   if (author !== 'agent') { if (flag !== undefined) throw new Invalid('Only the agent can flag a message', 403); return undefined; }
@@ -315,6 +324,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
     if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
     if (input.question && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it', 409);
     const stored = await materialise(path, item);
+    const quoted = checkReplyTo(stored, input.reply_to);
     const n = stored.length + 1;
     let text = input.answer !== undefined || input.question ? '' : messageText(input.text, images.length > 0);
     let extra: Partial<Message> = {};
@@ -324,7 +334,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
       text = checked.text; extra = { answer: checked.answer };
       eventKind = 'answer'; eventText = `${checked.answer.question_id}: ${checked.labels.join(', ')}`;
     }
-    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(flag ? { flag } : {}), ...extra };
+    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}) };
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
     // replying means that side read everything before it
     if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? 'agent-read.json' : 'read.json', lastAt(stored, item));
@@ -333,7 +343,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
     return created;
   });
   if (input.author === 'user') {
-    await logEvent(dir, { id, kind: eventKind, text: (eventKind as string) === 'answer' ? eventText : message.text });
+    await logEvent(dir, { id, kind: eventKind, text: (eventKind as string) === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}) });
   }
   return message;
 }
@@ -599,9 +609,13 @@ async function copyMessages(from: string, into: string, source: Message[], targe
   let n = target.length;
   const lines: Message[] = [{ id: `m${++n}`, author: 'agent', text: divider, images: [], created_at: at, divider: true }];
   const questions = new Map<string, string>();
+  // Message ids are renumbered after the target's, so a quote must follow its original to the new id.
+  const moved = new Map(source.map((m, i) => [m.id, `m${target.length + 2 + i}`]));
   for (const m of source) {
     const id = `m${++n}`;
     const copy: Message = { ...m, id, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])) };
+    delete copy.reply_to;
+    if (m.reply_to && moved.has(m.reply_to)) copy.reply_to = moved.get(m.reply_to)!;
     if (m.question) { questions.set(m.question.id, `q${n}`); copy.question = { ...m.question, id: `q${n}` }; }
     if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
     lines.push(copy);

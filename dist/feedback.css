@@ -49,6 +49,9 @@
 }
 
 .fb-toast { position: absolute; left: 12px; bottom: calc(66px + env(safe-area-inset-bottom)); padding: 8px 14px; background: var(--fb-bg); border: 1px solid var(--fb-border); border-radius: 10px; box-shadow: 0 2px 12px #0003; }
+/* position="bottom-right": the launcher, its panels and the toast sit in the right corner instead. */
+.fb-right .fb-launchers, .fb-right .fb-panel, .fb-right .fb-toast { left: auto; right: 12px; }
+.fb-right .fb-launchers { justify-content: flex-end; }
 .fb-capture-toolbar .fb-toolbar, .fb-note .fb-toolbar { margin: 0; }
 .fb-note .fb-toolbar { margin-top: 12px; }
 .fb-note { width: min(340px, calc(100vw - 24px)); }
@@ -56,7 +59,7 @@
 .fb-root .fb-save { width: auto; margin-top: 0; margin-left: auto; }
 .fb-pick-hint { width: max-content; max-width: calc(100vw - 24px); }
 @media (max-width: 600px) {
-  .fb-note { left: 0; bottom: 0; width: 100%; max-height: calc(100dvh - 20px); border-radius: 14px 14px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .fb-note, .fb-right .fb-note { left: 0; right: auto; bottom: 0; width: 100%; max-height: calc(100dvh - 20px); border-radius: 14px 14px 0 0; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
 }
 
 .fb-root kbd { display: inline-block; border: 1px solid currentColor; border-radius: 3px; padding: 1px 3px; font: inherit; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: inherit; white-space: nowrap; }

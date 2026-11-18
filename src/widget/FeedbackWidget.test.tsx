@@ -41,9 +41,9 @@ function enterNote(value = 'Make this clearer') { fireEvent.change(screen.getByP
 async function sent() { await screen.findByText('Queued'); await waitFor(() => expect(fetchMock.mock.calls.some(call => call[1]?.method === 'POST')).toBe(true)); }
 function payload() { return JSON.parse(fetchMock.mock.calls.at(-1)![1].body); }
 async function capturePage() { open(); fireEvent.click(screen.getByRole('button', { name: 'Full page' })); await screen.findByLabelText('Note'); }
-function app() {
+function app(hints?: 'on' | 'off') {
   const click = vi.fn(), pointer = vi.fn();
-  render(<><CardGroup click={click} pointer={pointer} /><FeedbackWidget endpoint="/custom" /></>);
+  render(<><CardGroup click={click} pointer={pointer} /><FeedbackWidget endpoint="/custom" hints={hints} /></>);
   const target = screen.getByTestId('item-card'), section = screen.getByTestId('item-section');
   vi.spyOn(target, 'getBoundingClientRect').mockReturnValue({ x: 100, y: 80, width: 200, height: 60 } as DOMRect);
   vi.spyOn(section, 'getBoundingClientRect').mockReturnValue({ x: 40, y: 50, width: 400, height: 200 } as DOMRect);
@@ -563,7 +563,7 @@ describe('FB1-e visible shortcuts', () => {
   });
   it('switches Region hints after selection and gives selection actions keycaps', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
-    render(<FeedbackWidget />); open(); fireEvent.click(screen.getByRole('button', { name: 'Region' }));
+    render(<FeedbackWidget hints="on" />); open(); fireEvent.click(screen.getByRole('button', { name: 'Region' }));
     expect(stepHints().textContent).toContain('Drag to select'); expect(stepHints().textContent).toContain('Esc cancel');
     expect(stepHints().textContent).not.toContain('write note');
     dragRegion();
@@ -572,8 +572,19 @@ describe('FB1-e visible shortcuts', () => {
     expectShortcut(screen.getByRole('button', { name: 'Cancel' }), 'Esc', 'Escape');
     fireEvent.click(screen.getByRole('button', { name: 'Redo' })); expect(stepHints().textContent).toContain('Drag to select');
   });
-  it.each(['Element', 'Section'])('switches %s hints from hovering to locked', mode => {
+  it.each(['Region', 'Element', 'Section'])('shows no step banner by default while %s is active, so the page stays clear to capture', mode => {
     const { target } = app(); open(); fireEvent.click(screen.getByRole('button', { name: mode }));
+    fireEvent.pointerMove(target);
+    expect(screen.queryByRole('note', { name: 'Step shortcuts' })).toBeNull();
+    expect(document.querySelector('.fb-step-hints')).toBeNull();
+  });
+  it('keeps the shortcuts one key away behind ? even with the banner off', () => {
+    render(<FeedbackWidget />); open();
+    fireEvent.click(screen.getByRole('button', { name: 'Shortcuts' }));
+    expect(screen.getByLabelText('Keyboard shortcuts').textContent).toContain('Selection:');
+  });
+  it.each(['Element', 'Section'])('switches %s hints from hovering to locked', mode => {
+    const { target } = app('on'); open(); fireEvent.click(screen.getByRole('button', { name: mode }));
     fireEvent.pointerMove(target);
     for (const text of ['Click to select', '↑ parent', '↓ child', '↵ select and write', 'Esc cancel']) expect(stepHints().textContent).toContain(text);
     fireEvent.click(target);
@@ -584,7 +595,7 @@ describe('FB1-e visible shortcuts', () => {
   it('hides keyboard-only hints for coarse pointers and keeps touch actions', async () => {
     const media = window.matchMedia('(pointer: coarse)');
     vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ ...media, media: query, matches: query === '(pointer: coarse)', addEventListener: vi.fn(), removeEventListener: vi.fn() }));
-    const { target } = app(); open(); fireEvent.click(screen.getByRole('button', { name: 'Region' }));
+    const { target } = app('on'); open(); fireEvent.click(screen.getByRole('button', { name: 'Region' }));
     expect(stepHints().textContent).toContain('Drag to select'); expect(stepHints().querySelector('kbd')).toBeNull();
     dragRegion(); expect(stepHints().textContent).toContain('Tap Write note'); expect(stepHints().textContent).toContain('Drag to redraw');
     expect(stepHints().textContent).not.toMatch(/arrows|Esc|×10/);
@@ -617,7 +628,7 @@ describe('FB1-e visible shortcuts', () => {
 });
 it('keeps Write note above the hint bar on a 390px viewport', () => {
   vi.stubGlobal('innerWidth', 390); vi.stubGlobal('innerHeight', 600);
-  render(<FeedbackWidget />); open(); fireEvent.click(screen.getByRole('button', { name: 'Region' }));
+  render(<FeedbackWidget hints="on" />); open(); fireEvent.click(screen.getByRole('button', { name: 'Region' }));
   vi.spyOn(stepHints(), 'getBoundingClientRect').mockReturnValue({ top: 420, height: 100 } as DOMRect);
   dragRegion([200, 350], [380, 390]);
   const toolbar = screen.getByRole('toolbar', { name: 'Selection actions' });

@@ -41,7 +41,12 @@ export function Root() {
 }
 ```
 
-`endpoint` is the base URL of the feedback server and defaults to `/__feedback`. To ship it only in development, render it behind your own flag and lazy-load it:
+`endpoint` is the base URL of the feedback server and defaults to `/__feedback`.
+
+Other props:
+
+- `position`: `"bottom-left"` (default) or `"bottom-right"`, the corner that holds the launcher, its panels and the "Queued" toast.
+- `hints`: `"off"` (default) or `"on"`. While Region, Element or Section is active the widget shows no step banner, so nothing sits over the page you are capturing; press `?` for the shortcuts. `"on"` brings the banner back. To ship it only in development, render it behind your own flag and lazy-load it:
 
 ```tsx
 const FeedbackWidget = import.meta.env.VITE_FEEDBACK === "1"
@@ -76,7 +81,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 <script src="https://your-host/__feedback/embed.js" data-endpoint="/__feedback"></script>
 ```
 
-`dist/embed.js` is a standalone bundle (React and the CSS are inside it). The server also serves it at `/__feedback/embed.js`, and the inbox loads it, so you can capture feedback about the inbox itself. `data-endpoint` defaults to `/__feedback`.
+`dist/embed.js` is a standalone bundle (React and the CSS are inside it). The server also serves it at `/__feedback/embed.js`, and the inbox loads it, so you can capture feedback about the inbox itself. `data-endpoint` defaults to `/__feedback`. `data-position="bottom-right"` moves the launcher to the right corner (default `bottom-left`), and `data-hints="on"` shows the step banner during capture modes (default off).
 
 ## Run the server
 
@@ -93,6 +98,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_AGENT_NAME` | `Agent` | display name of the agent in the inbox |
 | `FEEDBACK_AREAS` | none | path to a JSON file that configures the inbox areas (see [Inbox areas](#inbox-areas)) |
 | `FEEDBACK_AREAS_JSON` | none | the same configuration as inline JSON (set only one of the two) |
+| `FEEDBACK_FOLD_FYI` | off | set to `1`, `on`, `true` or `yes` to fold the agent's FYI and Done messages to one line with a Show button; by default every message is shown in full |
 | `FEEDBACK_INBOX_WIDGET` | on | set to `0`, `off`, `false` or `no` to keep the capture widget off the inbox page itself |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
@@ -234,10 +240,10 @@ The CLI writes straight into `FEEDBACK_DIR` through the same store the server us
 react-feedback serve                                            # start the server
 react-feedback --help                                           # print the usage
 react-feedback list [--waiting]                                 # threads waiting for the agent
-react-feedback reply <id> "text" [--image a.png --image b.jpg]
+react-feedback reply <id> "text" [--image a.png --image b.jpg] [--to <message-id>]   # --to quotes one of that thread's messages
 react-feedback new "title" "text" [--image path ...]            # an agent-started thread
 react-feedback status <id> open|done
-react-feedback read <id>                                        # stamp the agent read marker
+react-feedback read <id>                                        # stamp the agent read marker, then print the thread with each quote's context
 react-feedback ack <id>                                         # the user's latest message is handled; no reply
 react-feedback ask <id> "prompt" --option "Label|optional description" ... [--multi] [--no-other]
 react-feedback ask-new "title" "prompt" --option ... [--multi] [--no-other]
@@ -251,9 +257,20 @@ react-feedback profile agent --avatar path                      # square PNG, JP
 react-feedback metrics [--window 24h|7d|all]
 ```
 
+## Quote replies
+
+Any message can quote an earlier one in the same thread, WhatsApp style. A message may carry an optional `reply_to: "<message id>"`; old messages have none and nothing else changes (a quote is metadata only: it does not affect who is waiting, unread marks or ticks). The server returns 400 if `reply_to` is not a message of that thread. A merge keeps the links, renumbered with the messages.
+
+- **Inbox, desktop:** hover or focus a message and press **Reply**, or focus it and press **R**. A quote bar (author, first line, ×) appears above the composer; Esc in the composer cancels it.
+- **Inbox, phone:** swipe a message to the right; a visible Reply button is always shown on touch screens.
+- A reply shows a compact quoted snippet (author and first line, or "Image"); tapping it scrolls to the original and highlights it. If the original is gone it reads "Original message unavailable".
+- **CLI:** `reply <id> "text" --to <message-id>` (also on `ask`).
+
+On the inbox page the launcher sits bottom-right (`data-position="bottom-right"`), with a clear strip under the composer so it never covers Send.
+
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge`; `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`.
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`.
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 

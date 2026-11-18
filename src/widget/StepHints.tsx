@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Keycap } from './Keycap.js';
 import { modifiers, keyLabel } from './shortcuts.js';
+// The capture modes (region, element, section) show no banner unless the host opts in with hints="on": it would cover the page being captured.
+export const HintsContext = createContext(false);
+const CAPTURE_STEPS = ['region', 'element', 'section'];
 type Hint = { key?: string; word: string; touch?: string; touchOnly?: boolean };
 function hintsFor(step: string, locked: boolean): Hint[] {
   const { alt } = modifiers();
@@ -26,7 +29,8 @@ function hintsFor(step: string, locked: boolean): Hint[] {
 export function StepHints({ step, locked = false }: { step: string; locked?: boolean }) {
   const [coarse, setCoarse] = useState(() => window.matchMedia('(pointer: coarse)').matches);
   const root = useRef<HTMLDivElement>(null);
-  const hints = hintsFor(step, locked).filter(hint => coarse ? hint.touch : !hint.touchOnly);
+  const banner = useContext(HintsContext) || !CAPTURE_STEPS.includes(step);
+  const hints = banner ? hintsFor(step, locked).filter(hint => coarse ? hint.touch : !hint.touchOnly) : [];
   useEffect(() => {
     const media = window.matchMedia('(pointer: coarse)');
     const update = () => setCoarse(media.matches);
