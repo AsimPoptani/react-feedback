@@ -93,6 +93,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_AGENT_NAME` | `Agent` | display name of the agent in the inbox |
 | `FEEDBACK_AREAS` | none | path to a JSON file that configures the inbox areas (see [Inbox areas](#inbox-areas)) |
 | `FEEDBACK_AREAS_JSON` | none | the same configuration as inline JSON (set only one of the two) |
+| `FEEDBACK_INBOX_WIDGET` | on | set to `0`, `off`, `false` or `no` to keep the capture widget off the inbox page itself |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
 
@@ -195,10 +196,33 @@ Out of the box the inbox groups by the first path segment. To use your own group
 | `match` | a path prefix starting with `/`. `/billing` matches `/billing` and everything under it, but not `/billingx`. Case-insensitive; the query string and fragment are ignored |
 | `exact` | optional; match only that exact path (`"/"` with `exact` is the home page alone, without it `"/"` would match every page) |
 | `sub` | optional whole number; make one sub-group per value of the nth path segment after the prefix, so `/projects/p1/tasks` becomes "Projects / p1". A path with no such segment goes in the plain area |
+| `subHeading` | optional, with `sub`; keep **one** group and put the sub-values under headings inside it instead, for example `"project {sub}"`. The group key (and its pin) stays `key`, and the metrics count it as one |
+| `suffix` | optional; the path ends with this text, for example `/checkout`. Case-insensitive; the query string and fragment are ignored |
+| `prefix` | optional; the raw path starts with this text, for example `/missions` also takes `/missionsx`. Plain text, case-sensitive; unlike `match` it does not stop at a path segment, and it gives no sub-groups |
+
+A rule needs at least one of `match`, `suffix` or `prefix`, and matches when **any** of the matchers it lists does (so `{ "key": "setup", "label": "Set-up", "match": "/setup", "suffix": "/wizard" }` takes `/setup/...` and any page ending in `/wizard`). `exact` and `sub` go with `match`; a sub-group only comes from a prefix match.
 
 The first rule that matches wins, so put specific rules before general ones. A path that matches no rule falls back to the first-segment grouping. Configured groups are listed first, in the order you wrote them (sub-groups alphabetically), then the fallback groups, then "Conversations".
 
-Threads started without a capture go under "Conversations". To rename that group, write the config as an object: `{ "areas": [ ... ], "conversations": "Chats" }`.
+To change that, write the config as an object:
+
+```json
+{
+  "areas": [
+    { "key": "home", "label": "Start page", "match": "/", "exact": true },
+    { "key": "setup", "label": "Set-up", "suffix": "/wizard" },
+    { "key": "projects", "label": "Projects", "match": "/projects", "sub": 1, "subHeading": "project {sub}" },
+    { "key": "reports", "label": "Reports", "prefix": "/report" }
+  ],
+  "fallback": { "key": "other", "label": "Other pages" },
+  "conversations": "Chats",
+  "order": ["home", "projects", "reports", "setup", "other", "conversations"]
+}
+```
+
+- `fallback` sends every path that matches no rule to one group, instead of the first-segment grouping. Its key must not be used by a rule.
+- `conversations` renames the group for threads started without a capture (they are never matched against the rules).
+- `order` lists group keys in the order the sidebar and the metrics show them; keys you leave out follow in the default order (rules in the order written, the fallback, Home, other pages alphabetically, then Conversations). Put `"conversations"` in the list to place it. Rules are matched in the order of `areas`, whatever `order` says.
 
 The server checks the config when it starts and refuses to run with a clear message if it is wrong (unknown field, duplicate key, bad `match`, unreadable file). It serves the effective list at `GET /__feedback/api/areas`, which the inbox reads, so the inbox, the pins and the metrics (the `metrics` command included, which reads the same variables) all group the same way. A group key is the rule's `key`, or `key:sub` for a sub-group; both can be pinned.
 

@@ -187,6 +187,9 @@ async function embedRoute(req: Request, path: string): Promise<Response | null> 
     return new Response(await readFile(EMBED), { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' } });
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found', detail: 'dist/embed.js is not built' }, 404); throw error; }
 }
+// FEEDBACK_INBOX_WIDGET=0 (or off, false, no) leaves the capture widget off the inbox page itself.
+const WIDGET_TAG = /<script src="\.\.\/embed\.js"[^>]*><\/script>\n?/;
+const inboxWidgetOn = () => !/^(0|off|false|no)$/i.test(process.env.FEEDBACK_INBOX_WIDGET?.trim() ?? '');
 async function inboxRoute(req: Request, path: string): Promise<Response | null> {
   if (req.method !== 'GET' && req.method !== 'HEAD') return null;
   if (path === `${PREFIX}/inbox`) return new Response(null, { status: 308, headers: { Location: `${PREFIX}/inbox/` } });
@@ -195,7 +198,9 @@ async function inboxRoute(req: Request, path: string): Promise<Response | null> 
   const name = match[1] || 'index.html';
   const type = Object.hasOwn(INBOX_FILES, name) ? INBOX_FILES[name] : undefined;
   if (!type) return json({ kind: 'not_found' }, 404);
-  return new Response(await readFile(join(INBOX, name)), { headers: { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+  const file = await readFile(join(INBOX, name));
+  const body = name === 'index.html' && !inboxWidgetOn() ? Buffer.from(file.toString('utf8').replace(WIDGET_TAG, '')) : file;
+  return new Response(body, { headers: { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 }
 async function threadDetail(dir: string, id: string) {
   const { summary, messages, item } = await store.summarise(dir, id);

@@ -1,5 +1,5 @@
 // Feedback inbox. No build, no deps. All text goes through textContent; nothing is injected as HTML.
-import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas } from './areas.js';
+import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas, subHeading } from './areas.js';
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
 const MAX_IMAGES = 5;
@@ -238,7 +238,13 @@ function threadRow(t) {
       el('time', { datetime: t.last_message_at, text: when(t.last_message_at) })));
   return el('li', { class: 'row' }, link, pinButton('thread', t.id, t.title));
 }
-const rowItems = (_key, rows) => rows.map(threadRow);
+// Rows of one group, split under headings when the group's rule has a subHeading and several values share it.
+function rowItems(key, rows) {
+  const subs = [...new Set(rows.map(t => areaOf(t, state.areaConfig).sub).filter(s => s !== undefined))].sort();
+  if (subs.length < 2) return rows.map(threadRow);
+  const plain = rows.filter(r => areaOf(r, state.areaConfig).sub === undefined).map(threadRow); // threads of the rule with no such path segment come first, without a heading
+  return [...plain, ...subs.flatMap(sub => [el('li', { class: 'sub', text: subHeading(key, sub, state.areaConfig) ?? sub }), ...rows.filter(r => areaOf(r, state.areaConfig).sub === sub).map(threadRow)])];
+}
 function foldButton(key, label, count, folded, extra = []) {
   const btn = el('button', { type: 'button', 'aria-expanded': String(!folded), 'aria-controls': `g-${key}`, onclick: () => setFold(key, !folded) },
     el('span', { class: 'chev', 'aria-hidden': 'true', text: '▾' }), el('span', { class: 'name', text: label }), ...extra, el('span', { class: 'count', text: String(count) }));
