@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+- **Side questions (`/btw`).** A message may carry `aside: true`; its answers are aside messages whose `reply_to` is the question. Type `/btw text`, press **B**, or use the **Side question** button. The inbox shows each one as a compact, collapsible bubble (collapsed once answered, a "Waiting for agent" pill until then). Main-flow waiting ignores asides; an unanswered aside makes `waiting` "agent" (unless the main flow waits on you) and adds `waiting_aside: true` to the summary. CLI: `reply <id> "text" --aside --to <aside-id>`; `list --waiting` and `read` show asides. `_events.jsonl` lines carry `aside: true`; a merge keeps and remaps the links.
+- **Checklist items attached to replies.** `reply --todo "item" [--for agent|user]` and `--check c3` add and tick items as part of the message, which stores `added_items` and `ticked_items`. The inbox shows "Added to checklist" and "Ticked" lists in the bubble, each jumping to its row (`#/<thread>/c3` opens a thread on an item). Over HTTP a user message may carry `todo` and `for`; `check` is the agent's only.
+- **Move messages.** `move <from> <msg-id>... --to <into>`: messages (and images, times, authors, `reply_to` links, attached items, questions with answers) go to another thread; a "Moved to" stub stays behind; both threads are locked and an interrupted move is retried by running it again. Logs a `move` event (with `author: "agent"`; the metrics ignore agent events).
+- **Tracker.** `#/tracker` and `GET api/tracker` list every item across the threads, grouped For you, For the agent and Done recently, with a donut, filters and search; CLI `tracker [--mine|--claimed|--open]`.
+- **Markdown in message bodies.** Headings, tables, nested and ordered lists, task lists, blockquotes, rules, code, links (https, mailto, in-app), bold, italic, strikethrough, line breaks; no HTML is ever parsed. Snippets, previews and the tracker show plain text.
+
+### Changed
+- Links in messages: only https, mailto and in-app `#/` links are made links (plain `http://` links are shown as text).
+- A single line break in a message is a `<br>` instead of a preserved newline; lines that look like a Markdown list, table or heading now render as one.
+
 ## 0.5.0
 
 ### Added

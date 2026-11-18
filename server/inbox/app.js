@@ -2,6 +2,10 @@
 import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas, subHeading } from './areas.js';
 import { isReplySwipe, resolveQuote, snippetOf } from './quote.js';
 import { donutLabel, donutNode } from './donut.js';
+import { asideGroups, isAside, parseBtw } from './aside.js';
+import { ageOf, filterRows, stateOf } from './tracker.js';
+import { firstPlainLine, inline, markdown, plainText } from './markdown.js';
+export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
 const MAX_IMAGES = 5;
@@ -11,8 +15,8 @@ const $ = id => document.getElementById(id);
 
 const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
-const state = { metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
-  view: null, q: '', replyTo: null, openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
+const state = { trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
+  view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -43,40 +47,6 @@ function el(tag, props = {}, ...kids) {
   return node;
 }
 
-// ---- Safe markdown subset: **bold**, *italics*, `code`, "- " lists, [text](http link). Built from text nodes only.
-const INLINE = /(\*\*[^*\n]+\*\*|\*[^*\s][^*\n]*\*|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/[^\s)]+|#\/[\w-]+)\))/g;
-export function inline(text) {
-  const frag = document.createDocumentFragment();
-  for (const part of text.split(INLINE)) {
-    if (!part) continue;
-    let m;
-    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) frag.append(el('strong', { text: part.slice(2, -2) }));
-    else if (part.startsWith('`') && part.endsWith('`') && part.length > 2) frag.append(el('code', { text: part.slice(1, -1) }));
-    else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) frag.append(el('em', { text: part.slice(1, -1) }));
-    else if ((m = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/.exec(part))) frag.append(el('a', { href: m[2], text: m[1], target: '_blank', rel: 'noopener noreferrer' }));
-    else if ((m = /^\[([^\]]+)\]\((#\/[\w-]+)\)$/.exec(part))) frag.append(el('a', { href: m[2], text: m[1] })); // a link to another thread
-    else frag.append(part);
-  }
-  return frag;
-}
-export function markdown(text) {
-  const root = el('div', { class: 'text' });
-  let list = null;
-  let para = [];
-  const flush = () => { if (para.length) { const p = el('p'); p.append(inline(para.join('\n'))); root.append(p); para = []; } };
-  for (const line of text.split('\n')) {
-    const item = /^\s*[-*] +(.*)$/.exec(line);
-    if (item) {
-      flush();
-      if (!list) { list = el('ul'); root.append(list); }
-      const li = el('li'); li.append(inline(item[1])); list.append(li);
-    } else if (!line.trim()) { flush(); list = null; }
-    else { list = null; para.push(line); }
-  }
-  flush();
-  return root;
-}
-
 // ---- Keycaps: <kbd data-keys="mod+K"> shows ⌘K on a Mac and Ctrl+K elsewhere.
 function keyLabel(keys) {
   return keys.split('+').map(k => (k === 'mod' ? (IS_MAC ? '⌘' : 'Ctrl') : k === 'Enter' ? '↵' : k)).join(IS_MAC ? '' : '+');
@@ -86,7 +56,7 @@ const kbd = keys => el('kbd', { 'data-keys': keys, text: keyLabel(keys) });
 const SHORTCUTS = [
   ['mod+Enter', 'Send the message (or start the thread)'], ['mod+I', 'Attach an image'], ['mod+V', 'Paste an image'], ['mod+K', 'Search threads'],
   ['J / ↓', 'Next thread'], ['K / ↑', 'Previous thread'], ['E', 'Mark the open thread done, or reopen it'], ['N', 'New thread'], ['P', 'Pin or unpin the open thread'],
-  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'],
+  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'], ['B', 'Ask a side question (or start a message with /btw)'],
   ['1–9, Enter', 'Pick an option on the latest open question, then answer'], ['← / →', 'Flip images in the viewer'], ['?', 'This cheat sheet'], ['Esc', 'Close the viewer or a dialog']];
 
 // ---- Profile and avatars
@@ -422,13 +392,14 @@ const quiet = (d, m) => FOLD_FYI && !d.read_only && m.author === 'agent' && (m.f
 const expandKey = (d, m) => `${d.id}:${m.id}`;
 function toggleExpanded(d, m) { const k = expandKey(d, m); if (state.expanded.has(k)) state.expanded.delete(k); else state.expanded.add(k); state.shown = ''; drawMessages(d); }
 function messageNode(d, m) {
+  if (m.divider && m.moved_to) return el('div', { class: 'divider', role: 'separator', 'data-mid': m.id }, el('span', {}, 'Moved to ', el('a', { href: `#/${m.moved_to}`, text: (/^Moved to \[(.*)\]\(#\//.exec(m.text) || [])[1] || 'another thread' })));
   if (m.divider) return el('div', { class: 'divider', role: 'separator' }, el('span', { text: m.text }));
   const who = state.profile[m.author];
   const farewell = d.merged_into && m === d.messages[d.messages.length - 1]; // the link to the merged thread stays visible
   const folded = quiet(d, m) && !farewell && !state.expanded.has(expandKey(d, m));
   const badge = m.author === 'agent' ? flagBadge(m.flag) : null;
   if (folded) {
-    const first = (m.text.split('\n').find(l => l.trim()) || (m.images.length ? '[image]' : '')).slice(0, 160);
+    const first = (firstPlainLine(m.text) || (m.images.length ? '[image]' : '')).slice(0, 160);
     return el('article', { class: 'msg agent collapsed', 'data-mid': m.id, 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
       avatar(m.author), ...(badge ? [badge] : []), el('span', { class: 'peek', text: first }), el('time', { datetime: m.created_at, text: when(m.created_at) }),
       el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Show'));
@@ -442,18 +413,77 @@ function messageNode(d, m) {
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
+  const attached = attachedNode(d, m); if (attached) node.append(attached);
   return node;
+}
+// Checklist items a message added or ticked: a small list inside the bubble; each item jumps to its row in the checklist panel.
+function attachedNode(d, m) {
+  const lines = [['Added to checklist', m.added_items], ['Ticked', m.ticked_items]].filter(([, ids]) => ids && ids.length);
+  if (!lines.length) return null;
+  const items = d.checklist_items || [];
+  return el('div', { class: 'attached' }, ...lines.map(([label, ids]) => el('p', { 'data-attached': label === 'Ticked' ? 'ticked' : 'added' }, el('strong', { text: `${label}:` }),
+    ...ids.map(id => {
+      const it = items.find(i => i.id === id);
+      return it ? el('button', { type: 'button', class: 'att-item', 'data-item': id, 'aria-label': `${label}: ${it.text}. Show it in the checklist.`, onclick: () => jumpToItem(id) }, inline(it.text))
+        : el('span', { class: 'att-item gone', title: 'This item was removed from the checklist', text: id });
+    }))));
+}
+function jumpToItem(id) {
+  const d = state.detail; if (!d) return;
+  if (isNarrow()) openSheet(); else if (!panelOpen(d)) setPanel(d, true);
+  const row = $('cl-body').querySelector(`[data-item="${id}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+  setTimeout(() => row.classList.remove('flash'), 1700);
+}
+// ---- Side questions (/btw): a compact, collapsible bubble set apart from the main flow. Collapsed once answered; open (with a pill) while waiting.
+const asideKey = (d, root) => `${d.id}:${root.id}`;
+const asideIsOpen = (d, g) => (state.asideOpen.has(asideKey(d, g.root)) ? state.asideOpen.get(asideKey(d, g.root)) : !g.answered);
+function toggleAside(d, g) { state.asideOpen.set(asideKey(d, g.root), !asideIsOpen(d, g)); state.shown = ''; drawMessages(d); }
+function asideMsgNode(d, m) {
+  const who = state.profile[m.author];
+  const node = el('div', { class: `aside-msg ${m.author}`, 'data-aside-mid': m.id }, el('div', { class: 'who' }, avatar(m.author), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.created_at, text: when(m.created_at) })));
+  if (m.text) node.append(markdown(m.text));
+  if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
+  const attached = attachedNode(d, m); if (attached) node.append(attached);
+  return node;
+}
+function asideNode(d, g) {
+  const open = asideIsOpen(d, g), agent = state.profile.agent.name;
+  const first = (firstPlainLine(g.root.text) || (g.root.images.length ? '[image]' : '')).slice(0, 120);
+  const id = `aside-${g.root.id}`;
+  const head = el('button', { type: 'button', class: 'aside-head', 'aria-expanded': String(open), 'aria-controls': id, onclick: () => toggleAside(d, g) },
+    el('span', { class: 'chev', 'aria-hidden': 'true', text: '▾' }), el('strong', { text: 'Side question' }),
+    ...(open ? [] : [el('span', { class: 'peek', text: first })]), ...(g.answered ? [] : [el('span', { class: 'pill agent', text: 'Waiting for agent', title: `Waiting for ${agent}` })]),
+    ...(g.answered && !open ? [el('span', { class: 'hint', text: g.answers.length === 1 ? '1 answer' : g.answers.length ? `${g.answers.length} answers` : 'Acknowledged' })] : []));
+  const node = el('section', { class: `aside-group${g.answered ? '' : ' waiting'}`, 'data-mid': g.root.id, 'data-aside': g.answered ? 'answered' : 'waiting', 'aria-label': 'Side question' }, head);
+  if (open) node.append(el('div', { class: 'aside-body', id }, ...[g.root, ...g.answers].map(m => asideMsgNode(d, m))));
+  return node;
+}
+// Main messages in thread order, with each side question (and its answers) at the place it was asked.
+function threadNodes(d) {
+  const groups = asideGroups(d.messages, d.acked_through || null);
+  const grouped = new Set(groups.flatMap(g => [g.root.id, ...g.answers.map(a => a.id)]));
+  return d.messages.flatMap(m => {
+    const g = groups.find(x => x.root.id === m.id);
+    if (g) return [asideNode(d, g)];
+    if (isAside(m) && !grouped.has(m.id)) return []; // an answer whose question is gone
+    return [messageNode(d, m)];
+  });
 }
 function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || ''))]);
+  const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join()),
+    (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
   if (key === state.shown) return;
   const first = state.shown === '' || !state.shown.startsWith(`["${d.id}"`);
   const scroll = $('scroll');
   const stick = first || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   state.shown = key;
-  $('msgs').replaceChildren(...d.messages.map(m => messageNode(d, m)));
+  $('msgs').replaceChildren(...threadNodes(d));
   applyStop();
   if (stick) scroll.scrollTop = scroll.scrollHeight;
 }
@@ -498,6 +528,12 @@ function drawReplyBar() {
 function startReply(id) {
   const d = state.detail; if (!d || d.read_only || !d.messages.some(m => m.id === id && !m.divider)) return;
   state.replyTo = id; drawReplyBar(); $('text').focus();
+}
+// B (or the Side question button on an empty composer) starts a side question: the composer gets a `/btw ` prefix.
+function startAside() {
+  const d = state.detail; if (!d || d.read_only) return;
+  const box = $('text'); if (!parseBtw(box.value).aside) box.value = `/btw ${box.value}`;
+  box.focus(); box.setSelectionRange(box.value.length, box.value.length);
 }
 function cancelReply() { state.replyTo = null; drawReplyBar(); }
 // Swipe a message to the right to reply (touch). The Reply button stays for anyone who cannot swipe.
@@ -701,8 +737,10 @@ async function doMerge(target) {
 }
 function drawThread() {
   const d = state.detail;
-  $('app').classList.toggle('has-thread', !!d || state.metricsOn);
-  $('placeholder').style.display = d || state.metricsOn ? 'none' : '';
+  $('app').classList.toggle('has-thread', !!d || state.metricsOn || state.trackerOn);
+  $('placeholder').style.display = d || state.metricsOn || state.trackerOn ? 'none' : '';
+  $('tracker').style.display = state.trackerOn ? 'flex' : 'none';
+  $('tracker-link').setAttribute('aria-current', state.trackerOn ? 'page' : 'false');
   $('open').style.display = d ? 'flex' : 'none';
   $('metrics').style.display = state.metricsOn ? 'flex' : 'none';
   $('metrics-link').setAttribute('aria-current', state.metricsOn ? 'page' : 'false');
@@ -720,7 +758,7 @@ async function loadThread(id, { quiet = false } = {}) {
   try {
     const d = await api(`threads/${id}`);
     if (id !== state.openId) return;
-    state.detail = d; drawThread();
+    state.detail = d; drawThread(); if (state.focusItem) focusItemNow();
     if (d.last_author === 'agent' && (!d.user_read_at || d.user_read_at < d.last_message_at)) { // ticks need the read marker even for FYIs
       // Stamp what we actually showed, so a message that arrived since is not marked read unseen.
       await post(`threads/${id}/read`, { seen: d.last_message_at });
@@ -733,17 +771,61 @@ async function loadThread(id, { quiet = false } = {}) {
   }
 }
 function route() {
-  const raw = (/^#\/([\w-]+)$/.exec(location.hash) || [])[1] || null;
-  const metrics = raw === 'metrics', id = metrics ? null : raw;
-  if (id === state.openId && metrics === state.metricsOn) return;
-  state.metricsOn = metrics;
+  const [, raw = null, item = null] = /^#\/([\w-]+)(?:\/(c\d+))?$/.exec(location.hash) || [];
+  const metrics = raw === 'metrics', tracker = raw === 'tracker', id = metrics || tracker ? null : raw;
+  state.focusItem = id && item ? item : null;
+  if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn) { if (state.focusItem && state.detail) focusItemNow(); return; }
+  state.metricsOn = metrics; state.trackerOn = tracker;
   state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true;
   $('text').value = ''; drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
   if (id) loadThread(id);
   if (metrics) loadMetrics();
+  if (tracker) loadTracker();
 }
+
+// ---- Tracker: every checklist item across the threads, grouped For you, For the agent and Done recently.
+function focusItemNow() { const id = state.focusItem; state.focusItem = null; if (id) setTimeout(() => jumpToItem(id), 0); }
+function trackerRow(r) {
+  const i = r.item, st = stateOf(i), agent = state.profile.agent.name;
+  const box = el('span', { class: `box${st === 'done' ? ' on' : st === 'claimed' ? ' claimed' : ''}`, role: 'img', 'aria-label': st === 'done' ? `Ticked by ${agent}` : st === 'claimed' ? `Claimed done, waiting for ${agent} to check` : 'Open', text: st === 'done' ? '✓' : st === 'claimed' ? '…' : '' });
+  const label = st === 'done' ? 'Ticked' : st === 'claimed' ? 'Claimed' : 'Open';
+  const meta = el('span', { class: 'cl-meta' }, el('a', { href: `#/${r.thread}/${i.id}`, text: r.title }), ` · ${label} · ${ageOf(i.created_at)} old`);
+  const node = el('li', { class: `tr-item${st === 'done' ? ' is-done' : ''}`, 'data-thread': r.thread, 'data-item': i.id, 'data-state': st }, box, el('div', { class: 'cl-main' }, el('span', { class: 'cl-text', text: plainText(i.text) }), meta));
+  if (st !== 'done' && !r.read_only) node.append(el('div', { class: 'cl-actions' }, st === 'open'
+    ? el('button', { type: 'button', onclick: () => trackerClaim(r, true) }, "I've done this") : el('button', { type: 'button', onclick: () => trackerClaim(r, false) }, 'Undo claim')));
+  return node;
+}
+async function trackerClaim(r, claimed) {
+  try { await api(`threads/${r.thread}/checklist/${r.item.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ claimed }) }); await Promise.all([loadTracker(), refreshList()]); }
+  catch (error) { showError($('error'), error.message); $('tr-summary').textContent = error.message; }
+}
+function drawTracker() {
+  const t = state.tdata, f = state.tfilter; if (!t) return;
+  const key = JSON.stringify([t, f, state.tDoneOpen, state.profile.agent.name]);
+  if (key === state.tdrawn) return;
+  state.tdrawn = key;
+  const c = t.counts;
+  $('tr-donut').replaceChildren(donutNode(c, 40));
+  $('tr-summary').textContent = c.total ? `${c.done} of ${c.total} done, ${c.claimed} claimed, ${c.total - c.done - c.claimed} open across ${t.threads.length} thread${t.threads.length === 1 ? '' : 's'}` : 'No checklist items yet.';
+  const sel = $('tr-thread'), want = ['', ...t.threads.map(x => x.id)].join();
+  if (sel.dataset.have !== want) { sel.replaceChildren(el('option', { value: '', text: 'All threads' }), ...t.threads.map(x => el('option', { value: x.id, text: `${x.title} (${x.open} open)` }))); sel.dataset.have = want; sel.value = f.thread; }
+  const keep = rows => filterRows(rows, f);
+  const section = (title, rows, extra) => el('section', { class: 'tr-section', 'data-group': title }, el('h3', {}, ...(extra ? [extra] : [title]), el('small', { text: ` ${rows.length}` })),
+    ...(extra && !state.tDoneOpen ? [] : [rows.length ? el('ul', { class: 'cl-list-plain', style: 'list-style:none;margin:0;padding:0' }, ...rows.map(trackerRow)) : el('p', { class: 'hint', text: 'Nothing here.' })]));
+  const fold = el('button', { type: 'button', 'aria-expanded': String(state.tDoneOpen), onclick: () => { state.tDoneOpen = !state.tDoneOpen; drawTracker(); } }, `${state.tDoneOpen ? '▾' : '▸'} Done recently (last 7 days)`);
+  $('tr-groups').replaceChildren(section('For you', keep(t.you)), section('For the agent', keep(t.agent)), section('Done recently', keep(t.done_recent), fold));
+}
+async function loadTracker() {
+  try { state.tdata = await api('tracker'); if (state.trackerOn) drawTracker(); }
+  catch (error) { if (!state.tdata) $('tr-groups').replaceChildren(el('p', { class: 'error', text: `Could not load the tracker: ${error.message}` })); }
+}
+function trackerFilters() {
+  state.tfilter = { thread: $('tr-thread').value, state: $('tr-state').value, q: $('tr-q').value }; drawTracker();
+}
+$('tr-q').addEventListener('input', trackerFilters); $('tr-thread').addEventListener('change', trackerFilters); $('tr-state').addEventListener('change', trackerFilters);
+$('tracker-back').addEventListener('click', () => { location.hash = '#/'; });
 
 // ---- Metrics: hand-rolled SVG, no libraries. Days and hours are UTC (the server says so too).
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -868,17 +950,20 @@ async function loadMetrics() {
 }
 
 // ---- Composer
-async function send(event) {
+// `/btw question` (or the Side question button) sends a side question: the prefix is dropped and the quote bar, if any, is left alone.
+async function send(event, forceAside = false) {
   event.preventDefault();
-  const id = state.openId, text = $('text').value;
-  if (state.busy || !id || (!text.trim() && !state.images.length)) return;
-  state.busy = true; $('send').disabled = true; showError($('error'), '');
+  const id = state.openId, parsed = parseBtw($('text').value), aside = forceAside || parsed.aside, text = aside ? parsed.text : $('text').value;
+  if (state.busy || !id) return;
+  if (aside && !text.trim() && !state.images.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
+  if (!text.trim() && !state.images.length) return;
+  state.busy = true; $('send').disabled = true; $('btw').disabled = true; showError($('error'), '');
   try {
-    await post(`threads/${id}/messages`, { text, images: state.images, ...(state.replyTo ? { reply_to: state.replyTo } : {}) });
-    if (id === state.openId) { state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); }
+    await post(`threads/${id}/messages`, { text, images: state.images, ...(aside ? { aside: true } : state.replyTo ? { reply_to: state.replyTo } : {}) });
+    if (id === state.openId) { if (!aside) state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); }
     await Promise.all([loadThread(id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
-  finally { state.busy = false; $('send').disabled = false; $('text').focus(); }
+  finally { state.busy = false; $('send').disabled = false; $('btw').disabled = false; $('text').focus(); }
 }
 const redrawComposer = () => drawPreviews($('previews'), state.images, redrawComposer);
 async function toggleDone() {
@@ -935,6 +1020,7 @@ function onKey(e) {
   else if (e.key === 'e' && state.detail) { e.preventDefault(); toggleDone(); }
   else if (e.key === 'n') { e.preventDefault(); openNew(); }
   else if (e.key === 'p' && state.openId) { e.preventDefault(); togglePin('thread', state.openId); }
+  else if (e.key === 'b' && state.detail && !state.detail.read_only) { e.preventDefault(); startAside(); }
   else if (e.key === 'r' && state.detail && !state.detail.read_only && e.target.closest?.('.msg[data-mid]')) { e.preventDefault(); startReply(e.target.closest('.msg').dataset.mid); }
   else if ((e.key === 'c' || e.key === 'y') && state.detail) { e.preventDefault(); focusAdd(e.key === 'c' ? 'agent' : 'user'); }
 }
@@ -943,6 +1029,7 @@ function onKey(e) {
 paintKeys();
 $('help-rows').replaceChildren(...SHORTCUTS.map(([k, what]) => el('tr', {}, el('td', {}, ...k.split(' / ').flatMap((part, i) => [...(i ? [' or '] : []), kbd(part)])), el('td', { text: what }))));
 $('composer').addEventListener('submit', send);
+$('btw').addEventListener('click', e => { if (!$('text').value.trim() && !state.images.length) { startAside(); return; } send(e, true); });
 $('text').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('composer').requestSubmit(); } else if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); cancelReply(); } });
 $('replybar-x').addEventListener('click', () => { cancelReply(); $('text').focus(); });
 $('msgs').addEventListener('touchstart', swipeStart, { passive: true });
@@ -1021,6 +1108,7 @@ async function poll() {
   await Promise.all([refreshList(), refreshProfile(), refreshPins()]);
   if (state.openId) await loadThread(state.openId, { quiet: true });
   if (state.metricsOn) await loadMetrics();
+  if (state.trackerOn) await loadTracker();
 }
 setInterval(poll, POLL_MS);
 document.addEventListener('visibilitychange', poll);

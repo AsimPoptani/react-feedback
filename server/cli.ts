@@ -1,5 +1,7 @@
 // Agent CLI (react-feedback <command>). Writes straight into FEEDBACK_DIR through the same store the server uses.
 //   react-feedback reply <id> "text" [--image path ...] [--to <message-id>]   (quote one of the thread's messages)
+//   react-feedback reply <id> "text" --aside --to <aside-id>   (answer a side question)
+//   react-feedback reply <id> "text" --todo "item" ... [--for agent|user] [--check c3 ...]   (checklist changes ride on the reply)
 //   react-feedback new "title" "text" [--image path ...]
 //   react-feedback status <id> open|done   (seen is an alias for open)
 //   react-feedback list [--waiting]   (--unread is an alias)
@@ -12,13 +14,17 @@
 //   react-feedback todo <id> list | done|check <item> | uncheck <item> | unclaim <item> "why" | edit <item> "text" | rm <item>
 //   react-feedback todos [--mine | --claimed]
 //   react-feedback merge <from-id> <into-id>
+//   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>   (move messages to another thread)
 //   react-feedback new "title" "text" --read-only     (a thread the user cannot reply to)
 //   react-feedback readonly <id> on|off
 //   react-feedback ack <id>     (the user's latest message is handled; no reply)
+//   react-feedback tracker [--mine | --claimed | --open]   (every checklist item across the threads)
 //   react-feedback metrics [--window 24h|7d|all]
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as store from './store';
+import { asideGroups } from './inbox/aside.js';
+import { ageOf, stateOf } from './inbox/tracker.js';
 import { checkWindow, computeMetrics, formatMetrics } from './metrics';
 import { loadAreas } from './config';
 import type { AreasConfig } from './inbox/areas.js';
@@ -28,6 +34,8 @@ const USAGE = `Usage:
   react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON)
   react-feedback --help
   react-feedback reply <id> "text" [--image path ...] [--to <message-id>]
+  react-feedback reply <id> "text" --aside --to <aside-id>   (answer a side question the user sent with /btw)
+  react-feedback reply <id> "text" --todo "item" [--todo "item" ...] [--for agent|user] [--check c3 ...]
   react-feedback new "title" "text" [--image path ...]
   react-feedback status <id> open|done   (seen is an alias for open)
   react-feedback list [--waiting]   (--unread is an alias)
@@ -40,28 +48,30 @@ const USAGE = `Usage:
   react-feedback todo <id> list | done <item> (or check) | uncheck <item> | unclaim <item> "why" | edit <item> "text" | rm <item>
   react-feedback todos [--mine | --claimed]
   react-feedback merge <from-id> <into-id>
+  react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>
   react-feedback new "title" "text" --read-only
   react-feedback readonly <id> on|off
   react-feedback ack <id>
+  react-feedback tracker [--mine | --claimed | --open]
   react-feedback metrics [--window 24h|7d|all]`;
 
-function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null } {
-  const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [];
-  let avatar: string | null = null, window: string | null = null, to: string | null = null;
+function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null } {
+  const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
+  let avatar: string | null = null, window: string | null = null, to: string | null = null, owner: string | null = null;
   let collecting = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--image') { collecting = true; continue; }
-    if (arg === '--option' || arg === '--avatar' || arg === '--window' || arg === '--to') {
+    if (arg === '--option' || arg === '--avatar' || arg === '--window' || arg === '--to' || arg === '--todo' || arg === '--check' || arg === '--for') {
       const value = args[++i];
       if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
-      if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else avatar = value;
+      if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else if (arg === '--todo') todos.push(value); else if (arg === '--check') checks.push(value); else if (arg === '--for') owner = value; else avatar = value;
       collecting = false; continue;
     }
     if (arg.startsWith('--')) { flags.push(arg); collecting = false; continue; }
     (collecting ? images : words).push(arg);
   }
-  return { words, images, flags, options, avatar, window, to };
+  return { words, images, flags, options, avatar, window, to, todos, checks, owner };
 }
 function question(prompt: string, options: string[], flags: string[]): store.QuestionInput {
   return { prompt, multi: flags.includes('--multi'), allow_other: !flags.includes('--no-other'),
@@ -94,38 +104,69 @@ async function todo(dir: string, words: string[]): Promise<string> {
   if (verb === 'rm') { await store.deleteChecklistItem(dir, id, a, 'agent'); return `Removed ${a}`; }
   throw new store.Invalid(USAGE);
 }
+async function tracker(dir: string, flags: string[]): Promise<string> {
+  const t = await store.readTracker(dir);
+  const keep = (r: store.TrackerRow) => (flags.includes('--claimed') ? stateOf(r.item) === 'claimed' : flags.includes('--open') ? stateOf(r.item) !== 'done' : true);
+  const line = (r: store.TrackerRow) => `  ${r.thread}  ${describe(r.item)}  <${r.title}>  ${ageOf(r.item.created_at)}`;
+  const parts: [string, store.TrackerRow[]][] = flags.includes('--mine') ? [['For the agent', t.agent]] : [['For you', t.you], ['For the agent', t.agent], ['Done recently', t.done_recent]];
+  const shown = parts.map(([title, rows]) => [title, rows.filter(keep)] as const).filter(([, rows]) => rows.length);
+  const head = `${t.counts.done} of ${t.counts.total} done, ${t.counts.claimed} claimed`;
+  if (!shown.length) return `${head}\nNothing matches.`;
+  return `${head}\n${shown.map(([title, rows]) => `${title}\n${rows.map(line).join('\n')}`).join('\n')}`;
+}
 async function todos(dir: string, flags: string[]): Promise<string> {
   const filter = flags.includes('--claimed') ? 'claimed' : flags.includes('--mine') ? 'mine' : 'all';
   const rows = await store.openItems(dir, filter);
   if (!rows.length) return filter === 'claimed' ? 'Nothing is waiting for your check.' : filter === 'mine' ? 'No open items for the agent.' : 'No open checklist items.';
   return rows.map(r => `${r.thread}  ${describe(r.item)}  <${r.title}>`).join('\n');
 }
-// What `read` prints for one message: who, when, the quoted message if it quotes one, then the text.
+// What `read` prints for one message: who, when, the quoted message if it quotes one, then the text, then any checklist items it added or ticked.
+// A side question prints indented under "Side question", with its answers beneath it.
 const firstLine = (m: store.Message) => (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : '')).slice(0, 120);
-export function transcript(messages: store.Message[], names: Record<store.Author, string> = { user: 'user', agent: 'agent' }): string {
+export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null }
+export function transcript(messages: store.Message[], names: Record<store.Author, string> = { user: 'user', agent: 'agent' }, extra: TranscriptExtra = {}): string {
   const byId = new Map(messages.map(m => [m.id, m]));
-  return messages.map(m => {
-    const quoted = m.reply_to ? byId.get(m.reply_to) : undefined;
-    const quote = m.reply_to ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
+  const itemText = (id: string) => `${id}${extra.items?.find(i => i.id === id) ? ` ${extra.items.find(i => i.id === id)!.text}` : ''}`;
+  const one = (m: store.Message, pad: string, label = ''): string => {
+    const quoted = m.reply_to && !m.aside ? byId.get(m.reply_to) : undefined;
+    const quote = m.reply_to && !m.aside ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
     const body = m.divider ? `--- ${m.text} ---` : (m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n');
-    return `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${quote}\n${body}`;
-  }).join('\n');
+    const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
+    const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${label}${quote}\n${[body, ...attached].join('\n')}`;
+    return pad ? text.split('\n').map(l => `${pad}${l}`).join('\n') : text;
+  };
+  const groups = asideGroups(messages, extra.acked ?? null);
+  const inGroup = new Set(groups.flatMap(g => [g.root.id, ...g.answers.map(a => a.id)]));
+  const out: string[] = [];
+  for (const m of messages) {
+    const group = groups.find(g => g.root.id === m.id);
+    if (group) out.push(`    Side question${group.answered ? '' : ' (waiting for the agent)'}\n${[group.root, ...group.answers].map(x => one(x, '    ')).join('\n')}`);
+    else if (m.aside) { if (!inGroup.has(m.id)) out.push(`    Side question (orphan)\n${one(m, '    ')}`); } // an answer whose question is gone
+    else out.push(one(m, ''));
+  }
+  return out.join('\n');
 }
 async function list(dir: string, waiting: boolean): Promise<string> {
-  const rows = (await store.listThreads(dir)).filter(t => !waiting || t.waiting === 'agent');
+  const rows = (await store.listThreads(dir)).filter(t => !waiting || t.waiting === 'agent' || t.waiting_aside);
   if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
-  return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}`).join('\n');
+  return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}${t.waiting_aside ? '  [side question waiting]' : ''}`).join('\n');
 }
 export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig): Promise<string> {
   const [command, ...rest] = argv;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
-  const { words, images, flags, options, avatar, window, to } = split(rest);
+  const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner } = split(rest);
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
     const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
     return r.merged ? `Merged ${words[0]} into ${words[1]}` : `${words[0]} was already merged into ${words[1]}`;
   }
+  if (command === 'move' && words.length >= 2) {
+    if (!to) throw new store.Invalid('move needs --to <thread>');
+    const r = await store.moveMessages(dir, words[0]!, words.slice(1), to, 'agent');
+    return r.moved.length ? `Moved ${r.moved.join(' ')} from ${words[0]} to ${to}` : `Those messages were already moved to ${to}`;
+  }
   if (command === 'todos') return todos(dir, flags);
+  if (command === 'tracker' && words.length === 0) return tracker(dir, flags);
   if (command === 'metrics' && words.length === 0) return formatMetrics(await computeMetrics(dir, checkWindow(window ?? '7d'), new Date(), areas ?? loadAreas()));
   if (command === 'ack' && words.length === 1) { await store.ackThread(dir, words[0]!); return `Acknowledged the latest message on ${words[0]}`; }
   if (command === 'readonly' && words.length === 2 && (words[1] === 'on' || words[1] === 'off')) {
@@ -139,14 +180,18 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     return `${words[0]} ${status}`;
   }
   if (command === 'reply' && words.length === 2) {
-    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), flag: flagOf(flags), reply_to: to ?? undefined });
+    const aside = flags.includes('--aside');
+    if (owner !== null && !addTodos.length) throw new store.Invalid('--for goes with --todo');
+    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), flag: flagOf(flags), reply_to: to ?? undefined, ...(aside ? { aside: true } : {}),
+      ...(addTodos.length ? { add_items: addTodos.map(text => ({ owner: owner ?? 'agent', text })) } : {}), ...(checks.length ? { check_items: checks } : {}) });
     const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, words[0]!))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
-    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${closed})`;
+    const extras = `${aside ? `, side answer to ${message.reply_to}` : ''}${message.added_items ? `, added ${message.added_items.join(' ')}` : ''}${message.ticked_items ? `, ticked ${message.ticked_items.join(' ')}` : ''}`;
+    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed})`;
   }
   if (command === 'read' && words.length === 1) {
     await store.markAgentRead(dir, words[0]!);
-    const { messages } = await store.summarise(dir, words[0]!);
-    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages)}` : ''}`;
+    const { messages, summary, path } = await store.summarise(dir, words[0]!);
+    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through })}` : ''}`;
   }
   if (command === 'ask' && words.length === 2) {
     const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags), flag: flagOf(flags), reply_to: to ?? undefined });

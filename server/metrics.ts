@@ -76,7 +76,7 @@ async function readEvents(dir: string): Promise<{ ts: string; kind: string }[]> 
   const out: { ts: string; kind: string }[] = [];
   for (const line of (raw ?? '').split('\n')) {
     if (!line.trim()) continue;
-    try { const e = JSON.parse(line); if (e && typeof e.ts === 'string' && typeof e.kind === 'string') out.push({ ts: e.ts, kind: e.kind }); } catch { /* a torn line */ }
+    try { const e = JSON.parse(line); if (e && e.author !== 'agent' && typeof e.ts === 'string' && typeof e.kind === 'string') out.push({ ts: e.ts, kind: e.kind }); } catch { /* a torn line */ }
   }
   return out;
 }
@@ -112,6 +112,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
     if (summary.merged_into) continue; // its messages live on in the thread it was merged into
     const area = areaRow(areaOf({ mode: summary.mode, url: summary.url }, areas).area);
     const real = messages.filter(m => !m.divider);
+    const mainFlow = real.filter(m => !m.aside); // side questions do not time the main conversation
     if (summary.created_at < firstSeen) firstSeen = summary.created_at;
 
     // Workload now: it does not depend on the window.
@@ -121,7 +122,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
     if (summary.waiting === 'agent' || summary.waiting === 'you') {
       workload[summary.waiting === 'agent' ? 'waiting_agent' : 'waiting_you']++;
       area[summary.waiting === 'agent' ? 'waiting_agent' : 'waiting_you']++;
-      const since_ = waitingSince(messages, summary.waiting, summary.last_message_at);
+      const since_ = waitingSince(messages.filter(m => !m.aside), summary.waiting, summary.last_message_at);
       if (!oldest || ms(since_) < oldest.since) oldest = { since: ms(since_), value: { id, title: summary.title, waiting: summary.waiting, since: since_, age_ms: Math.max(0, now.getTime() - ms(since_)) } };
     }
     for (const i of await store.readChecklist(path)) { if (i.done) workload.checklist.ticked++; else if (i.claimed_by_user_at) workload.checklist.claimed++; else workload.checklist.open++; }
@@ -145,7 +146,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
     // Response times. A run of messages by one side counts from its first message to the other side's next message,
     // dated by when the answer arrived. Messages are taken in time order so a merged thread's copied history interleaves correctly.
     // Read-only threads have no user replies to time.
-    const ordered = [...real].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const ordered = [...mainFlow].sort((a, b) => a.created_at.localeCompare(b.created_at));
     let runStart: store.Message | null = null, prev: store.Message | null = null;
     for (const m of ordered) {
       if (!prev) runStart = m;

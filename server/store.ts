@@ -4,6 +4,8 @@ import { appendFile, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFil
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { KEY } from './inbox/areas.js';
+import { asideGroups, isAside, isAsideRoot, mainMessages } from './inbox/aside.js';
+import { filterRows, groupRows } from './inbox/tracker.js';
 
 export const ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
 export const STATUSES = ['open', 'done'] as const;
@@ -34,7 +36,11 @@ export const checkFlag = (value: unknown): Flag => {
   return value as Flag;
 };
 // `reply_to` is the id of an earlier message in the same thread that this one quotes. It is only metadata: it changes nothing about who is waiting or what is unread.
-export interface Message { id: string; author: Author; text: string; images: string[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string }
+export interface Message { id: string; author: Author; text: string; images: string[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string;
+  // A side question (`/btw`): `aside` marks it and its answers; an answer's `reply_to` is the aside's id. `added_items` and `ticked_items` are the checklist items this message added or ticked.
+  aside?: true; added_items?: string[]; ticked_items?: string[];
+  // `moved_to` (a thread id) marks the stub left where a message was moved away; `moved_from` (`<thread>/<message>`) marks a copy that arrived by a move, so an interrupted move can tell what it already did.
+  moved_to?: string; moved_from?: string }
 export interface Image { bytes: Buffer; ext: Extension }
 export type ItemData = Record<string, unknown>;
 
@@ -166,6 +172,7 @@ export function checkAnswer(messages: Message[], raw: unknown): { answer: Answer
   return { answer: { question_id: asked.id, option_ids: ids as string[], ...(otherText ? { other_text: otherText } : {}) }, text, labels: [...labels, ...(otherText ? [otherText] : [])] };
 }
 
+const ids = (v: unknown): string[] | undefined => { const out = Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && /^c\d+$/.test(x)) : []; return out.length ? out : undefined; };
 function parseMessages(raw: string | null): Message[] {
   const out: Message[] = [];
   for (const line of (raw ?? '').split('\n')) {
@@ -179,7 +186,9 @@ function parseMessages(raw: string | null): Message[] {
         const flag: Flag | undefined = m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
         out.push({ id: m.id, author: m.author, text: m.text, images: m.images.filter((f): f is string => typeof f === 'string' && MESSAGE_IMAGE.test(f)), created_at: m.created_at,
           ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}),
-          ...(typeof m.reply_to === 'string' && m.reply_to ? { reply_to: m.reply_to } : {}) });
+          ...(typeof m.reply_to === 'string' && m.reply_to ? { reply_to: m.reply_to } : {}), ...(m.aside === true ? { aside: true as const } : {}),
+          ...(typeof m.moved_to === 'string' && ID.test(m.moved_to) ? { moved_to: m.moved_to } : {}), ...(typeof m.moved_from === 'string' && m.moved_from ? { moved_from: m.moved_from } : {}),
+          ...(ids(m.added_items) ? { added_items: ids(m.added_items)! } : {}), ...(ids(m.ticked_items) ? { ticked_items: ids(m.ticked_items)! } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
   }
@@ -255,10 +264,10 @@ async function saveImages(path: string, images: Image[]): Promise<string[]> {
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge'; text: string; reply_to?: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move'; text: string; reply_to?: string; aside?: boolean; author?: Author }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
-  await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: 'user', kind: event.kind, first_line, ...(event.reply_to ? { reply_to: event.reply_to } : {}) })}\n`);
+  await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
 }
 async function writeStatus(path: string, status: Status) { await writeFile(join(path, 'status.json'), JSON.stringify({ status })); }
 export async function readStatus(path: string): Promise<Status> {
@@ -294,7 +303,42 @@ async function readAcked(path: string): Promise<string | null> {
 const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) => (m.created_at > hi ? m.created_at : hi), item.created_at as string);
 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
-export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown }
+// `aside`: a side question (user) or its answer (agent, with `reply_to` naming the aside). `add_items` and `check_items` ride on the message:
+// new checklist items (`owner` says who has to do them) and ids of items the agent ticks.
+export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown }
+export interface ItemToAdd { owner: Author; text: string }
+// A side question is a root (no quote); an answer is the agent's, quotes an aside root, and takes no flag but FYI. A main message cannot quote an aside.
+function checkAside(stored: Message[], input: NewMessage): { aside: boolean; replyTo: unknown } {
+  if (input.aside !== undefined && input.aside !== null && typeof input.aside !== 'boolean') throw new Invalid('aside must be true or false');
+  const aside = input.aside === true;
+  if (!aside) {
+    const target = typeof input.reply_to === 'string' ? stored.find(m => m.id === input.reply_to) : undefined;
+    if (target && isAside(target)) throw new Invalid('A message in the main thread cannot quote a side question');
+    return { aside, replyTo: input.reply_to };
+  }
+  if (input.question || input.answer !== undefined) throw new Invalid('A side question cannot hold a question or an answer');
+  if (input.author === 'user') {
+    if (input.reply_to !== undefined && input.reply_to !== null) throw new Invalid('A side question cannot quote a message');
+    return { aside, replyTo: undefined };
+  }
+  const root = typeof input.reply_to === 'string' ? stored.find(m => m.id === input.reply_to) : undefined;
+  if (!root || !isAsideRoot(root)) throw new Invalid('An aside answer must name the side question it answers (reply_to)');
+  if (input.flag !== undefined && input.flag !== 'fyi') throw new Invalid('A side answer cannot be flagged: it never changes the main thread');
+  return { aside, replyTo: root.id };
+}
+// Validates what rides on a message before anything is written: text and owner of each new item, and that only the agent ticks.
+function checkAttached(author: Author, input: NewMessage): { add: ItemToAdd[]; check: string[] } {
+  const list = (v: unknown, what: string): unknown[] => { if (v === undefined || v === null) return []; if (!Array.isArray(v)) throw new Invalid(`${what} must be a list`); return v; };
+  const add = list(input.add_items, 'todo').map(x => {
+    const o = isObject(x) ? x : { owner: undefined, text: x };
+    const owner = o.owner === undefined ? author : o.owner; // by default an item is on the author's own list
+    if (!isAuthor(owner)) throw new Invalid('owner must be "user" or "agent"');
+    return { owner, text: itemText(o.text) };
+  });
+  const check = list(input.check_items, 'check').map(x => { if (typeof x !== 'string' || !/^c\d+$/.test(x)) throw new Invalid('check takes checklist item ids like c3'); return x; });
+  if (check.length && author !== 'agent') throw new Invalid('Only the agent can tick an item.', 403);
+  return { add, check: [...new Set(check)] };
+}
 // A quote must name a message that already exists in this thread. Absent (or null) means a plain message.
 export function checkReplyTo(messages: Message[], value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -318,6 +362,8 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   if (input.question && input.author !== 'agent') throw new Invalid('Only the agent can ask questions', 403);
   if (input.answer && input.author !== 'user') throw new Invalid('Only the user can answer', 403);
   const flag = messageFlag(input.author, input.flag, !!input.question);
+  const attached = checkAttached(input.author, input);
+  let addedItems: ChecklistItem[] = [];
   let eventKind: 'message' | 'answer' = 'message';
   let eventText = '';
   const message = await withLock(path, async () => {
@@ -325,7 +371,8 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
     if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
     if (input.question && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it', 409);
     const stored = await materialise(path, item);
-    const quoted = checkReplyTo(stored, input.reply_to);
+    const { aside, replyTo } = checkAside(stored, input);
+    const quoted = checkReplyTo(stored, replyTo);
     const n = stored.length + 1;
     let text = input.answer !== undefined || input.question ? '' : messageText(input.text, images.length > 0);
     let extra: Partial<Message> = {};
@@ -335,7 +382,17 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
       text = checked.text; extra = { answer: checked.answer };
       eventKind = 'answer'; eventText = `${checked.answer.question_id}: ${checked.labels.join(', ')}`;
     }
-    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}) };
+    // Attached checklist changes are checked in full first, then written together with the message.
+    let added: ChecklistItem[] = [], ticked: string[] = [];
+    if (attached.add.length || attached.check.length) {
+      const items = await readChecklist(path);
+      added = attached.add.map(a => pushItem(items, a.owner, a.text, input.author));
+      ticked = attached.check.filter(c => tickItem(items, c));
+      await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
+    }
+    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+      ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
+    addedItems = added;
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
     // replying means that side read everything before it
     if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? 'agent-read.json' : 'read.json', lastAt(stored, item));
@@ -344,7 +401,8 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
     return created;
   });
   if (input.author === 'user') {
-    await logEvent(dir, { id, kind: eventKind, text: (eventKind as string) === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}) });
+    await logEvent(dir, { id, kind: eventKind, text: (eventKind as string) === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}), ...(message.aside ? { aside: true } : {}) });
+    for (const i of addedItems) await userEvent(dir, id, 'checklist', `add (${i.owner === 'user' ? 'for you' : 'for the agent'}): ${i.text}`);
   }
   return message;
 }
@@ -479,16 +537,25 @@ function itemText(value: unknown): string {
 }
 const find = (items: ChecklistItem[], itemId: string) => items.find(i => i.id === itemId) ?? (() => { throw new Invalid('No such item', 404); })();
 const userEvent = (dir: string, id: string, kind: 'checklist' | 'checklist_claim', text: string) => logEvent(dir, { id, kind, text });
+// Adds one item to a list already read (and about to be written back by the caller).
+function pushItem(items: ChecklistItem[], owner: Author, text: string, by: Author): ChecklistItem {
+  if (items.length >= MAX_ITEMS) throw new Invalid(`A checklist holds at most ${MAX_ITEMS} items`);
+  const n = items.reduce((m, i) => Math.max(m, Number(/^c(\d+)$/.exec(i.id)?.[1] ?? 0)), 0);
+  const created: ChecklistItem = { id: `c${n + 1}`, owner, text, done: false, created_by: by, created_at: new Date().toISOString() };
+  items.push(created);
+  return created;
+}
+// Ticks an item in a list already read. Only the agent ticks; an item that is already ticked is left alone.
+function tickItem(items: ChecklistItem[], itemId: string): boolean {
+  const it = find(items, itemId);
+  if (it.done) return false;
+  it.done = true; it.done_by = 'agent'; it.done_at = new Date().toISOString();
+  return true;
+}
 export async function addChecklistItem(dir: string, id: string, input: { owner: unknown; text: unknown; by: Author }): Promise<ChecklistItem> {
   if (!isAuthor(input.owner)) throw new Invalid('owner must be "user" or "agent"');
   const text = itemText(input.text);
-  const item = await changeChecklist(dir, id, input.by, items => {
-    if (items.length >= MAX_ITEMS) throw new Invalid(`A checklist holds at most ${MAX_ITEMS} items`);
-    let n = items.reduce((m, i) => Math.max(m, Number(/^c(\d+)$/.exec(i.id)?.[1] ?? 0)), 0);
-    const created: ChecklistItem = { id: `c${++n}`, owner: input.owner as Author, text, done: false, created_by: input.by, created_at: new Date().toISOString() };
-    items.push(created);
-    return created;
-  });
+  const item = await changeChecklist(dir, id, input.by, items => pushItem(items, input.owner as Author, text, input.by));
   if (input.by === 'user') await userEvent(dir, id, 'checklist', `add (${item.owner === 'user' ? 'for you' : 'for the agent'}): ${item.text}`);
   return item;
 }
@@ -535,6 +602,28 @@ export async function deleteChecklistItem(dir: string, id: string, itemId: strin
     return it;
   });
   if (by === 'user') await userEvent(dir, id, 'checklist', `delete: ${gone.text}`);
+}
+// ---- Tracker: every checklist item across the threads that were not merged away, read once. Filters and grouping are in inbox/tracker.js.
+export interface TrackerRow { thread: string; title: string; read_only: boolean; item: ChecklistItem }
+export interface Tracker { generated_at: string; counts: ChecklistCounts; threads: { id: string; title: string; open: number }[]; you: TrackerRow[]; agent: TrackerRow[]; done_recent: TrackerRow[] }
+export async function readTracker(dir: string, filter: { thread?: string; state?: string; q?: string } = {}, now = new Date()): Promise<Tracker> {
+  let entries: string[] = [];
+  try { entries = (await readdir(dir)).filter(e => ID.test(e)); } catch (error) { if (code(error) !== 'ENOENT') throw error; }
+  const rows: TrackerRow[] = [], threads: Tracker['threads'] = [];
+  for (const id of entries.sort()) {
+    try {
+      const path = join(dir, id);
+      if ((await readMerge(path))?.state === 'done') continue;
+      const items = await readChecklist(path);
+      if (!items.length) continue;
+      const item = await readItem(path);
+      const title = titleOf(item, id), read_only = item.read_only === true;
+      threads.push({ id, title, open: items.filter(i => !i.done).length });
+      for (const i of items) rows.push({ thread: id, title, read_only, item: i });
+    } catch { /* a broken folder must not hide the rest */ }
+  }
+  const groups = groupRows(filterRows(rows, filter), now.getTime());
+  return { generated_at: now.toISOString(), counts: checklistCounts(rows.map(r => r.item)), threads, ...groups };
 }
 export interface OpenItem { thread: string; title: string; item: ChecklistItem }
 // Items across every thread: `mine` = open items for the agent; `claimed` = items the user says are done and the agent has not checked.
@@ -601,7 +690,7 @@ const titleOf = (item: ItemData, id: string) => (typeof item.title === 'string' 
 async function readOrNull(path: string): Promise<Buffer | null> {
   try { return await readFile(path); } catch (error) { if (code(error) === 'ENOENT') return null; throw error; }
 }
-async function copyMessages(from: string, into: string, source: Message[], target: Message[], at: string, divider: string): Promise<void> {
+async function copyMessages(from: string, into: string, source: Message[], target: Message[], at: string, divider: string, itemIds: Map<string, string>): Promise<void> {
   // Images are copied under new numbers (the target's msg-<n> names), then every reference is rewritten.
   const wanted = [...new Set(source.flatMap(m => m.images))];
   const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
@@ -615,7 +704,11 @@ async function copyMessages(from: string, into: string, source: Message[], targe
   for (const m of source) {
     const id = `m${++n}`;
     const copy: Message = { ...m, id, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])) };
-    delete copy.reply_to;
+    delete copy.reply_to; delete copy.added_items; delete copy.ticked_items;
+    for (const key of ['added_items', 'ticked_items'] as const) {
+      const mapped = (m[key] ?? []).flatMap(c => (itemIds.has(c) ? [itemIds.get(c)!] : []));
+      if (mapped.length) copy[key] = mapped;
+    }
     if (m.reply_to && moved.has(m.reply_to)) copy.reply_to = moved.get(m.reply_to)!;
     if (m.question) { questions.set(m.question.id, `q${n}`); copy.question = { ...m.question, id: `q${n}` }; }
     if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
@@ -623,16 +716,25 @@ async function copyMessages(from: string, into: string, source: Message[], targe
   }
   await appendFile(join(into, 'thread.jsonl'), lines.map(m => `${JSON.stringify(m)}\n`).join(''));
 }
-async function moveChecklist(from: string, into: string): Promise<void> {
-  const moving = await readChecklist(from);
-  if (!moving.length) return;
-  const existing = await readChecklist(into);
-  const same = (a: ChecklistItem, b: ChecklistItem) => a.owner === b.owner && a.created_at === b.created_at && a.text === b.text; // already moved by an earlier attempt
-  const fresh = moving.filter(i => !existing.some(e => same(e, i)));
-  if (existing.length + fresh.length > MAX_ITEMS) throw new Invalid(`The merged checklist would hold more than ${MAX_ITEMS} items`);
+// Where each of the source's items ends up in the target: moved ones get the next free ids, and one an earlier attempt already moved keeps its new id.
+interface ChecklistMove { moving: ChecklistItem[]; staying: ChecklistItem[]; existing: ChecklistItem[]; fresh: ChecklistItem[]; ids: Map<string, string> }
+async function planChecklistMove(from: string, into: string, only?: Set<string>): Promise<ChecklistMove> {
+  const all = await readChecklist(from), existing = await readChecklist(into);
+  const moving = only ? all.filter(i => only.has(i.id)) : all, staying = only ? all.filter(i => !only.has(i.id)) : [];
+  const same = (a: ChecklistItem, b: ChecklistItem) => a.owner === b.owner && a.created_at === b.created_at && a.text === b.text;
   let c = existing.reduce((hi, i) => Math.max(hi, Number(/^c(\d+)$/.exec(i.id)?.[1] ?? 0)), 0);
-  await writeAtomic(join(into, 'checklist.json'), JSON.stringify({ items: [...existing, ...fresh.map(i => ({ ...i, id: `c${++c}` }))] }, null, 2));
-  await writeAtomic(join(from, 'checklist.json'), JSON.stringify({ items: [] }, null, 2));
+  const ids = new Map<string, string>(), fresh: ChecklistItem[] = [];
+  for (const i of moving) {
+    const done = existing.find(e => same(e, i));
+    if (done) ids.set(i.id, done.id); else { const id = `c${++c}`; ids.set(i.id, id); fresh.push({ ...i, id }); }
+  }
+  return { moving, staying, existing, fresh, ids };
+}
+async function moveChecklist(from: string, into: string, plan: ChecklistMove): Promise<void> {
+  if (!plan.moving.length) return;
+  if (plan.existing.length + plan.fresh.length > MAX_ITEMS) throw new Invalid(`The merged checklist would hold more than ${MAX_ITEMS} items`);
+  await writeAtomic(join(into, 'checklist.json'), JSON.stringify({ items: [...plan.existing, ...plan.fresh] }, null, 2));
+  await writeAtomic(join(from, 'checklist.json'), JSON.stringify({ items: plan.staying }, null, 2));
 }
 // Runs with both thread locks held. Returns false when this exact merge was already completed.
 async function mergeLocked(dir: string, from: string, into: string, fromId: string, intoId: string): Promise<boolean> {
@@ -654,8 +756,9 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
   }
   const divider = `Merged from: ${titleOf(fromItem, fromId)}`;
   const copied = target[note.base]?.divider === true && target[note.base]!.text === divider;
-  if (!copied) await copyMessages(from, into, source, target.slice(0, note.base), note.at, divider);
-  await moveChecklist(from, into);
+  const plan = await planChecklistMove(from, into);
+  if (!copied) await copyMessages(from, into, source, target.slice(0, note.base), note.at, divider, plan.ids);
+  await moveChecklist(from, into, plan);
   if (note.await_agent) {
     await writeAtomic(join(into, 'awaiting-agent.json'), JSON.stringify({ at: note.at, from: fromId }));
     await writeStatus(into, 'open');
@@ -681,6 +784,83 @@ export async function mergeThreads(dir: string, fromId: string, intoId: string, 
     if (by === 'user') await logEvent(dir, { id: intoId, kind: 'merge', text: `${fromId} into ${intoId}` });
   }
   return { merged, into: intoId };
+}
+
+// ---- Moving messages: the agent takes messages (the user's too) out of the wrong thread and into another.
+// Each moved message leaves a divider stub with the same id and time ("Moved to <title>") so quotes of it still resolve and nothing shifts.
+// Copies in the target carry `moved_from`, so an interrupted move (copies written, stubs not) is finished by running it again.
+// Items a message added travel with it (new ids); items it ticked move only if they were added by a moved message, otherwise the reference is dropped.
+export async function moveMessages(dir: string, fromId: string, msgIds: string[], toId: string, by: Author = 'agent'): Promise<{ moved: string[]; into: string }> {
+  if (fromId === toId) throw new Invalid('Choose a different thread to move into');
+  if (!msgIds.length || new Set(msgIds).size !== msgIds.length) throw new Invalid('Name each message to move once');
+  const from = await itemDir(dir, fromId), into = await itemDir(dir, toId);
+  const [first, second] = fromId < toId ? [from, into] : [into, from];
+  const result = await withLock(first, () => withLock(second, () => moveLocked(from, into, fromId, toId, msgIds)));
+  if (result.moved.length) await logEvent(dir, { id: fromId, kind: 'move', text: `${result.moved.join(' ')} from ${fromId} into ${toId}`, author: by });
+  return { moved: result.moved, into: toId };
+}
+async function moveLocked(from: string, into: string, fromId: string, toId: string, msgIds: string[]): Promise<{ moved: string[] }> {
+  if (await readMerge(from) || await readMerge(into)) throw new Invalid('A merged thread cannot take part in a move', 409);
+  const fromItem = await readItem(from), intoItem = await readItem(into);
+  const source = await materialise(from, fromItem), target = await materialise(into, intoItem);
+  const wanted = msgIds.map(id => {
+    const m = source.find(x => x.id === id);
+    if (!m) throw new Invalid(`No message ${id} in that thread`, 404);
+    if (m.moved_to && m.moved_to === toId) return m; // already moved by an earlier attempt
+    if (m.divider) throw new Invalid(`${id} is a divider and cannot be moved`);
+    return m;
+  });
+  const already = wanted.filter(m => m.moved_to);
+  if (already.some(m => m.moved_to !== toId)) throw new Invalid('One of those messages was already moved to another thread', 409);
+  const moving = wanted.filter(m => !m.moved_to);
+  const ids = new Set(moving.map(m => m.id));
+  if (!moving.length && already.length) return { moved: [] };
+  if (intoItem.read_only === true && moving.some(m => m.author === 'user')) throw new Invalid(READ_ONLY_NOTE, 409);
+  if (intoItem.read_only === true && moving.some(m => m.question)) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it', 409);
+  // A question moves with its answer, and a side question with its answers.
+  for (const m of source) {
+    const tied = [...(m.answer ? [source.find(x => x.question?.id === m.answer!.question_id)] : []), ...(m.question ? source.filter(x => x.answer?.question_id === m.question!.id) : []),
+      ...(m.aside && m.reply_to ? [source.find(x => x.id === m.reply_to)] : []), ...(isAsideRoot(m) ? source.filter(x => isAside(x) && x.reply_to === m.id) : [])];
+    if (ids.has(m.id) && tied.some(t => t && !ids.has(t.id) && !t.moved_to)) throw new Invalid(`${m.id} is part of a question or side question: move it together with its answer or question`);
+  }
+  const copied = new Map(target.flatMap(m => (m.moved_from?.startsWith(`${fromId}/`) ? [[m.moved_from.slice(fromId.length + 1), m.id] as const] : [])));
+  const fresh = moving.filter(m => !copied.has(m.id));
+  const added = new Set(moving.flatMap(m => m.added_items ?? []));
+  const plan = await planChecklistMove(from, into, added);
+  if (plan.moving.length && plan.existing.length + plan.fresh.length > MAX_ITEMS) throw new Invalid(`The checklist would hold more than ${MAX_ITEMS} items`);
+  const key = `${fromId}/#${moving.map(m => m.id).join(',')}`; // marks this batch's divider, so a retry does not write a second one
+  const divider = `Moved from: ${titleOf(fromItem, fromId)}`;
+  if (fresh.length) {
+    // Images are copied under the target's next numbers; every reference is rewritten.
+    const files = [...new Set(fresh.flatMap(m => m.images))];
+    const loaded = (await Promise.all(files.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
+    const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
+    const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
+    let n = target.length;
+    const lines: Message[] = target.some(m => m.divider && m.moved_from === `${key}`) ? [] : [{ id: `m${++n}`, author: 'agent', text: divider, images: [], created_at: new Date().toISOString(), divider: true, moved_from: key }];
+    for (const m of fresh) copied.set(m.id, `m${++n}`);
+    const questions = new Map(moving.flatMap(m => (m.question ? [[m.question.id, `q${Number(copied.get(m.id)!.slice(1))}`] as const] : [])));
+    for (const m of fresh) {
+      const copy: Message = { ...m, id: copied.get(m.id)!, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])), moved_from: `${fromId}/${m.id}` };
+      delete copy.reply_to; delete copy.added_items; delete copy.ticked_items;
+      if (m.reply_to && copied.has(m.reply_to)) copy.reply_to = copied.get(m.reply_to)!; // a quote of a message that stayed behind is dropped
+      const addedNow = (m.added_items ?? []).flatMap(c => (plan.ids.has(c) ? [plan.ids.get(c)!] : []));
+      const tickedNow = (m.ticked_items ?? []).flatMap(c => (plan.ids.has(c) ? [plan.ids.get(c)!] : []));
+      if (addedNow.length) copy.added_items = addedNow;
+      if (tickedNow.length) copy.ticked_items = tickedNow;
+      if (m.question) copy.question = { ...m.question, id: questions.get(m.question.id)! };
+      if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
+      lines.push(copy);
+    }
+    await appendFile(join(into, 'thread.jsonl'), lines.map(m => `${JSON.stringify(m)}\n`).join(''));
+  }
+  await moveChecklist(from, into, plan);
+  // Commit: the stubs replace the originals in one atomic rewrite of the source's thread file.
+  const stubText = `Moved to [${titleOf(intoItem, toId)}](#/${toId})`;
+  const stubbed = source.map(m => (ids.has(m.id) ? { id: m.id, author: 'agent' as const, text: stubText, images: [], created_at: m.created_at, divider: true as const, moved_to: toId } : m));
+  await writeAtomic(join(from, 'thread.jsonl'), stubbed.map(m => `${JSON.stringify(m)}\n`).join(''));
+  if (moving.some(m => m.author === 'user')) await writeStatus(into, 'open');
+  return { moved: moving.map(m => m.id) };
 }
 
 // ---- Profile: names and avatars for both sides, in <dir>/_profile/.
@@ -765,8 +945,9 @@ export async function avatarBytes(dir: string, who: string): Promise<{ bytes: Bu
 export interface Summary {
   id: string; title: string; origin: Author; mode: string; status: Status; created_at: string; url: string | null;
   last_message_at: string; last_author: Author; unread_for_user: boolean; user_read_at: string | null; agent_read_at: string | null;
+  // `waiting` follows the main flow only, except that an unanswered side question makes it 'agent' (unless the main flow waits on you); `waiting_aside` (only present when true) says an aside is waiting.
   open_question: boolean; waiting: 'agent' | 'you' | 'idle' | 'done';
-  last_flag: Flag | null; checklist: ChecklistCounts; open_for_you: number; merged_into: string | null; read_only: boolean; acked_through: string | null;
+  last_flag: Flag | null; waiting_aside?: true; checklist: ChecklistCounts; open_for_you: number; merged_into: string | null; read_only: boolean; acked_through: string | null;
 }
 // A thread is unread for the user only when a message that needs them (a `needs_you` flag or an unanswered question) arrived after they last read.
 const needsUser = (m: Message, answered: Set<string>) => m.author === 'agent' && (m.flag === 'needs_you' || (!!m.question && !answered.has(m.question.id)));
@@ -789,14 +970,15 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const path = await itemDir(dir, id);
   const item = await readItem(path);
   const messages = await readMessages(path, item);
-  const last = messages[messages.length - 1];
+  const main = mainMessages(messages).filter(m => !m.moved_to); // asides and move stubs never decide who spoke last
+  const last = main[main.length - 1];
   const created_at = item.created_at as string;
   const last_author: Author = last?.author ?? 'user';
   const last_message_at = lastAt(messages, item);
   const read = await readAt(path, 'read.json');
   const items = await readChecklist(path);
   const answered = new Set(messages.flatMap(m => (m.answer ? [m.answer.question_id] : [])));
-  const lastAgent = [...messages].reverse().find(m => m.author === 'agent');
+  const lastAgent = [...main].reverse().find(m => m.author === 'agent');
   const title = typeof item.title === 'string' && item.title ? item.title : String(item.note ?? '').split('\n')[0] || id;
   const context = isObject(item.context) ? item.context : {};
   const readOnly = item.read_only === true;
@@ -807,7 +989,9 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
     agent_read_at: await readAt(path, 'agent-read.json'), open_question: openQuestions(messages).length > 0, waiting: 'done',
     last_flag: lastAgent?.flag ?? null, checklist: checklistCounts(items), open_for_you: items.filter(i => i.owner === 'user' && !i.done && !i.claimed_by_user_at).length,
     merged_into: (await readMerge(path))?.state === 'done' ? (await readMerge(path))!.into : null, read_only: readOnly, acked_through: acked };
-  summary.waiting = waitingOn(summary.status, messages, items, await readAwait(path), readOnly, acked);
+  summary.waiting = main.length === 0 && messages.some(m => m.moved_to) ? (summary.status === 'done' ? 'done' : 'idle') : waitingOn(summary.status, main, items, await readAwait(path), readOnly, acked);
+  const asideWaiting = !readOnly && !summary.merged_into && asideGroups(messages, acked).some(g => !g.answered);
+  if (asideWaiting) { summary.waiting_aside = true; if (summary.waiting !== 'you') summary.waiting = 'agent'; }
   return { summary, messages, item, path };
 }
 export async function listThreads(dir: string, query?: string): Promise<Summary[]> {

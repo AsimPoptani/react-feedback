@@ -241,6 +241,10 @@ react-feedback serve                                            # start the serv
 react-feedback --help                                           # print the usage
 react-feedback list [--waiting]                                 # threads waiting for the agent
 react-feedback reply <id> "text" [--image a.png --image b.jpg] [--to <message-id>]   # --to quotes one of that thread's messages
+react-feedback reply <id> "text" --aside --to <aside-id>       # answer a side question (/btw)
+react-feedback reply <id> "text" --todo "item" [--todo ...] [--for agent|user] [--check c3 ...]   # checklist changes ride on the reply
+react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>   # move messages to another thread
+react-feedback tracker [--mine | --claimed | --open]            # every checklist item across the threads
 react-feedback new "title" "text" [--image path ...]            # an agent-started thread
 react-feedback status <id> open|done
 react-feedback read <id>                                        # stamp the agent read marker, then print the thread with each quote's context
@@ -268,9 +272,34 @@ Any message can quote an earlier one in the same thread, WhatsApp style. A messa
 
 On the inbox page the launcher sits bottom-right (`data-position="bottom-right"`), with a clear strip under the composer so it never covers Send.
 
+## Side questions (`/btw`)
+
+Type `/btw your question` in the inbox composer (or press **B**, or use the **Side question** button) to ask something without disturbing the main thread. The message carries `aside: true`; the agent's answers are messages with `aside: true` and `reply_to` set to the question. Old messages have neither field.
+
+- **Inbox:** each side question and its answers show as a compact, collapsible "Side question" bubble set apart from the main flow. It is collapsed once answered and open, with a "Waiting for agent" pill, until then.
+- **Waiting:** the main flow's last-message logic ignores asides. A thread with an unanswered aside has `waiting: "agent"` (unless the main flow waits on you) and `waiting_aside: true` in its summary (the field is absent otherwise). `ack` clears it too.
+- **CLI:** `reply <id> "text" --aside --to <aside-id>`; `list --waiting` marks threads with a side question waiting; `read` prints each aside indented under "Side question".
+- A side answer takes no flag, and neither side can put a question or a quote in an aside. A merge keeps asides and their links.
+
+## Checklist items on replies
+
+`reply <id> "text" --todo "item" [--todo "…"] [--for agent|user]` adds checklist items as part of the message (default: the agent's own list); `--check c3 [--check c4]` ticks items. The message stores `added_items` and `ticked_items`, and the inbox shows "Added to checklist" / "Ticked" lists inside the bubble, each item jumping to its row in the panel. Over HTTP a user message may carry `todo` (a list of texts) and `for`; `check` is refused with 403 because only the agent ticks. The whole message is checked first: nothing is written if an id or a text is wrong. Read-only threads still refuse the user's items.
+
+## Moving messages
+
+`react-feedback move <from> <msg-id> [<msg-id> ...] --to <into>` moves messages (the user's too), with their images, original times and authors, into another thread, behind a "Moved from: …" divider. Each moved message leaves a "Moved to <title>" stub at its old spot (same id, so quotes of it still resolve). Quotes between moved messages are remapped; a quote of a message that stayed is dropped. Items a message added move with it. A question moves with its answer, and a side question with its answers. Dividers, merged threads, a read-only target (for user messages) and the same thread are refused. Both threads are locked; an interrupted move is finished by running the same command again. It logs a `move` event.
+
+## Tracker
+
+`#/tracker` in the inbox lists every checklist item across the threads that were not merged away, in For you, For the agent and Done recently (ticked in the last seven days, collapsible), with a donut for overall progress, filters by thread and by state, and a search box. Each item links to its row in its thread. The item rules are unchanged. `GET api/tracker?thread=&state=open|claimed|done&q=` returns the same data; the CLI prints it with `tracker`.
+
+## Markdown
+
+Message bodies render a safe GitHub-flavoured subset: headings (`#` to `####`), tables (with alignment, scrolling inside the bubble), nested and ordered lists, read-only task lists, blockquotes, rules, inline and fenced code, links (https, mailto and in-app only, opened in a new tab with `rel="noopener noreferrer"`), bold, italic, strikethrough and line breaks. No HTML is ever parsed: everything is built with `createElement` and `textContent`. Quote snippets, previews and the tracker show plain text; the CLI prints the raw text. The renderer is `server/inbox/markdown.js` (no dependency).
+
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`.
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`. A message body may also carry `aside: true`, `todo` and `for`.
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 

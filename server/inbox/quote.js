@@ -1,3 +1,4 @@
+import { firstPlainLine } from './markdown.js';
 // Quote replies, the part that needs no DOM: what a quote says, and what counts as a swipe-to-reply.
 export const SNIPPET_MAX = 120;
 export const SWIPE_MIN = 56; // px to the right
@@ -5,8 +6,8 @@ export const SWIPE_SLACK = 32; // px up or down before it counts as a scroll ins
 
 // The first non-blank line of a message, cut short; "Image" when it is only a picture.
 export function snippetOf(message) {
-  const line = String(message.text ?? '').split('\n').find(l => l.trim());
-  if (line) return line.trim().slice(0, SNIPPET_MAX);
+  const line = firstPlainLine(message.text ?? '');
+  if (line) return line.slice(0, SNIPPET_MAX);
   return message.images && message.images.length ? 'Image' : '';
 }
 // What a message's quote points at: null (it quotes nothing), a found message, or an unavailable original (merged away or deleted).

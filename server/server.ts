@@ -178,7 +178,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -255,6 +255,10 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (path === `${PREFIX}/api/areas` && req.method === 'GET') return json(areas); // the one source of truth for how the inbox and the metrics group threads
   const profile = await profileRoute(req, dir, path, read);
   if (profile) return profile;
+  if (path === `${PREFIX}/api/tracker` && req.method === 'GET') {
+    const q = new URL(req.url).searchParams;
+    return json(await store.readTracker(dir, { thread: q.get('thread') ?? undefined, state: q.get('state') ?? undefined, q: q.get('q') ?? undefined }));
+  }
   const pins = await pinsRoute(req, dir, path, read);
   if (pins) return pins;
   const checklist = await checklistRoute(req, dir, path, read);
@@ -271,7 +275,9 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (req.method !== 'POST') return null;
   if (action === 'messages') {
     const data = await read(req);
-    return json(await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), reply_to: data.reply_to }), 201);
+    // `aside: true` is a side question; `todo` (a list of texts, `for`: "user" by default or "agent") adds checklist items with the message. Only the agent ticks (`check`), so the user's API refuses it.
+    const add = Array.isArray(data.todo) ? data.todo.map(text => ({ owner: data.for ?? 'user', text })) : data.todo;
+    return json(await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), reply_to: data.reply_to, aside: data.aside, add_items: add, check_items: data.check }), 201);
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
   if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user'));
