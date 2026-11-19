@@ -342,11 +342,11 @@ Type `/btw your question` in the inbox composer (or press **B**, or use the **Si
 
 ## Last seen
 
-The thread header shows a quiet line: each agent's last activity ("Agent · active 2 min ago") and the user's last visit ("You · last seen 10:42"). Under an hour it is relative; after that it is the time, in the viewer's local zone. With no data the line is hidden. It shows on read-only threads too.
+Each side sees the other. The inbox's thread header shows a quiet line with each agent's last activity ("Agent · active 2 min ago"): relative under an hour, the time after that in the viewer's local zone, hidden when there is no data, and shown on read-only threads too. An agent sees the user's last visit ("You · last seen 2026-11-19 10:42 UTC") and the other agents, never itself.
 
-- **Agent:** its latest action through the CLI or the MCP server (any command or tool call: a reply, read, ack, tick, move, merge, a reminder change, a list), kept per agent name. Written at most every 5 seconds.
+- **Agent:** its latest action through the CLI or the MCP server (any command or tool call), kept per agent name (`FEEDBACK_AGENT_NAME` for the CLI as well, so the CLI and the MCP server under one name share an entry). Written at most every 5 seconds.
 - **User:** the latest inbox page activity (page load, poll or a message sent), written at most once a minute.
-- **Where:** one small file per writer in `<FEEDBACK_DIR>/_presence/`, timestamps and the agent name only (no address, browser or thread). `GET api/presence` returns `{ user: { at } | null, agents: [{ name, at }] }`. `react-feedback list` and `read` print the lines after their output, and the MCP `list_threads` and `read_thread` return `presence`.
+- **Where:** one small file per writer in `<FEEDBACK_DIR>/_presence/`, timestamps and the agent name only (no address, browser or thread); never created in a folder that does not exist. `GET api/presence` returns `{ user: { at } | null, agents: [{ name, at }] }` (everything; the inbox shows only the agents). `react-feedback list` and `read` print the lines on **stderr**, like the other hints, so their output is unchanged; the MCP `list_threads` and `read_thread` return `presence` without the caller.
 
 ## Checklist items on replies
 

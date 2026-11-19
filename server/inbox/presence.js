@@ -7,10 +7,17 @@ export function relative(iso, now) {
 }
 // `clock(iso, now)` formats the time after an hour in the viewer's zone (the inbox) or UTC (the CLI).
 export function whenText(iso, now, clock) { return now - Date.parse(iso) < 3600e3 ? relative(iso, now) : clock(iso, now); }
+// Each viewer sees the other side only: the user sees the agents; an agent sees the user and the other agents (not itself, matched by name; null is the unnamed one).
+export function forViewer(presence, viewer) {
+  if (!presence) return null;
+  if (viewer === 'user') return { user: null, agents: presence.agents || [] };
+  return { user: presence.user || null, agents: (presence.agents || []).filter(a => (a.name || null) !== (viewer.agent || null)) };
+}
 // The lines to show: each agent ("Claude · active 2 min ago") then the user ("You · last seen 10:42"). Nothing when there is no data.
-export function presenceLines(presence, now, { agentName = 'Agent', clock }) {
-  if (!presence) return [];
-  const lines = (presence.agents || []).slice(0, 3).map(a => ({ who: 'agent', name: a.name || agentName, at: a.at, text: `${a.name || agentName} · active ${whenText(a.at, now, clock)}` }));
-  if (presence.user) lines.push({ who: 'user', name: 'You', at: presence.user.at, text: `You · last seen ${whenText(presence.user.at, now, clock)}` });
+export function presenceLines(presence, now, { agentName = 'Agent', clock, viewer }) {
+  const seen = viewer ? forViewer(presence, viewer) : presence;
+  if (!seen) return [];
+  const lines = (seen.agents || []).slice(0, 3).map(a => ({ who: 'agent', name: a.name || agentName, at: a.at, text: `${a.name || agentName} · active ${whenText(a.at, now, clock)}` }));
+  if (seen.user) lines.push({ who: 'user', name: 'You', at: seen.user.at, text: `You · last seen ${whenText(seen.user.at, now, clock)}` });
   return lines;
 }

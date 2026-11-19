@@ -1157,6 +1157,7 @@ const presenceFile = (who: { agent: string | undefined } | 'user') => (who === '
 // Records activity; written at most once per gap (a minute for the user). It never throws: presence is never a reason for a request to fail.
 export async function touchPresence(dir: string, who: { agent: string | undefined } | 'user', now: number = Date.now()): Promise<void> {
   try {
+    if (!(await stat(dir).then(x => x.isDirectory(), () => false))) return; // never create the data folder: a wrong FEEDBACK_DIR must not leave one behind
     const folder = join(dir, '_presence'), file = join(folder, presenceFile(who));
     const gap = who === 'user' ? PRESENCE_USER_GAP_MS : PRESENCE_AGENT_GAP_MS;
     try { const v = JSON.parse(await optional(file) ?? 'null'); if (isObject(v) && typeof v.at === 'string' && now - Date.parse(v.at) < gap && Date.parse(v.at) <= now) return; } catch { /* rewrite it */ }
@@ -1166,16 +1167,15 @@ export async function touchPresence(dir: string, who: { agent: string | undefine
 }
 export async function readPresence(dir: string): Promise<Presence> {
   const out: Presence = { user: null, agents: [] };
+  const read = async (name: string) => { try { const v = JSON.parse(await optional(join(dir, '_presence', name)) ?? 'null'); return isObject(v) && typeof v.at === 'string' && !Number.isNaN(Date.parse(v.at)) ? v : null; } catch { return null; } };
+  const user = await read('user.json');
+  if (user) out.user = { at: user.at as string };
   let names: string[] = [];
   try { names = await readdir(join(dir, '_presence')); } catch { return out; }
-  for (const name of names.filter(n => /^(user|agent(-[a-z0-9-]+)?)\.json$/.test(n)).slice(0, MAX_PRESENCE_AGENTS + 1)) {
-    try {
-      const v = JSON.parse(await optional(join(dir, '_presence', name)) ?? 'null');
-      if (!isObject(v) || typeof v.at !== 'string' || Number.isNaN(Date.parse(v.at))) continue;
-      if (name === 'user.json') out.user = { at: v.at };
-      else out.agents.push({ name: typeof v.name === 'string' && v.name && v.name.length <= MAX_NAME ? v.name : null, at: v.at });
-    } catch { /* skip a bad file */ }
+  for (const name of names.filter(n => /^agent(-[a-z0-9-]+)?\.json$/.test(n)).slice(0, MAX_PRESENCE_AGENTS)) {
+    const v = await read(name);
+    if (v) out.agents.push({ name: typeof v.name === 'string' && v.name && v.name.length <= MAX_NAME ? v.name : null, at: v.at as string });
   }
-  out.agents.sort((a, b) => b.at.localeCompare(a.at));
+  out.agents.sort((x, y) => y.at.localeCompare(x.at));
   return out;
 }

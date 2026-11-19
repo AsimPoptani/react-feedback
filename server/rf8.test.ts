@@ -17,8 +17,10 @@ let handle: ReturnType<typeof createHandler>;
 const T0 = Date.parse('2026-11-19T10:00:00.000Z');
 const call = (method: string, path: string, data?: unknown, headers: Record<string, string> = {}) => handle(new Request(`http://local/__feedback/${path}`, { method, headers: { ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) }));
 const presence = async () => (await call('GET', 'api/presence')).json() as Promise<store.Presence>;
-const cli = (...args: string[]) => run(args, dir, undefined, undefined, () => {});
+let notes: string[] = [];
+const cli = (...args: string[]) => run(args, dir, undefined, {}, line => { notes.push(line); });
 beforeEach(async () => {
+  notes = [];
   base = await mkdtemp(join(tmpdir(), 'feedback-rf8-'));
   dir = join(base, 'data');
   await mkdir(dir, { recursive: true });
@@ -91,14 +93,41 @@ test('a broken or foreign file in _presence is ignored, and a failed write never
   expect(await store.readPresence(dir)).toEqual({ user: null, agents: [] });
   await store.touchPresence('/nonexistent/\0/dir', 'user'); // no throw
 });
-test('the CLI prints presence after the rows of list and after a read', async () => {
+test('the CLI sends presence through notice (stderr), never into the output, and leaves out the caller itself', async () => {
   const id = (await store.createThread(dir, { title: 'T', text: 'hello', origin: 'user' })).id;
   clock = Date.now(); await call('GET', 'api/threads');
+  await store.touchPresence(dir, { agent: 'Codex' });
   const out = await cli('list');
-  const lines = out.split('\n');
-  expect(lines[0]).toStartWith(id); // the rows come first
-  expect(out).toMatch(/\n\nAgent · active just now\nYou · last seen just now$/);
-  expect(await cli('read', id)).toMatch(/Agent · active just now\nYou · last seen just now$/);
+  expect(out).toStartWith(id);
+  expect(out).not.toMatch(/active|last seen/); // stdout is only the rows
+  expect(notes).toEqual(['Codex · active just now', 'You · last seen just now']); // the unnamed CLI agent is the caller: not shown to itself
+  notes = [];
+  expect(await cli('read', id)).not.toMatch(/active|last seen/);
+  expect(notes).toEqual(['Codex · active just now', 'You · last seen just now']);
+  await rm(join(dir, '_presence'), { recursive: true });
+  expect(await cli('list', '--waiting')).toBe(`${id}  agent  user   ${(await store.listThreads(dir))[0]!.last_message_at.slice(0, 16)}  T`);
+  await store.setStatus(dir, id, 'done');
+  expect(await cli('list', '--waiting')).toBe('Nothing is waiting for the agent.');
+});
+test('the CLI records its presence under FEEDBACK_AGENT_NAME, the same entry the MCP server of that name uses', async () => {
+  await run(['list'], dir, undefined, { FEEDBACK_AGENT_NAME: 'Claude' }, () => {});
+  expect((await store.readPresence(dir)).agents.map(a => a.name)).toEqual(['Claude']);
+  const { tool, close } = await connect('Claude');
+  const listed = await tool('list_threads');
+  expect((await store.readPresence(dir)).agents.map(a => a.name)).toEqual(['Claude']); // one entry, not two
+  expect(listed.presence.agents).toEqual([]); // the caller does not see itself
+  await close();
+});
+test('presence is only written when the data folder already exists', async () => {
+  const ghost = join(base, 'nope');
+  await store.touchPresence(ghost, 'user');
+  await run(['list'], ghost, undefined, {}, () => {}).catch(() => {});
+  expect(await readdir(base)).not.toContain('nope');
+});
+test('the user\'s entry is found even when there are many agent files', async () => {
+  await store.touchPresence(dir, 'user', T0);
+  for (let i = 0; i < 30; i++) await store.touchPresence(dir, { agent: `Agent ${i}` }, T0);
+  expect((await store.readPresence(dir)).user).toEqual({ at: new Date(T0).toISOString() });
 });
 async function connect(name?: string) {
   const server = createMcpServer({ dir, agentName: name, env: {} });
@@ -113,9 +142,11 @@ test('MCP: every tool call is activity under the agent\'s name, and list_threads
   const { tool, close } = await connect('Codex');
   const listed = await tool('list_threads');
   expect(listed.presence.user.at).toBeString();
-  expect(listed.presence.agents.map((a: any) => a.name)).toEqual(['Codex']);
+  expect(listed.presence.agents).toEqual([]); // Codex itself is not shown to Codex
+  await store.touchPresence(dir, { agent: 'Claude' });
   const read = await tool('read_thread', { id });
-  expect(read.presence.agents[0].name).toBe('Codex');
+  expect(read.presence.agents.map((a: any) => a.name)).toEqual(['Claude']);
+  expect((await store.readPresence(dir)).agents.map(a => a.name).sort()).toEqual(['Claude', 'Codex']); // Codex's calls were recorded
   await tool('events_since'); // even a poll of the feed is the agent being here
   await close();
 });
@@ -128,6 +159,10 @@ test('the presence lines: relative under an hour, the time after, nothing withou
   expect(presenceLines(p, now, { agentName: 'Claude', clock }).map(l => l.text)).toEqual(['Claude · active 2 min ago', 'Codex · active T(08:00)', 'You · last seen T(09:00)']);
   expect(presenceLines({ user: null, agents: [] }, now, { clock })).toEqual([]);
   expect(presenceLines(null, now, { clock })).toEqual([]);
+  // each viewer sees the other side only
+  expect(presenceLines(p, now, { agentName: 'Claude', clock, viewer: 'user' }).map(l => l.text)).toEqual(['Claude · active 2 min ago', 'Codex · active T(08:00)']);
+  expect(presenceLines(p, now, { agentName: 'Claude', clock, viewer: { agent: 'Codex' } }).map(l => l.text)).toEqual(['Claude · active 2 min ago', 'You · last seen T(09:00)']);
+  expect(presenceLines(p, now, { agentName: 'Claude', clock, viewer: { agent: undefined } }).map(l => l.text)).toEqual(['Codex · active T(08:00)', 'You · last seen T(09:00)']);
 });
 test('fired reminders stay in the stored list and the reminders API (the sheet reads them) and in the agent\'s event', async () => {
   const id = (await store.createThread(dir, { title: 'T', text: 'hello', origin: 'user' })).id;

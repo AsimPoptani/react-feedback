@@ -3,11 +3,10 @@
 ## 0.8.1
 
 ### Added
-- **Last seen, for both sides.** The thread header shows a quiet line such as "Agent · active 2 min ago" (one per agent name) and "You · last seen 10:42": relative under an hour, the time after that in the viewer's local zone, hidden when there is no data, and shown on read-only threads. The agent's last active is its latest CLI command or MCP tool call; the user's last seen is the latest inbox page load, poll or message sent, written at most once a minute. Stored as one small file per writer in `<FEEDBACK_DIR>/_presence/` (timestamps and the agent name only, no address or browser). `GET api/presence`; `react-feedback list` and `read` print the lines after their output; the MCP `list_threads` and `read_thread` return `presence`. Existing data is untouched (nothing is written until someone acts).
+- **Last seen, for both sides.** The inbox's thread header shows a quiet line such as "Agent · active 2 min ago" (one per agent name): relative under an hour, the time after that in the viewer's local zone, hidden when there is no data, shown on read-only threads. Each viewer sees the other side only: the inbox shows the agents; an agent sees the user's "last seen" and the other agents, not itself. The agent's last active is its latest CLI command (under `FEEDBACK_AGENT_NAME`, so it matches the MCP server of that name) or MCP tool call; the user's last seen is the latest inbox page load, poll or message sent, written at most once a minute. Stored as one small file per writer in `<FEEDBACK_DIR>/_presence/` (timestamps and the agent name only, no address or browser), and only in a data folder that already exists. `GET api/presence`; `react-feedback list` and `read` print the lines on stderr (stdout is unchanged); the MCP `list_threads` and `read_thread` return `presence`. Existing data is untouched.
 
 ### Changed
 - **Fired reminders are no longer drawn in the thread** (any layout). Their history is the **Fired** list, with times, in the Reminders sheet. The event in `_events.jsonl` and `reminders_fired` in the thread detail are unchanged.
-- `react-feedback list` ends with the presence lines when there are any, after a blank line (the rows come first, so scripts reading the rows are not disturbed).
 
 ## 0.8.0
 
