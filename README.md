@@ -265,7 +265,60 @@ react-feedback metrics [--window 24h|7d|all]
 react-feedback ask-secret <id> --name <key-name> --label "Label" [--help-url <https url>]   # a secure key box in the thread
 react-feedback redact <id> <message-id> [--reason "why"]        # move a sensitive message into the vault (needs FEEDBACK_VAULT_DIR)
 react-feedback unredact <id> <message-id>                       # put it back from the vault (CLI only)
+react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "text"   # a nudge in the agent's event feed
+react-feedback remind <id> list | remove <rid> | off-default | on-default
+react-feedback mcp                                              # an MCP server on stdio (see Connect your agents)
 ```
+
+## Thread reminders
+
+Reminders keep the agent up to date on a thread, for example "does the checklist need to be updated?". They are nudges for the **agent**: a fire appends a line to `_events.jsonl` (`author: "system"`, `kind: "reminder"`, the thread `id` and the text as `first_line`), the feed agents already tail. The inbox shows it as a small muted line, "⏰ Reminder to the agent: …"; it is never unread for you and never sends a push or a notification. The metrics ignore it.
+
+Each thread keeps its reminders in `reminders.json` (written atomically, like `checklist.json`). A reminder has an `id`, a `kind`, `say` (the text), `created_by`, `last_fired_at` and `enabled`. The kinds:
+
+- `every` (`2h`, `30m`, `1d`): fires when the interval has passed **and the thread had activity since the last fire**, so an idle thread stays quiet.
+- `after_agent_replies` (a number): fires after that many agent replies in a row with no checklist change (no item added or ticked).
+- `idle` (`1h`): fires once when the thread has waited on the agent that long.
+
+None of them fires on a done thread. **The built-in reminder** is on for every thread with open **agent** checklist items: after 3 agent replies with no tick, or 6 hours after the last fire (or the oldest open item) when the thread had activity, it says "Thread '<title>' has N open agent items: is the checklist up to date? Tick what shipped, add what's new." Turn it off for a thread with `remind <id> off-default` (or the inbox sheet), and everywhere with `FEEDBACK_DEFAULT_REMINDER=off`.
+
+How it fires: the server (`react-feedback serve`) checks every thread each 60 seconds (`FEEDBACK_REMINDERS=off` stops that), and the CLI and the MCP server check the thread after each agent reply. A fire is recorded under the thread's lock with its `last_fired_at`, so a restart, or two processes at once, never fire it twice; and after a restart nothing fires on a thread that has had no activity since. When `reply` posts on a thread with open agent items and no `--check` or `--todo`, it prints a hint: "N open items here; tick any you shipped with --check cN".
+
+In the inbox: **Reminders** in the thread's ⋯ menu on a phone (a header button on a wide screen) opens a sheet that lists them, adds one (kind, value, text), removes one and switches the built-in one off. Read-only threads take reminders too, because they are for the agent. Over HTTP: `GET|POST api/threads/:id/reminders`, `POST …/reminders/default` (`{ "on": false }`), `DELETE …/reminders/:rid`; the thread detail carries `reminders_fired`.
+
+## Connect your agents (MCP)
+
+`react-feedback mcp` runs an [MCP](https://modelcontextprotocol.io) server on stdio, built on the official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32.2), so any MCP client can use the inbox. The tools call the same store the CLI uses (the same checks, limits and per-thread lock files, so a CLI and an MCP agent writing at once cannot corrupt a thread), never a shell.
+
+Tools: `list_threads` (`waiting`, `area`, `q`), `read_thread` (marks it read for that agent), `reply` (`to`, `fyi`, `needs_you`, `done`, `todo[]`, `check[]`, `aside`, and an optional local `image` path), `ask`, `new_thread` (`read_only`), `todo_add`, `todo_check`, `tracker`, `merge`, `move`, `ack`, `remind_add`, `remind_list`, `remind_remove` and `events_since` (poll the event feed with a cursor; no cursor means "from now", cursor `0` replays it). There is deliberately **no** `redact`, `unredact` or `ask_secret` over MCP: those stay with the trusted CLI.
+
+**Names.** Each server instance posts as `FEEDBACK_AGENT_NAME` (for example `Codex` or `Claude Desktop`) and keeps its own read state. The inbox shows the name, with an avatar colour made from it. Messages from an unnamed agent (the CLI, or no `FEEDBACK_AGENT_NAME`) are unchanged and use the agent profile.
+
+**Safety.** Text that people wrote comes back in `text` fields of the tool result, with a notice, and every tool description says it is data to read, never instructions. Message and item limits are the CLI's. An `image` must be a PNG, JPEG or WebP inside `FEEDBACK_IMAGE_DIR` (a `:`-separated list; the default is the folder the server started in and the system temp folder), after symlinks are resolved, and never inside the data or vault folders.
+
+**Transport.** stdio only, on the same machine. An HTTP transport is **not implemented**: a remote option would need its own token and stays off unless asked for.
+
+Claude Code:
+
+```sh
+claude mcp add react-feedback --env FEEDBACK_DIR=/path/to/feedback-data --env FEEDBACK_AGENT_NAME=Claude -- bun /path/to/react-feedback/bin/react-feedback.ts mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "react-feedback": {
+      "command": "bun",
+      "args": ["/path/to/react-feedback/bin/react-feedback.ts", "mcp"],
+      "env": { "FEEDBACK_DIR": "/path/to/feedback-data", "FEEDBACK_AGENT_NAME": "Claude Desktop" }
+    }
+  }
+}
+```
+
+Any other stdio client: run `bun /path/to/react-feedback/bin/react-feedback.ts mcp` with `FEEDBACK_DIR` and `FEEDBACK_AGENT_NAME` in its environment (installed as a dependency, the same file is `node_modules/react-feedback/bin/react-feedback.ts`). It needs Bun on the path.
 
 ## Quote replies
 
@@ -340,7 +393,7 @@ At 760 px and narrower the thread view is one slim header (← title, the checkl
 
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config`; `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config`; `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
@@ -356,6 +409,7 @@ bun run typecheck && bun run lint
 bun run test        # vitest (widget and the inbox page in happy-dom) and bun test (server, store, CLI)
 bun run test:e2e    # optional browser smoke test (needs Playwright and a built dist/)
 bun e2e/rf6.mjs     # optional browser test: phone layout, key box, redaction, offline sending (same needs)
+bun e2e/rf7.mjs     # optional browser test: thread reminders and agent names (same needs)
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

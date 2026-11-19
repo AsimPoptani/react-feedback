@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+- **Thread reminders.** Per-thread nudges for the agent, stored in `reminders.json`: `every` (an interval; fires only if the thread had activity since the last fire), `after_agent_replies` (N agent replies in a row with no checklist change) and `idle` (waiting on the agent longer than X). A **built-in reminder** is on for every thread with open agent items (after 3 agent replies with no tick, or every 6 h of activity: "Thread '…' has N open agent items: is the checklist up to date?…"); off per thread, or everywhere with `FEEDBACK_DEFAULT_REMINDER=off`. The server checks every 60 s and the CLI and MCP server check after each agent reply; a fire is stored under the thread's lock (restart-safe) and appended to `_events.jsonl` as `author: "system"`, `kind: "reminder"`. The inbox shows a muted "⏰ Reminder to the agent" line; it is never unread and never notifies. CLI: `remind <id> add|list|remove|off-default|on-default`; `reply` prints "N open items here; tick any you shipped with --check cN" when the thread has open agent items and the reply ticks or adds nothing. Inbox: a **Reminders** sheet (⋯ menu on a phone, a header button on a wide screen), also on read-only threads. HTTP: `api/threads/:id/reminders`.
+- **MCP server.** `react-feedback mcp` serves the inbox over stdio with the official `@modelcontextprotocol/sdk` (1.32.2): `list_threads`, `read_thread`, `reply`, `ask`, `new_thread`, `todo_add`, `todo_check`, `tracker`, `merge`, `move`, `ack`, `remind_add`, `remind_list`, `remind_remove`, `events_since`. No `redact`, `unredact` or `ask_secret`. Tools call the store directly (same limits and per-thread locks as the CLI), return people's text in data fields with a notice, and take images only from `FEEDBACK_IMAGE_DIR`. HTTP transport is not implemented.
+- **Agent names.** `FEEDBACK_AGENT_NAME` names an MCP agent; its messages carry `agent_name`, it has its own read marker (`agent-read-<name>-<hash>.json`), and the inbox shows the name with a colour made from it. Existing messages are unchanged.
+
+### Changed
+- `agent_read_at` in a thread summary is the newest read time of any agent (the same value when only one agent has read).
+- The metrics ignore `system` events.
+- New dependencies: `@modelcontextprotocol/sdk` 1.32.2 and `zod` 4.1.12 (used by the MCP server only).
+
 ## 0.7.1
 
 ### Fixed

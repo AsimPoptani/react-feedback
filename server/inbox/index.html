@@ -129,6 +129,19 @@ dialog { border: 2px solid var(--ink); border-radius: 14px; background: var(--pa
 dialog::backdrop { background: rgba(0, 0, 0, .55); }
 dialog.light { max-width: 96vw; width: auto; padding: 8px; }
 dialog.light img { max-width: 92vw; max-height: 82vh; display: block; margin: 0 auto 8px; }
+dialog.remind { max-height: 90dvh; overflow-y: auto; overscroll-behavior: contain; }
+dialog.remind select, dialog.remind input[type="text"], dialog.remind textarea { width: 100%; font: inherit; border: 2px solid var(--ink); border-radius: 10px; padding: 8px 10px; background: var(--white); color: var(--ink); min-height: 44px; }
+dialog.remind textarea { min-height: 64px; }
+dialog.remind .hint { margin: 4px 0; }
+dialog label.check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+dialog label.check input { width: 22px; height: 22px; }
+.remind-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.remind-list li { display: flex; align-items: center; gap: 8px; justify-content: space-between; border: 1px solid var(--ink-2); border-radius: 10px; padding: 6px 8px; }
+.remind-list .what { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.remind-list li.hint { border: 0; }
+.remind-list button { min-height: 44px; flex: none; }
+.sysline { align-self: center; max-width: 92%; color: var(--ink-2); font-size: 12.5px; text-align: center; padding: 2px 8px; overflow-wrap: anywhere; }
+.sysline time { opacity: .8; }
 dialog label { display: block; font-weight: 700; margin: 10px 0 4px; }
 dialog h2 { margin: 0; font: 800 18px var(--f-display); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -498,6 +511,7 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
         <span class="flag upd" id="ro-badge" hidden>Updates</span>
         <button type="button" id="pin-thread" class="desk" aria-pressed="false"></button>
         <button type="button" id="merge-open" class="desk">Merge into…</button>
+        <button type="button" id="remind-open" class="desk">Reminders</button>
         <button type="button" id="toggle-done" class="desk"></button>
         <button type="button" class="cl-btn" id="cl-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="checklist" hidden></button>
         <button type="button" class="more-btn" id="more" aria-haspopup="menu" aria-expanded="false" aria-label="More actions"><span aria-hidden="true">&#8943;</span></button>
@@ -590,6 +604,24 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
     </div>
     <p class="error" id="profile-error" role="alert" hidden></p>
     <div class="bar"><span class="grow"></span><button type="button" id="profile-cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
+  </form>
+</dialog>
+<dialog id="remind-dialog" class="remind" aria-labelledby="remind-h">
+  <h2 id="remind-h">Reminders</h2>
+  <p class="hint">Nudges for the agent, not for you. When one fires it lands in the agent's event feed and shows here as a quiet line. You are never notified.</p>
+  <label class="check" for="remind-default"><input type="checkbox" id="remind-default"> Built-in checklist reminder</label>
+  <p class="hint" id="remind-default-note"></p>
+  <ul class="remind-list" id="remind-list"></ul>
+  <form id="remind-form">
+    <label for="remind-kind">Add a reminder</label>
+    <select id="remind-kind"><option value="every">Every…</option><option value="after_agent_replies">After agent replies</option><option value="idle">When waiting on the agent</option></select>
+    <label for="remind-value" id="remind-value-l">Every</label>
+    <input type="text" id="remind-value" autocomplete="off" inputmode="text">
+    <p class="hint" id="remind-value-hint"></p>
+    <label for="remind-say">Say</label>
+    <textarea id="remind-say" rows="2" maxlength="500" placeholder="Is the checklist up to date?"></textarea>
+    <p class="error" id="remind-error" role="alert" hidden></p>
+    <div class="bar"><button type="button" id="remind-close">Close</button><span class="grow"></span><button type="submit" class="primary">Add</button></div>
   </form>
 </dialog>
 <dialog id="merge-dialog" aria-labelledby="merge-h">

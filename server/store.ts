@@ -2,7 +2,7 @@
 // Each item folder holds `thread.jsonl` (append-only messages) and `msg-<n>.<ext>` images.
 import { appendFile, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { KEY } from './inbox/areas.js';
 import { asideGroups, isAside, isAsideRoot, mainMessages } from './inbox/aside.js';
 import { filterRows, groupRows } from './inbox/tracker.js';
@@ -45,7 +45,9 @@ export interface Message { id: string; author: Author; text: string; images: str
   // `redacted` replaces a sensitive message's text and images, which live in the vault; `key` says which vault file.
   kind?: 'secret_request'; secret?: SecretRequest; redacted?: Redaction;
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
-  client_id?: string; written_at?: string }
+  client_id?: string; written_at?: string;
+  // `agent_name`: which agent wrote an agent message, when it is not the default one (an MCP client's FEEDBACK_AGENT_NAME). Absent means the inbox's agent profile.
+  agent_name?: string }
 export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string; check?: 'works' | 'rejected' }
 export interface Redaction { at: string; by: Author; reason?: string; key: string }
 export const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -241,6 +243,7 @@ function parseMessages(raw: string | null): Message[] {
           ...(typeof m.moved_to === 'string' && ID.test(m.moved_to) ? { moved_to: m.moved_to } : {}), ...(typeof m.moved_from === 'string' && m.moved_from ? { moved_from: m.moved_from } : {}),
           ...(ids(m.added_items) ? { added_items: ids(m.added_items)! } : {}), ...(ids(m.ticked_items) ? { ticked_items: ids(m.ticked_items)! } : {}),
           ...(typeof m.client_id === 'string' && CLIENT_ID.test(m.client_id) ? { client_id: m.client_id } : {}), ...(typeof m.written_at === 'string' && !Number.isNaN(Date.parse(m.written_at)) ? { written_at: m.written_at } : {}),
+          ...(m.author === 'agent' && typeof m.agent_name === 'string' && m.agent_name.trim() && m.agent_name.length <= MAX_NAME ? { agent_name: m.agent_name } : {}),
           ...(parseSecret(m) ? { kind: 'secret_request' as const, secret: parseSecret(m)! } : {}), ...(parseRedaction(m.redacted) ? { redacted: parseRedaction(m.redacted)! } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
@@ -317,7 +320,7 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'secret'; text: string; reply_to?: string; aside?: boolean; author?: Author }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: Author | 'system' }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -347,6 +350,25 @@ async function readAt(path: string, file: string): Promise<string | null> {
   const v = await readMarker(path, file);
   return typeof v.at === 'string' ? v.at : null;
 }
+// The default agent's read marker is `agent-read.json`; an agent with its own name (an MCP client) has `agent-read-<name>-<hash>.json`, so each one reads on its own.
+export function checkAgentName(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > MAX_NAME || [...value].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) throw new Invalid(`An agent name is 1–${MAX_NAME} characters with no control characters`);
+  return value.trim();
+}
+export const agentReadFile = (name?: string): string => (name ? `agent-read-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'agent'}-${createHash('sha1').update(name).digest('hex').slice(0, 6)}.json` : 'agent-read.json');
+// When any agent last read the thread: the newest marker of them all (with only the default agent this is `agent-read.json`).
+async function readAgentAt(path: string): Promise<string | null> {
+  let best: string | null = await readAt(path, 'agent-read.json');
+  try {
+    for (const name of await readdir(path)) {
+      if (!/^agent-read-[a-z0-9-]+\.json$/.test(name)) continue;
+      const at = await readAt(path, name);
+      if (at !== null && (best === null || at > best)) best = at;
+    }
+  } catch { /* an unreadable folder shows no read time */ }
+  return best;
+}
 // The agent can acknowledge the user's latest message without replying: `acked_through` in agent-read.json is its time.
 async function readAcked(path: string): Promise<string | null> {
   const v = await readMarker(path, 'agent-read.json');
@@ -358,7 +380,7 @@ const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
 // `aside`: a side question (user) or its answer (agent, with `reply_to` naming the aside). `add_items` and `check_items` ride on the message:
 // new checklist items (`owner` says who has to do them) and ids of items the agent ticks.
-export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown }
+export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown; agent_name?: unknown }
 // A message that arrived again with the same client_id is the one already stored: it is returned, not written twice.
 const duplicates = new WeakSet<Message>();
 export const wasDuplicate = (m: Message) => duplicates.has(m);
@@ -428,6 +450,8 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
   if (input.client_id !== undefined && (typeof input.client_id !== 'string' || !CLIENT_ID.test(input.client_id))) throw new Invalid('Invalid client_id');
   const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
+  if (input.agent_name !== undefined && input.agent_name !== null && input.agent_name !== '' && input.author !== 'agent') throw new Invalid('Only the agent has an agent name', 403);
+  const agentName = checkAgentName(input.agent_name);
   const flag = messageFlag(input.author, input.flag, !!input.question || !!secret);
   const attached = checkAttached(input.author, input);
   let addedItems: ChecklistItem[] = [];
@@ -458,12 +482,12 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
       ticked = attached.check.filter(c => tickItem(items, c));
       await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
     }
-    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
       ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
     addedItems = added;
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
     // replying means that side read everything before it
-    if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? 'agent-read.json' : 'read.json', lastAt(stored, item));
+    if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
     if (flag === 'done') await closeForDone(path);
     if (input.author === 'user') await writeStatus(path, 'open'); // a user message reopens a done thread
     return created;
@@ -475,7 +499,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   }
   return message;
 }
-export interface NewThread { title: unknown; text: unknown; images?: Image[]; origin: Author; question?: QuestionInput; flag?: unknown; readOnly?: boolean }
+export interface NewThread { title: unknown; text: unknown; images?: Image[]; origin: Author; question?: QuestionInput; flag?: unknown; readOnly?: boolean; agent_name?: unknown }
 export async function createThread(dir: string, input: NewThread): Promise<{ id: string }> {
   const images = input.images ?? [];
   const title = threadTitle(input.title);
@@ -484,9 +508,11 @@ export async function createThread(dir: string, input: NewThread): Promise<{ id:
   if (input.readOnly && input.origin !== 'agent') throw new Invalid('Only the agent can start a read-only thread', 403);
   if (input.readOnly && input.question) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it');
   const flag = messageFlag(input.origin, input.flag, !input.readOnly); // a thread the agent starts wants attention, unless it only carries updates
+  if (input.agent_name !== undefined && input.agent_name !== null && input.agent_name !== '' && input.origin !== 'agent') throw new Invalid('Only the agent has an agent name', 403);
+  const agentName = checkAgentName(input.agent_name);
   const { id, path, created_at } = await makeItemFolder(dir);
   try {
-    const message: Message = { id: 'm1', author: input.origin, text, images: await saveImages(path, images), created_at,
+    const message: Message = { id: 'm1', author: input.origin, text, images: await saveImages(path, images), created_at, ...(agentName ? { agent_name: agentName } : {}),
       ...(flag ? { flag } : {}), ...(input.question ? { question: buildQuestion('q1', input.question) } : {}) };
     await writeFile(join(path, 'item.json'), JSON.stringify({ id, created_at, mode: 'thread', title, origin: input.origin, note: text, ...(input.readOnly ? { read_only: true } : {}) }, null, 2));
     await writeStatus(path, 'open');
@@ -517,18 +543,18 @@ export async function markRead(dir: string, id: string, seen?: unknown): Promise
   }
   await stampRead(path, 'read.json', at);
 }
-export async function markAgentRead(dir: string, id: string): Promise<string> {
+export async function markAgentRead(dir: string, id: string, agent?: string): Promise<string> {
   const path = await itemDir(dir, id);
   return withLock(path, async () => {
     const item = await readItem(path);
     const at = lastAt(await readMessages(path, item), item);
-    await stampRead(path, 'agent-read.json', at);
+    await stampRead(path, agentReadFile(agent), at);
     return at;
   });
 }
 // The agent has seen the user's latest message and has nothing to say: it stops waiting for the agent and shows two ticks.
 // A later user message is newer than `acked_through`, so the thread waits again. Not a user event, so nothing is logged.
-export async function ackThread(dir: string, id: string): Promise<{ acked_through: string }> {
+export async function ackThread(dir: string, id: string, agent?: string): Promise<{ acked_through: string }> {
   const path = await itemDir(dir, id);
   return withLock(path, async () => {
     const item = await readItem(path);
@@ -540,7 +566,8 @@ export async function ackThread(dir: string, id: string): Promise<{ acked_throug
     const acked = typeof old.acked_through === 'string' && old.acked_through > newest ? old.acked_through : newest;
     const read = lastAt(messages, item);
     const at = typeof old.at === 'string' && old.at > read ? old.at : read;
-    await writeAtomic(join(path, 'agent-read.json'), JSON.stringify({ ...old, at, acked_through: acked }));
+    await writeAtomic(join(path, 'agent-read.json'), JSON.stringify({ ...old, at, acked_through: acked })); // an ack is the thread's, whichever agent gave it
+    if (agent) await stampRead(path, agentReadFile(agent), read);
     return { acked_through: acked };
   });
 }
@@ -590,14 +617,14 @@ export function checklistCounts(items: ChecklistItem[]): ChecklistCounts {
   return { total: items.length, done: items.filter(i => i.done).length, claimed: items.filter(i => !i.done && i.claimed_by_user_at).length };
 }
 export async function listChecklist(dir: string, id: string): Promise<ChecklistItem[]> { return readChecklist(await itemDir(dir, id)); }
-async function changeChecklist<T>(dir: string, id: string, by: Author, fn: (items: ChecklistItem[]) => T): Promise<T> {
+async function changeChecklist<T>(dir: string, id: string, by: Author, fn: (items: ChecklistItem[]) => T, agent?: string): Promise<T> {
   const path = await itemDir(dir, id);
   return withLock(path, async () => {
     if (by === 'user' && (await readItem(path)).read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
     const items = await readChecklist(path);
     const result = fn(items);
     await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
-    if (by === 'agent') { const item = await readItem(path); await stampRead(path, 'agent-read.json', lastAt(await readMessages(path, item), item)); } // acting on the thread means the agent has seen it
+    if (by === 'agent') { const item = await readItem(path); await stampRead(path, agentReadFile(agent), lastAt(await readMessages(path, item), item)); } // acting on the thread means the agent has seen it
     return result;
   });
 }
@@ -622,17 +649,17 @@ function tickItem(items: ChecklistItem[], itemId: string): boolean {
   it.done = true; it.done_by = 'agent'; it.done_at = new Date().toISOString();
   return true;
 }
-export async function addChecklistItem(dir: string, id: string, input: { owner: unknown; text: unknown; by: Author }): Promise<ChecklistItem> {
+export async function addChecklistItem(dir: string, id: string, input: { owner: unknown; text: unknown; by: Author; agent?: string }): Promise<ChecklistItem> {
   if (!isAuthor(input.owner)) throw new Invalid('owner must be "user" or "agent"');
   const text = itemText(input.text);
-  const item = await changeChecklist(dir, id, input.by, items => pushItem(items, input.owner as Author, text, input.by));
+  const item = await changeChecklist(dir, id, input.by, items => pushItem(items, input.owner as Author, text, input.by), input.agent);
   if (input.by === 'user') await userEvent(dir, id, 'checklist', `add (${item.owner === 'user' ? 'for you' : 'for the agent'}): ${item.text}`);
   return item;
 }
 export interface ChecklistPatch { text?: unknown; done?: unknown; claimed?: unknown; note?: unknown }
 // The user may edit the text of their own items and claim or withdraw a claim on any item; they can never set `done`.
 // The agent may tick, untick, edit anything, and unclaim (with a note saying what is missing).
-export async function patchChecklistItem(dir: string, id: string, itemId: string, patch: ChecklistPatch, by: Author): Promise<ChecklistItem> {
+export async function patchChecklistItem(dir: string, id: string, itemId: string, patch: ChecklistPatch, by: Author, agent?: string): Promise<ChecklistItem> {
   if (by === 'user' && patch.done !== undefined) throw new Invalid('Only the agent can tick an item. Use claimed: true to say you have done it.', 403);
   if (patch.done !== undefined && typeof patch.done !== 'boolean') throw new Invalid('done must be true or false');
   if (patch.claimed !== undefined && typeof patch.claimed !== 'boolean') throw new Invalid('claimed must be true or false');
@@ -660,7 +687,7 @@ export async function patchChecklistItem(dir: string, id: string, itemId: string
     if (patch.done === true) { it.done = true; it.done_by = 'agent'; it.done_at = at; }
     if (patch.done === false) { it.done = false; delete it.done_by; delete it.done_at; }
     return { ...it };
-  });
+  }, agent);
   if (by === 'user') await userEvent(dir, id, kind, `${(kind as string) === 'checklist_claim' ? 'claimed done' : 'edit'}: ${item.text}`);
   return item;
 }
@@ -1081,7 +1108,7 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const summary: Summary = { id, title, origin: item.origin === 'agent' ? 'agent' : 'user', mode: item.mode as string, status: await readStatus(path),
     created_at, url: typeof context.url === 'string' ? context.url : null, last_message_at, last_author,
     unread_for_user: messages.some(m => (readOnly ? m.author === 'agent' && !m.divider : needsUser(m, answered)) && (read === null || m.created_at > read)), user_read_at: read, // a read-only thread's updates all count
-    agent_read_at: await readAt(path, 'agent-read.json'), open_question: openQuestions(messages).length > 0, waiting: 'done',
+    agent_read_at: await readAgentAt(path), open_question: openQuestions(messages).length > 0, waiting: 'done',
     last_flag: lastAgent?.flag ?? null, checklist: checklistCounts(items), open_for_you: items.filter(i => i.owner === 'user' && !i.done && !i.claimed_by_user_at).length,
     merged_into: (await readMerge(path))?.state === 'done' ? (await readMerge(path))!.into : null, read_only: readOnly, acked_through: acked };
   const awaitAt = await readAwait(path);

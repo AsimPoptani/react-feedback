@@ -3,6 +3,7 @@ import { resolve, join } from 'node:path';
 import * as store from './store';
 import { computeMetrics, checkWindow } from './metrics';
 import { loadAreas, loadSecretTarget, loadVaultDir } from './config';
+import * as reminders from './reminders';
 import { redactMessage, recordSecretSaved, validateVault } from './sensitive';
 import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
@@ -200,7 +201,8 @@ async function threadDetail(dir: string, id: string) {
   const path = join(dir, id);
   const has = (name: string) => lstat(join(path, name)).then(s => s.isFile(), () => false);
   return { ...summary, url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: item.target ?? null,
-    note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages };
+    note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages,
+    reminders_fired: (await reminders.readStored(path)).fired };
 }
 async function profileRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
   const base = `${PREFIX}/api/profile`;
@@ -225,6 +227,21 @@ async function checklistRoute(req: Request, dir: string, path: string, read: (re
   }
   if (req.method === 'PATCH') { const data = await read(req); return json(await store.patchChecklistItem(dir, id!, itemId, { text: data.text, done: data.done, claimed: data.claimed }, 'user')); }
   if (req.method === 'DELETE') { await store.deleteChecklistItem(dir, id!, itemId, 'user'); return json({ ok: true }); }
+  return null;
+}
+// Reminders target the agent, so a read-only thread still takes them. The user adds and removes them; a fire is the agent's alone to see (never a notification).
+async function remindersRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
+  const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/reminders(?:\/([^/]+))?$/);
+  if (!match) return null;
+  const [, id, rid] = match;
+  if (!rid) {
+    if (req.method === 'GET') return json(await reminders.listReminders(dir, id!));
+    if (req.method !== 'POST') return null;
+    const data = await read(req);
+    return json(await reminders.addReminder(dir, id!, { kind: data.kind, value: data.value, say: data.say, by: 'user' }), 201);
+  }
+  if (rid === 'default' && req.method === 'POST') { const data = await read(req); if (typeof data.on !== 'boolean') throw new Invalid('on must be true or false'); await reminders.setDefaultReminder(dir, id!, data.on); return json(await reminders.listReminders(dir, id!)); }
+  if (req.method === 'DELETE') { await reminders.removeReminder(dir, id!, rid); return json({ ok: true }); }
   return null;
 }
 async function pinsRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
@@ -263,6 +280,8 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (pins) return pins;
   const checklist = await checklistRoute(req, dir, path, read);
   if (checklist) return checklist;
+  const remind = await remindersRoute(req, dir, path, read);
+  if (remind) return remind;
   if (path === base && req.method === 'POST') {
     const data = await read(req);
     return json(await store.createThread(dir, { title: data.title, text: data.text, images: store.dataUrlImages(data.images), origin: 'user' }), 201);

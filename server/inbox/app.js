@@ -117,7 +117,15 @@ function openMenu(anchor, items, { up = false } = {}) {
   placeMenu();
   menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
 }
-function avatar(who, big = false) {
+// An agent with its own name (an MCP client) gets a colour made from the name, so two agents are never mistaken for each other.
+const hueOf = name => { let h = 0; for (const c of name) h = (h * 31 + c.codePointAt(0)) % 360; return h; };
+function avatar(who, big = false, name = '') {
+  if (who === 'agent' && name) {
+    const node = el('span', { class: 'avatar agent named', 'aria-hidden': 'true', text: ([...name][0] || '?').toUpperCase() });
+    node.style.background = `hsl(${hueOf(name)} 52% 36%)`;
+    if (big) node.style.cssText += ';width:100%;height:100%';
+    return node;
+  }
   const p = state.profile[who];
   const initial = ([...(p.name || '?')][0] || '?').toUpperCase();
   const node = p.avatar ? el('img', { class: `avatar ${who}`, src: p.avatar, alt: '' }) : el('span', { class: `avatar ${who}`, 'aria-hidden': 'true', text: initial });
@@ -451,17 +459,17 @@ function toggleExpanded(d, m) { const k = expandKey(d, m); if (state.expanded.ha
 function messageNode(d, m) {
   if (m.divider && m.moved_to) return el('div', { class: 'divider', role: 'separator', 'data-mid': m.id }, el('span', {}, 'Moved to ', el('a', { href: `#/${m.moved_to}`, text: (/^Moved to \[(.*)\]\(#\//.exec(m.text) || [])[1] || 'another thread' })));
   if (m.divider) return el('div', { class: 'divider', role: 'separator' }, el('span', { text: m.text }));
-  const who = state.profile[m.author];
+  const who = m.agent_name ? { ...state.profile.agent, name: m.agent_name } : state.profile[m.author];
   const farewell = d.merged_into && m === d.messages[d.messages.length - 1]; // the link to the merged thread stays visible
   const folded = quiet(d, m) && !farewell && !state.expanded.has(expandKey(d, m));
   const badge = m.author === 'agent' ? flagBadge(m.flag) : null;
   if (folded) {
     const first = (m.redacted ? '🔒 Redacted' : firstPlainLine(m.text) || (m.images.length ? '[image]' : '')).slice(0, 160);
     return el('article', { class: 'msg agent collapsed', 'data-mid': m.id, 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
-      avatar(m.author), ...(badge ? [badge] : []), el('span', { class: 'peek', text: first }), el('time', { datetime: m.created_at, text: when(m.created_at) }),
+      avatar(m.author, false, m.agent_name), ...(badge ? [badge] : []), el('span', { class: 'peek', text: first }), el('time', { datetime: m.created_at, text: when(m.created_at) }),
       el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Show'));
   }
-  const head = el('div', { class: 'who' }, avatar(m.author), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.written_at || m.created_at, text: when(m.written_at || m.created_at), ...sentTitle(m) }), ...(badge ? [badge] : []));
+  const head = el('div', { class: 'who' }, avatar(m.author, false, m.agent_name), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.written_at || m.created_at, text: when(m.written_at || m.created_at), ...sentTitle(m) }), ...(badge ? [badge] : []));
   if (quiet(d, m) && !farewell) head.append(el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Hide'));
   if (m.author === 'user' && d.acked_through === m.created_at) head.append(el('span', { class: 'acked-note', text: `· ${state.profile.agent.name} acknowledged` }));
   const ticks = ticksFor(d, m); if (ticks) head.append(ticks);
@@ -566,8 +574,8 @@ const asideKey = (d, root) => `${d.id}:${root.id}`;
 const asideIsOpen = (d, g) => (state.asideOpen.has(asideKey(d, g.root)) ? state.asideOpen.get(asideKey(d, g.root)) : !g.answered);
 function toggleAside(d, g) { state.asideOpen.set(asideKey(d, g.root), !asideIsOpen(d, g)); state.shown = ''; drawMessages(d); }
 function asideMsgNode(d, m) {
-  const who = state.profile[m.author];
-  const node = el('div', { class: `aside-msg ${m.author}`, 'data-aside-mid': m.id }, el('div', { class: 'who' }, avatar(m.author), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.created_at, text: when(m.created_at) })));
+  const who = m.agent_name ? { ...state.profile.agent, name: m.agent_name } : state.profile[m.author];
+  const node = el('div', { class: `aside-msg ${m.author}`, 'data-aside-mid': m.id }, el('div', { class: 'who' }, avatar(m.author, false, m.agent_name), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.created_at, text: when(m.created_at) })));
   if (m.redacted) { node.append(el('p', { class: 'locked', text: lockedText(m) })); return node; }
   if (m.text) node.append(markdown(m.text));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
@@ -587,15 +595,20 @@ function asideNode(d, g) {
   return node;
 }
 // Main messages in thread order, with each side question (and its answers) at the place it was asked.
+// A reminder that fired: a small muted line for the user to see; it was sent to the agent only (never a notification, never unread).
+const reminderLine = f => el('div', { class: 'sysline', role: 'note', 'data-reminder': f.id }, el('span', { 'aria-hidden': 'true', text: '⏰ ' }), el('span', { text: 'Reminder to the agent: ' }), el('span', { class: 'say', text: f.text }), ' ', el('time', { datetime: f.at, text: when(f.at) }));
 function threadNodes(d) {
   const groups = asideGroups(d.messages, d.acked_through || null);
   const grouped = new Set(groups.flatMap(g => [g.root.id, ...g.answers.map(a => a.id)]));
+  const fired = [...(d.reminders_fired || [])].sort((a, b) => a.at.localeCompare(b.at));
+  const lines = at => { const out = []; while (fired.length && (at === null || fired[0].at <= at)) out.push(reminderLine(fired.shift())); return out; };
   return d.messages.flatMap(m => {
+    const before = lines(m.created_at);
     const g = groups.find(x => x.root.id === m.id);
-    if (g) return [asideNode(d, g)];
-    if (isAside(m) && !grouped.has(m.id)) return []; // an answer whose question is gone
-    return [messageNode(d, m)];
-  }).concat(queuedNodes(d));
+    if (g) return [...before, asideNode(d, g)];
+    if (isAside(m) && !grouped.has(m.id)) return before; // an answer whose question is gone
+    return [...before, messageNode(d, m)];
+  }).concat(lines(null), queuedNodes(d));
 }
 // Messages written offline (or still sending) show at the end of the thread, with a clock until the server has them.
 const clockIcon = () => svg('svg', { viewBox: '0 0 24 24', width: 14, height: 14, 'aria-hidden': 'true', class: 'clock' }, svg('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }), svg('path', { d: 'M12 7v5l3 2', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round' }));
@@ -621,7 +634,7 @@ function queuedNode(d, e) {
 function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '')),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, (d.reminders_fired || []).map(f => f.at + f.id), d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
@@ -863,6 +876,41 @@ function drawPinThread() {
   const on = state.openId && isPinned('thread', state.openId);
   $('pin-thread').replaceChildren(on ? 'Unpin' : 'Pin', kbd('P'));
   $('pin-thread').setAttribute('aria-pressed', String(!!on));
+}
+
+// ---- Reminders: nudges for the agent, set per thread. A read-only thread takes them too, because they are for the agent.
+let remindFor = null;
+const REMIND = { every: ['Every', 'like 2h or 1d: fires only if the thread had activity', '2h'], after_agent_replies: ['After this many agent replies with no tick or new item', 'a number, like 3', '3'], idle: ['When the thread has waited on the agent for', 'like 1h', '1h'] };
+const kindText = r => (r.kind === 'every' ? `Every ${r.value}` : r.kind === 'idle' ? `After waiting ${r.value}` : `After ${r.value} agent repl${r.value === 1 ? 'y' : 'ies'} with no checklist change`);
+function drawReminderForm() {
+  const [label, hint, example] = REMIND[$('remind-kind').value];
+  $('remind-value-l').textContent = label; $('remind-value').placeholder = example; $('remind-value-hint').textContent = hint;
+}
+async function drawReminders() {
+  const v = await api(`threads/${remindFor}/reminders`);
+  $('remind-default').checked = v.default.on; $('remind-default').disabled = v.default.global_off;
+  $('remind-default-note').textContent = v.default.global_off ? 'Turned off for the whole server.' : 'When the agent has open items: after 3 replies with no tick, or every 6 hours of activity.';
+  $('remind-list').replaceChildren(...(v.items.length ? v.items.map(r => el('li', {}, el('span', { class: 'what' }, el('strong', { text: kindText(r) }), el('small', { text: r.say })),
+    el('button', { type: 'button', 'aria-label': `Remove the reminder: ${r.say}`, onclick: () => removeReminder(r.id) }, 'Remove'))) : [el('li', { class: 'hint', text: 'No reminders of your own on this thread.' })]));
+}
+async function openReminders() {
+  const d = state.detail; if (!d) return;
+  remindFor = d.id; showError($('remind-error'), ''); $('remind-say').value = ''; $('remind-value').value = ''; drawReminderForm();
+  try { await drawReminders(); } catch (error) { showError($('remind-error'), error.message); }
+  $('remind-dialog').showModal();
+}
+async function removeReminder(rid) {
+  try { await api(`threads/${remindFor}/reminders/${rid}`, { method: 'DELETE' }); await drawReminders(); showError($('remind-error'), ''); } catch (error) { showError($('remind-error'), error.message); }
+}
+async function addReminder(event) {
+  event.preventDefault();
+  try {
+    await post(`threads/${remindFor}/reminders`, { kind: $('remind-kind').value, value: $('remind-kind').value === 'after_agent_replies' ? Number($('remind-value').value) : $('remind-value').value.trim(), say: $('remind-say').value });
+    $('remind-say').value = ''; $('remind-value').value = ''; showError($('remind-error'), ''); await drawReminders();
+  } catch (error) { showError($('remind-error'), error.message); }
+}
+async function setDefaultReminder() {
+  try { await post(`threads/${remindFor}/reminders/default`, { on: $('remind-default').checked }); showError($('remind-error'), ''); } catch (error) { showError($('remind-error'), error.message); $('remind-default').checked = !$('remind-default').checked; }
 }
 
 // ---- Merge: fold this thread into another
@@ -1151,6 +1199,7 @@ function openMore() {
   const d = state.detail; if (!d) return;
   openMenu($('more'), [{ label: isPinned('thread', d.id) ? 'Unpin' : 'Pin', onclick: () => togglePin('thread', d.id) },
     ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
+    { label: 'Reminders', onclick: openReminders },
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
     ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : [])]);
@@ -1262,6 +1311,11 @@ $('file').addEventListener('change', e => { addImages(state.images, [...e.target
 $('toggle-done').addEventListener('click', toggleDone);
 $('pin-thread').addEventListener('click', () => { if (state.openId) togglePin('thread', state.openId); });
 $('merge-open').addEventListener('click', openMerge);
+$('remind-open').addEventListener('click', openReminders);
+$('remind-close').addEventListener('click', () => $('remind-dialog').close());
+$('remind-kind').addEventListener('change', drawReminderForm);
+$('remind-form').addEventListener('submit', addReminder);
+$('remind-default').addEventListener('change', setDefaultReminder);
 $('merge-cancel').addEventListener('click', () => $('merge-dialog').close());
 $('merge-q').addEventListener('input', drawMergeList);
 $('merge-back').addEventListener('click', () => { mergeTarget = null; $('merge-confirm').hidden = true; });

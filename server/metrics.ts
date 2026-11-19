@@ -76,7 +76,7 @@ async function readEvents(dir: string): Promise<{ ts: string; kind: string }[]> 
   const out: { ts: string; kind: string }[] = [];
   for (const line of (raw ?? '').split('\n')) {
     if (!line.trim()) continue;
-    try { const e = JSON.parse(line); if (e && e.author !== 'agent' && typeof e.ts === 'string' && typeof e.kind === 'string') out.push({ ts: e.ts, kind: e.kind }); } catch { /* a torn line */ }
+    try { const e = JSON.parse(line); if (e && e.author !== 'agent' && e.author !== 'system' && typeof e.ts === 'string' && typeof e.kind === 'string') out.push({ ts: e.ts, kind: e.kind }); } catch { /* a torn line */ }
   }
   return out;
 }

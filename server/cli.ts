@@ -23,6 +23,9 @@
 //   react-feedback ask-secret <id> --name <key-name> --label "Label" [--help-url <https url>]   (a secure key box in the thread; the value never comes here)
 //   react-feedback redact <id> <message-id> [--reason "..."]   (text and images move to the vault: FEEDBACK_VAULT_DIR)
 //   react-feedback unredact <id> <message-id>   (restore from the vault; CLI only)
+//   react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "..."   (a nudge in your event feed)
+//   react-feedback remind <id> list | remove <rid> | off-default | on-default
+//   react-feedback mcp   (an MCP server on stdio: FEEDBACK_AGENT_NAME names this agent)
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as store from './store';
@@ -32,6 +35,7 @@ import { checkWindow, computeMetrics, formatMetrics } from './metrics';
 import { loadAreas, loadVaultDir } from './config';
 import { redactMessage, unredactMessage } from './sensitive';
 import type { AreasConfig } from './inbox/areas.js';
+import * as reminders from './reminders';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
@@ -60,7 +64,10 @@ const USAGE = `Usage:
   react-feedback metrics [--window 24h|7d|all]
   react-feedback ask-secret <id> --name <key-name> --label "Label" [--help-url <https url>]
   react-feedback redact <id> <message-id> [--reason "why"]   (needs FEEDBACK_VAULT_DIR)
-  react-feedback unredact <id> <message-id>`;
+  react-feedback unredact <id> <message-id>
+  react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "text"
+  react-feedback remind <id> list | remove <rid> | off-default | on-default   (FEEDBACK_DEFAULT_REMINDER=off turns the built-in one off everywhere)
+  react-feedback mcp   (an MCP server on stdio; FEEDBACK_AGENT_NAME names the agent)`;
 
 function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string> } {
   const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
@@ -76,7 +83,7 @@ function split(args: string[]): { words: string[]; images: string[]; flags: stri
       if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else if (arg === '--todo') todos.push(value); else if (arg === '--check') checks.push(value); else if (arg === '--for') owner = value; else avatar = value;
       collecting = false; continue;
     }
-    if (arg === '--name' || arg === '--label' || arg === '--help-url' || arg === '--reason') {
+    if (arg === '--name' || arg === '--label' || arg === '--help-url' || arg === '--reason' || arg === '--every' || arg === '--after-replies' || arg === '--idle' || arg === '--say') {
       const value = args[++i];
       if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
       named[arg.slice(2)] = value; collecting = false; continue;
@@ -115,6 +122,24 @@ async function todo(dir: string, words: string[]): Promise<string> {
   if (verb === 'unclaim' && b) return describe(await store.patchChecklistItem(dir, id, a, { claimed: false, note: b }, 'agent'));
   if (verb === 'edit' && b) return describe(await store.patchChecklistItem(dir, id, a, { text: b }, 'agent'));
   if (verb === 'rm') { await store.deleteChecklistItem(dir, id, a, 'agent'); return `Removed ${a}`; }
+  throw new store.Invalid(USAGE);
+}
+const describeReminder = (r: reminders.Reminder) => `${r.id}  ${r.enabled ? ' ' : '(off) '}${r.kind === 'every' ? `every ${r.value}` : r.kind === 'idle' ? `idle ${r.value}` : `after ${r.value} agent repl${r.value === 1 ? 'y' : 'ies'} with no checklist change`}  "${r.say}"${r.last_fired_at ? `  (last fired ${r.last_fired_at.slice(0, 16)})` : ''}`;
+async function remind(dir: string, words: string[], named: Record<string, string>): Promise<string> {
+  const [id, verb, rid] = words;
+  if (verb === 'list') {
+    const v = await reminders.listReminders(dir, id!);
+    return [`Built-in checklist reminder: ${v.default.on ? 'on' : v.default.global_off ? 'off everywhere (FEEDBACK_DEFAULT_REMINDER)' : 'off for this thread'}`, ...v.items.map(describeReminder)].join('\n');
+  }
+  if (verb === 'add') {
+    const given = (['every', 'after-replies', 'idle'] as const).filter(k => named[k] !== undefined);
+    if (given.length !== 1) throw new store.Invalid('remind add takes exactly one of --every, --after-replies or --idle, and --say "text"');
+    const kind = given[0] === 'every' ? 'every' : given[0] === 'idle' ? 'idle' : 'after_agent_replies';
+    return `Added ${describeReminder(await reminders.addReminder(dir, id!, { kind, value: named[given[0]!], say: named.say, by: 'agent' }))}`;
+  }
+  if (verb === 'remove' && rid) { await reminders.removeReminder(dir, id!, rid); return `Removed ${rid}`; }
+  if (verb === 'off-default') { await reminders.setDefaultReminder(dir, id!, false); return `The built-in checklist reminder is off for ${id}`; }
+  if (verb === 'on-default') { await reminders.setDefaultReminder(dir, id!, true); return `The built-in checklist reminder is on for ${id}`; }
   throw new store.Invalid(USAGE);
 }
 async function tracker(dir: string, flags: string[]): Promise<string> {
@@ -194,6 +219,7 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     const r = await unredactMessage(dir, words[0]!, words[1]!, loadVaultDir(env));
     return r.restored ? `Restored ${words[1]} on ${words[0]} from the vault` : `${words[1]} on ${words[0]} was not redacted`;
   }
+  if (command === 'remind' && words.length >= 2) return remind(dir, words, named);
   if (command === 'todos') return todos(dir, flags);
   if (command === 'tracker' && words.length === 0) return tracker(dir, flags);
   if (command === 'metrics' && words.length === 0) return formatMetrics(await computeMetrics(dir, checkWindow(window ?? '7d'), new Date(), areas ?? loadAreas()));
@@ -215,7 +241,10 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
       ...(addTodos.length ? { add_items: addTodos.map(text => ({ owner: owner ?? 'agent', text })) } : {}), ...(checks.length ? { check_items: checks } : {}) });
     const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, words[0]!))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
     const extras = `${aside ? `, side answer to ${message.reply_to}` : ''}${message.added_items ? `, added ${message.added_items.join(' ')}` : ''}${message.ticked_items ? `, ticked ${message.ticked_items.join(' ')}` : ''}`;
-    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed})`;
+    await reminders.checkAfterReply(dir, words[0]!);
+    const open = !aside && !addTodos.length && !checks.length ? await reminders.openAgentItems(dir, words[0]!) : [];
+    const hint = open.length ? `\n${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with --check cN (open: ${open.map(i => i.id).join(' ')})` : '';
+    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed})${hint}`;
   }
   if (command === 'read' && words.length === 1) {
     await store.markAgentRead(dir, words[0]!);

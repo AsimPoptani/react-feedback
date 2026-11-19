@@ -60,7 +60,7 @@ try {
   check('phone: the document never scrolls, only the message list does (no pull-to-refresh)', scroll.doc && scroll.bodyOverflow === 'hidden');
   check('phone: overscroll-behavior is none on html and body, contain on the list', scroll.html === 'none' && scroll.body === 'none' && scroll.listOb === 'contain');
   await phone.locator('#more').tap();
-  check('phone: ⋯ holds Pin, Merge, Mark done and Feedback on this page', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Mark done|Feedback on this page');
+  check('phone: ⋯ holds Pin, Merge, Reminders, Mark done and Feedback on this page', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Reminders|Mark done|Feedback on this page');
   await shot(phone, 'phone-header-menu-390');
   await phone.keyboard.press('Escape');
   await phone.locator('#plus').tap();
