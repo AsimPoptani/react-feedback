@@ -97,7 +97,7 @@ function matches(rule, segs, path) {
 }
 // { area } for the group a thread belongs to; { area, sub } when the rule shows sub-values as headings inside one group (subHeading).
 export function areaOf(t, config = DEFAULT_AREAS) {
-  if (t.mode === 'thread') return { area: CONVERSATIONS };
+  if (t.mode === 'thread' && !t.url) return { area: CONVERSATIONS }; // a thread with a url (the Claude Code bridge sets /claude/<folder>) is grouped like a capture
   let path = '/';
   try { path = new URL(t.url || '/', 'http://x').pathname; } catch { /* unparseable */ }
   path = path.slice(0, MAX_PATH);

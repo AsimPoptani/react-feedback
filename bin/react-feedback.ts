@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // react-feedback serve [--remote]  start the feedback server (FEEDBACK_DIR, FEEDBACK_HOST, PORT); --remote adds the paired-device listener (FEEDBACK_REMOTE_PORT, FEEDBACK_PUBLIC_URL)
 // react-feedback mcp           an MCP server on stdio (FEEDBACK_AGENT_NAME names the agent)
+// react-feedback claude-code   the Claude Code bridge: hooks that give each session a thread, and wake it when you write there
 // react-feedback --version     print the version
 // react-feedback <command> ... the agent CLI (list, reply, new, status, ask, todo, metrics ...)
 import { run } from "../server/cli";
@@ -40,6 +41,13 @@ if (args[0] === "serve") {
     console.error(error instanceof Invalid ? error.message : error);
     process.exit(1);
   });
+} else if (args[0] === "claude-code") {
+  const { runClaudeCode } = await import("../server/claude-code");
+  const { defaultDir } = await import("../server/cli");
+  try { process.exit(await runClaudeCode(args.slice(1), defaultDir())); } catch (error) {
+    console.error(error instanceof Invalid ? error.message : error);
+    process.exit(1);
+  }
 } else {
   run(args)
     .then((out) => console.log(out))
