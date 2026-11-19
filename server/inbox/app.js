@@ -8,6 +8,7 @@ import { firstPlainLine, inline, markdown, plainText } from './markdown.js';
 import { secretStatusLine, secretUrl } from './secret.js';
 import { createOutbox, newCid } from './outbox.js';
 import { presenceLines } from './presence.js';
+import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
@@ -15,12 +16,21 @@ const MAX_IMAGES = 5;
 const MAX_BYTES = 10 * 1024 * 1024;
 const TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const $ = id => document.getElementById(id);
+// The version baked into this page (the shell that loaded). The server's live version arrives later, on api/config.
+function readLoaded() {
+  const meta = document.querySelector('meta[name="rf-version"]')?.getAttribute('content')?.trim() || '';
+  if (/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,40}$/.test(meta)) return meta;
+  const m = /v([0-9A-Za-z][0-9A-Za-z.+_-]{0,40})/.exec($('app-version')?.textContent || '');
+  return m ? m[1] : '';
+}
+const LOADED = readLoaded();
+function paintVersion() { const node = $('app-version'); if (node && LOADED) node.textContent = `react-feedback v${LOADED}`; }
 
 const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
 const state = { trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
-  config: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
+  config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -113,7 +123,7 @@ function placeMenu() {
 function openMenu(anchor, items, { up = false } = {}) {
   closeMenu(false);
   const menu = $('popmenu');
-  menu.replaceChildren(...items.map(it => (it.note ? el('p', { class: 'note', text: it.note }) : el('button', { type: 'button', role: 'menuitem', ...(it.disabled ? { disabled: '' } : {}), onclick: () => { closeMenu(false); it.onclick(); } }, it.label))));
+  menu.replaceChildren(...items.map(it => (it.note ? el('p', { class: it.foot ? 'note ver' : 'note', text: it.note }) : el('button', { type: 'button', role: 'menuitem', ...(it.disabled ? { disabled: '' } : {}), onclick: () => { closeMenu(false); it.onclick(); } }, it.label))));
   menu.hidden = false; menuAnchor = anchor; menuUp = up; anchor.setAttribute('aria-expanded', 'true');
   placeMenu();
   menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
@@ -1191,10 +1201,47 @@ async function toggleDone() {
   catch (error) { showError($('error'), error.message); }
 }
 
-// ---- What this server offers: the key box target and whether Redact is on. Unknown (offline, never loaded) draws neither.
+// ---- What this server offers: the key box target, whether Redact is on, and the package version. Unknown (offline, never loaded) draws neither action.
+function drawUpdate(serverVersion) {
+  if (typeof serverVersion === 'string') state.serverVersion = serverVersion;
+  const banner = $('update-banner'); if (!banner) return;
+  let dismissed = state.dismissedUpdate;
+  try { const stored = localStorage.getItem(DISMISS_KEY); if (stored) dismissed = stored; } catch { /* the memory still holds a dismiss for this tab */ }
+  const next = offeredVersion(LOADED, state.serverVersion, dismissed);
+  banner.hidden = !next;
+  $('update-text').textContent = next ? updateBannerText(next) : '';
+}
+function dismissUpdate() {
+  const version = state.serverVersion; if (!version) return;
+  state.dismissedUpdate = version;
+  try { localStorage.setItem(DISMISS_KEY, version); } catch { /* session only */ }
+  drawUpdate(version);
+}
+// Reload must take the new worker and the new shell: check for an update, let a waiting worker claim the tab, then load the page again.
+async function reloadUpdated() {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration?.();
+    if (reg) {
+      await reg.update();
+      const worker = reg.waiting;
+      if (worker) {
+        await new Promise(resolve => {
+          const timer = setTimeout(resolve, 2000);
+          navigator.serviceWorker.addEventListener('controllerchange', () => { clearTimeout(timer); resolve(); }, { once: true });
+          worker.postMessage({ type: 'SKIP_WAITING' });
+        });
+      }
+    }
+  } catch { /* the reload still fetches whatever the server is serving now */ }
+  location.reload();
+}
 async function refreshConfig() {
-  try { const c = await api('config'); const next = { secret_target: typeof c.secret_target === 'string' ? c.secret_target : null, redact: c.redact === true }; if (JSON.stringify(next) !== JSON.stringify(state.config)) { state.config = next; if (state.detail) drawMessages(state.detail); } }
-  catch { /* keep what we knew */ }
+  try {
+    const c = await api('config');
+    const next = { secret_target: typeof c.secret_target === 'string' ? c.secret_target : null, redact: c.redact === true };
+    if (JSON.stringify(next) !== JSON.stringify(state.config)) { state.config = next; if (state.detail) drawMessages(state.detail); }
+    drawUpdate(c.version);
+  } catch { /* keep what we knew */ }
 }
 // ---- The phone's header ⋯ and composer ＋ menus: the same actions as the desktop buttons.
 function openMore() {
@@ -1204,7 +1251,8 @@ function openMore() {
     { label: 'Reminders', onclick: openReminders },
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
-    ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : [])]);
+    ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : []),
+    ...(isPhone() && LOADED ? [{ note: `react-feedback v${LOADED}`, foot: true }] : [])]);
 }
 function openPlus() {
   openMenu($('plus'), [{ label: 'Attach image', onclick: () => $('file').click() }, { label: 'Side question', onclick: startAside }], { up: true });
@@ -1296,6 +1344,9 @@ $('redact-cancel').addEventListener('click', () => $('redact-dialog').close());
 $('redact-go').addEventListener('click', doRedact);
 if (COARSE) $('text').placeholder = 'Message';
 window.addEventListener('online', () => { setOffline(false); drawOffline(); outbox.flush(); poll(); });
+$('update-reload').addEventListener('click', () => { void reloadUpdated(); });
+$('update-dismiss').addEventListener('click', dismissUpdate);
+paintVersion();
 window.addEventListener('offline', () => { setOffline(true); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.onLine !== false) outbox.flush(); });
 // The saved copy of the page and the last thread data, so the inbox opens with no signal. Only where the browser allows it (https or localhost).

@@ -12,6 +12,7 @@ import { z } from 'zod';
 import * as store from './store';
 import * as reminders from './reminders';
 import { loadAreas, loadVaultDir } from './config';
+import { packageVersion } from './version';
 import { areaOf } from './inbox/areas.js';
 import type { AreasConfig } from './inbox/areas.js';
 
@@ -92,7 +93,7 @@ export function createMcpServer(options: McpOptions): McpServer {
   const dir = resolve(options.dir);
   const agent = store.checkAgentName(options.agentName);
   const areas = options.areas ?? loadAreas(env);
-  const server = new McpServer({ name: 'react-feedback', version: '0.8.1' }, { instructions: `The user's feedback inbox. ${NOTICE} You post as "${agent ?? 'the inbox agent'}".` });
+  const server = new McpServer({ name: 'react-feedback', version: packageVersion() }, { instructions: `The user's feedback inbox. ${NOTICE} You post as "${agent ?? 'the inbox agent'}".` });
   const say = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify({ notice: NOTICE, ...(value as object) }) }], structuredContent: { notice: NOTICE, ...(value as object) } });
   const fail = (error: unknown) => ({ isError: true as const, content: [{ type: 'text' as const, text: error instanceof store.Invalid ? error.message : error instanceof Error && /Could not lock/.test(error.message) ? 'The thread is busy; try again' : 'Storage error' }] });
   // Registers one tool whose handler may throw: a store refusal is returned to the model as a tool error.

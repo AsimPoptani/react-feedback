@@ -1,8 +1,8 @@
 // The inbox's service worker, scoped to the inbox path. It keeps the page itself and the last thread data the inbox loaded, so the inbox opens with no signal.
 // It only ever handles GET requests for the files and API reads listed below. It never sees a key (those are PUT requests to the app), and it caches no image.
-const VERSION = 'fb-inbox-0.8.1';
+const VERSION = 'fb-inbox-0.8.2';
 const SHELL = `${VERSION}-shell`, DATA = `${VERSION}-data`;
-const FILES = ['./', 'app.js', 'areas.js', 'markdown.js', 'donut.js', 'quote.js', 'aside.js', 'tracker.js', 'secret.js', 'outbox.js', 'presence.js'];
+const FILES = ['./', 'app.js', 'areas.js', 'markdown.js', 'donut.js', 'quote.js', 'aside.js', 'tracker.js', 'secret.js', 'outbox.js', 'presence.js', 'version.js'];
 const SCOPE = new URL('./', self.location.href).pathname;
 const API = new URL('../api/', self.location.href).pathname;
 // The thread list, one thread's JSON, the profile (and its two avatars), pins, areas, tracker and config. Never a search (?q=) or anything with a query.
@@ -14,6 +14,10 @@ self.addEventListener('install', event => {
 });
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('fb-inbox-') && k !== SHELL && k !== DATA).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+});
+// The page posts this when Reload is pressed and a worker is still waiting, so the new shell can take the tab.
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 // The saved copy, marked so the page knows it is looking at old data.
 function stale(response) {

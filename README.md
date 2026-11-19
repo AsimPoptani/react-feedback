@@ -186,6 +186,8 @@ Pick a mode, select a target, write one note, press Save. Saving sends at once f
 
 `/__feedback/inbox/` lists threads grouped by area. By default an area is the first segment of the page path they were taken on (`/billing/plans` goes under "Billing", `/` under "Home", threads started without a capture under "Conversations"); see [Inbox areas](#inbox-areas) to name and group them yourself. It shows status pills and unread dots, a thread view with the original capture and message bubbles, a composer (Cmd/Ctrl+Enter sends, paste or attach images), a checklist side panel for the person and the agent (a donut on each thread row shows progress; **L** shows or hides it, and on a phone it is a bottom sheet), pins, merging, a read-only "updates" thread type, and a **Metrics** page (velocity, response times, workload, by-area table). Press `?` for the inbox shortcuts. Text is escaped; only bold, italics, inline code, `-` lists and http links are rendered.
 
+The sidebar footer shows the running version (`react-feedback vX.Y.Z`) on the line under Tracker and Metrics. On a phone, where that sidebar hides once a thread is open, the same line is the footer of the ⋯ menu. The page keeps the version it loaded. `GET api/config` also returns the server's `version`. When the two differ, because the server was redeployed, a banner at the top says a new version is ready, with Reload and a dismiss ×. Reload installs the updated service worker and loads the new page. Dismiss hides that version until a different one is served. The check runs on load and on each poll.
+
 ### Inbox areas
 
 Out of the box the inbox groups by the first path segment. To use your own groups and labels, give the server a list of rules in a JSON file (`FEEDBACK_AREAS=/path/to/areas.json`) or inline (`FEEDBACK_AREAS_JSON='[...]'`):
@@ -242,6 +244,7 @@ The CLI writes straight into `FEEDBACK_DIR` through the same store the server us
 ```sh
 react-feedback serve                                            # start the server
 react-feedback --help                                           # print the usage
+react-feedback --version                                        # print the version
 react-feedback list [--waiting]                                 # threads waiting for the agent
 react-feedback reply <id> "text" [--image a.png --image b.jpg] [--to <message-id>]   # --to quotes one of that thread's messages
 react-feedback reply <id> "text" --aside --to <aside-id>       # answer a side question (/btw)
@@ -369,7 +372,7 @@ Message bodies render a safe GitHub-flavoured subset: headings (`#` to `####`), 
 `react-feedback ask-secret <id> --name openrouter --label "OpenRouter API key" --help-url https://openrouter.ai/keys` posts a message of kind `secret_request` (`{ name, label, help_url }`) that asks the user for a key. **No value is ever stored by the feedback server.**
 
 - The inbox draws a password box in the message (autocomplete off, no browser storage, no `name`), with Save, a "Where to get this" link and the name of the slot it fills. It is not a `<form>`, so a browser has no password to offer to save.
-- On Save, the **browser sends the value straight to your app**: `PUT <FEEDBACK_SECRET_TARGET with {name} filled in>` with `{"value": "…"}` and `Content-Type: application/json`, same origin only (`redirect: "error"`, so a redirect cannot carry it elsewhere). The target must be a relative path; the server refuses to start with an absolute URL, and the inbox refuses to send to one. The inbox learns the target from `GET /__feedback/api/config` (`{ secret_target, redact }`).
+- On Save, the **browser sends the value straight to your app**: `PUT <FEEDBACK_SECRET_TARGET with {name} filled in>` with `{"value": "…"}` and `Content-Type: application/json`, same origin only (`redirect: "error"`, so a redirect cannot carry it elsewhere). The target must be a relative path; the server refuses to start with an absolute URL, and the inbox refuses to send to one. The inbox learns the target from `GET /__feedback/api/config` (`{ secret_target, redact, version }`).
 - On a 2xx the box is cleared and the inbox records only `saved` and the target's short `hint` (at most 8 characters, such as `…abcd`, read from the target's JSON reply) with `POST api/threads/:id/messages/:mid/secret`. The route refuses any other field, so a value cannot ride along. The message then reads "Saved ✓ · ends …abcd", stops asking for the user's attention, and logs a `secret` event (`<name> saved`, never a value) so the agent can carry on. On a non-2xx the box stays and shows the target's error text (`detail`, `error` or `message`). If the reply carries `check: "rejected"` the message says the provider rejected the key; `check` is recorded with the hint (`works` or `rejected`).
 - With `FEEDBACK_SECRET_TARGET` unset the message says "Secure entry isn't set up on this server" and shows no box. Offline it says "Connect to save this key": a key is never queued or stored for later.
 - The value never reaches the thread, `_events.jsonl`, any log, `localStorage` or the offline cache. It exists only in the input until your app has it.
@@ -397,11 +400,11 @@ The inbox registers a small service worker (`sw.js`, scoped to the inbox path) t
 
 ## Phone layout
 
-At 760 px and narrower the thread view is one slim header (← title, the checklist donut, **⋯** with Pin, Merge into…, Mark done or Reopen, and the read-only note), and a one-line composer: **＋** (Attach image, Side question), an auto-growing text box (about five lines at most) and a send arrow. Enter adds a new line; Send is the button. Keyboard hints are hidden on touch screens (`(hover: none) and (pointer: coarse)`), the Feedback launcher hides while the composer has focus, and the page follows `visualViewport` so an open keyboard leaves the message list the remaining height, scrolled to the newest message. Wide screens keep the old layout.
+At 760 px and narrower the thread view is one slim header (← title, the checklist donut, **⋯** with Pin, Merge into…, Mark done or Reopen, the version, and the read-only note), and a one-line composer: **＋** (Attach image, Side question), an auto-growing text box (about five lines at most) and a send arrow. Enter adds a new line; Send is the button. Keyboard hints are hidden on touch screens (`(hover: none) and (pointer: coarse)`), the Feedback launcher hides while the composer has focus, and the page follows `visualViewport` so an open keyboard leaves the message list the remaining height, scrolled to the newest message. Wide screens keep the old layout.
 
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config`; `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
@@ -419,6 +422,7 @@ bun run test:e2e    # optional browser smoke test (needs Playwright and a built 
 bun e2e/rf6.mjs     # optional browser test: phone layout, key box, redaction, offline sending (same needs)
 bun e2e/rf7.mjs     # optional browser test: thread reminders and agent names (same needs)
 bun e2e/rf8.mjs     # optional browser test: reminders only in the sheet, last seen in the header (same needs)
+bun e2e/rf9.mjs     # optional browser test: version footer and the update banner (same needs)
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

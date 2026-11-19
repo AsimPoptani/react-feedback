@@ -26,6 +26,7 @@
 //   react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "..."   (a nudge in your event feed)
 //   react-feedback remind <id> list | remove <rid> | off-default | on-default
 //   react-feedback mcp   (an MCP server on stdio: FEEDBACK_AGENT_NAME names this agent)
+//   react-feedback --version
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as store from './store';
@@ -37,11 +38,13 @@ import { redactMessage, unredactMessage } from './sensitive';
 import type { AreasConfig } from './inbox/areas.js';
 import * as reminders from './reminders';
 import { presenceLines } from './inbox/presence.js';
+import { packageVersion } from './version';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
   react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON, FEEDBACK_SECRET_TARGET, FEEDBACK_VAULT_DIR)
   react-feedback --help
+  react-feedback --version
   react-feedback reply <id> "text" [--image path ...] [--to <message-id>]
   react-feedback reply <id> "text" --aside --to <aside-id>   (answer a side question the user sent with /btw)
   react-feedback reply <id> "text" --todo "item" [--todo "item" ...] [--for agent|user] [--check c3 ...]
@@ -202,6 +205,7 @@ async function list(dir: string, waiting: boolean): Promise<string> {
 export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig, env: Record<string, string | undefined> = process.env, notice: (line: string) => void = line => { process.stderr.write(`${line}\n`); }): Promise<string> {
   const [command, ...rest] = argv;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
+  if (command === '--version') return packageVersion();
   const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
   await store.touchPresence(dir, { agent: undefined }); // any command is the agent being here
   if (command === 'todo') return todo(dir, words);

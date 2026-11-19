@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // react-feedback serve         start the feedback server (FEEDBACK_DIR, FEEDBACK_HOST, PORT)
 // react-feedback mcp           an MCP server on stdio (FEEDBACK_AGENT_NAME names the agent)
+// react-feedback --version     print the version
 // react-feedback <command> ... the agent CLI (list, reply, new, status, ask, todo, metrics ...)
 import { run } from "../server/cli";
 import { serverOptions } from "../server/server";
