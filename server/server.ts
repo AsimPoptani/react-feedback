@@ -2,7 +2,8 @@ import { readdir, readFile, writeFile, lstat, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import * as store from './store';
 import { computeMetrics, checkWindow } from './metrics';
-import { loadAreas } from './config';
+import { loadAreas, loadSecretTarget, loadVaultDir } from './config';
+import { redactMessage, recordSecretSaved, validateVault } from './sensitive';
 import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
 
@@ -178,7 +179,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -248,8 +249,22 @@ async function pinsRoute(req: Request, dir: string, path: string, read: (req: Re
   const data = await read(req);
   return json(await store.setPin(dir, { kind: data.kind, id: data.id, pinned: data.pinned }));
 }
-async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, areas: AreasConfig): Promise<Response | null> {
+export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null }
+async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, areas: AreasConfig, options: HandlerOptions): Promise<Response | null> {
   const base = `${PREFIX}/api/threads`;
+  const vaultDir = options.vaultDir !== undefined ? options.vaultDir : loadVaultDir();
+  const secretTarget = options.secretTarget !== undefined ? options.secretTarget : loadSecretTarget();
+  // What the inbox needs to know about this server. The key box is only drawn when a target is set; the Redact action only when a vault is.
+  if (path === `${PREFIX}/api/config` && req.method === 'GET') return json({ secret_target: secretTarget, redact: !!vaultDir });
+  const sensitive = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/messages\/([^/]+)\/(redact|secret)$/);
+  if (sensitive && req.method === 'POST') {
+    const [, tid, mid, what] = sensitive;
+    await itemDir(dir, tid!);
+    const data = req.headers.get('content-type') ? await read(req) : {};
+    // The key itself never comes here: only that it was saved, and the target's short hint. A request with anything else is refused.
+    if (what === 'secret') return json(await recordSecretSaved(dir, tid!, mid!, data));
+    return json(await redactMessage(dir, tid!, mid!, { by: 'user', vault: vaultDir }));
+  }
   if (path === base && req.method === 'GET') return json(await store.listThreads(dir, new URL(req.url).searchParams.get('q') ?? undefined));
   if (path === `${PREFIX}/api/metrics` && req.method === 'GET') return json(await computeMetrics(dir, checkWindow(new URL(req.url).searchParams.get('window') ?? '7d'), new Date(), areas));
   if (path === `${PREFIX}/api/areas` && req.method === 'GET') return json(areas); // the one source of truth for how the inbox and the metrics group threads
@@ -277,7 +292,8 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     const data = await read(req);
     // `aside: true` is a side question; `todo` (a list of texts, `for`: "user" by default or "agent") adds checklist items with the message. Only the agent ticks (`check`), so the user's API refuses it.
     const add = Array.isArray(data.todo) ? data.todo.map(text => ({ owner: data.for ?? 'user', text })) : data.todo;
-    return json(await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), reply_to: data.reply_to, aside: data.aside, add_items: add, check_items: data.check }), 201);
+    const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), reply_to: data.reply_to, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
+    return json(created, store.wasDuplicate(created) ? 200 : 201); // 200: it had already arrived (a retry from the offline queue)
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
   if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user'));
@@ -289,7 +305,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   }
   return null;
 }
-export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AREAS) {
+export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AREAS, options: HandlerOptions = {}) {
   const dir = resolve(directory);
   return async (req: Request): Promise<Response> => {
     try {
@@ -299,7 +315,7 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
       if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dir);
       const match = path.match(/^\/__feedback\/api\/items\/([^/]+)\/([^/]+)$/);
       if (match) return await itemRoute(req, dir, match[1]!, match[2]!);
-      const threads = await threadRoute(req, dir, path, body, areas);
+      const threads = await threadRoute(req, dir, path, body, areas, options);
       if (threads) return threads;
       const embed = await embedRoute(req, path);
       if (embed) return embed;
@@ -317,7 +333,10 @@ export const handle = createHandler(process.env.FEEDBACK_DIR ?? resolve(process.
 // Reads FEEDBACK_AREAS or FEEDBACK_AREAS_JSON here, so a bad config stops the server at startup with a clear message.
 export function serverOptions(env: Record<string, string | undefined> = process.env) {
   const areas = loadAreas(env);
-  const fetch = env === process.env && areas === DEFAULT_AREAS ? handle : createHandler(env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data'), areas);
+  const secretTarget = loadSecretTarget(env), vaultDir = loadVaultDir(env);
+  const feedbackDir = env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
+  validateVault(feedbackDir, vaultDir);
+  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir });
   return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: LIMIT, fetch };
 }
 if (import.meta.main) Bun.serve(serverOptions());

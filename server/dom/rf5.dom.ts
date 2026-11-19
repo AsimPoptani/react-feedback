@@ -92,7 +92,7 @@ describe('side questions in the inbox', () => {
     await vi.waitFor(() => expect(($('send') as HTMLButtonElement).disabled).toBe(false));
     text.value = 'plain'; send();
     await vi.waitFor(() => expect(posts.length).toBe(2));
-    expect(posts[1]!.body).toEqual({ text: 'plain', images: [] });
+    expect(posts[1]!.body).toEqual({ text: 'plain', images: [], client_id: expect.any(String), written_at: expect.any(String) });
     await vi.waitFor(() => expect(($('send') as HTMLButtonElement).disabled).toBe(false));
     text.value = '/btw'; send();
     await vi.waitFor(() => expect($('error').textContent).toContain('after /btw'));

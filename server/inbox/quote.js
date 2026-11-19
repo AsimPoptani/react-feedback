@@ -6,6 +6,7 @@ export const SWIPE_SLACK = 32; // px up or down before it counts as a scroll ins
 
 // The first non-blank line of a message, cut short; "Image" when it is only a picture.
 export function snippetOf(message) {
+  if (message.redacted) return '🔒 Redacted';
   const line = firstPlainLine(message.text ?? '');
   if (line) return line.slice(0, SNIPPET_MAX);
   return message.images && message.images.length ? 'Image' : '';

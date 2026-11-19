@@ -20,18 +20,22 @@
 //   react-feedback ack <id>     (the user's latest message is handled; no reply)
 //   react-feedback tracker [--mine | --claimed | --open]   (every checklist item across the threads)
 //   react-feedback metrics [--window 24h|7d|all]
+//   react-feedback ask-secret <id> --name <key-name> --label "Label" [--help-url <https url>]   (a secure key box in the thread; the value never comes here)
+//   react-feedback redact <id> <message-id> [--reason "..."]   (text and images move to the vault: FEEDBACK_VAULT_DIR)
+//   react-feedback unredact <id> <message-id>   (restore from the vault; CLI only)
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import * as store from './store';
 import { asideGroups } from './inbox/aside.js';
 import { ageOf, stateOf } from './inbox/tracker.js';
 import { checkWindow, computeMetrics, formatMetrics } from './metrics';
-import { loadAreas } from './config';
+import { loadAreas, loadVaultDir } from './config';
+import { redactMessage, unredactMessage } from './sensitive';
 import type { AreasConfig } from './inbox/areas.js';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
-  react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON)
+  react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON, FEEDBACK_SECRET_TARGET, FEEDBACK_VAULT_DIR)
   react-feedback --help
   react-feedback reply <id> "text" [--image path ...] [--to <message-id>]
   react-feedback reply <id> "text" --aside --to <aside-id>   (answer a side question the user sent with /btw)
@@ -53,11 +57,15 @@ const USAGE = `Usage:
   react-feedback readonly <id> on|off
   react-feedback ack <id>
   react-feedback tracker [--mine | --claimed | --open]
-  react-feedback metrics [--window 24h|7d|all]`;
+  react-feedback metrics [--window 24h|7d|all]
+  react-feedback ask-secret <id> --name <key-name> --label "Label" [--help-url <https url>]
+  react-feedback redact <id> <message-id> [--reason "why"]   (needs FEEDBACK_VAULT_DIR)
+  react-feedback unredact <id> <message-id>`;
 
-function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null } {
+function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string> } {
   const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
   let avatar: string | null = null, window: string | null = null, to: string | null = null, owner: string | null = null;
+  const named: Record<string, string> = {};
   let collecting = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -68,10 +76,15 @@ function split(args: string[]): { words: string[]; images: string[]; flags: stri
       if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else if (arg === '--todo') todos.push(value); else if (arg === '--check') checks.push(value); else if (arg === '--for') owner = value; else avatar = value;
       collecting = false; continue;
     }
+    if (arg === '--name' || arg === '--label' || arg === '--help-url' || arg === '--reason') {
+      const value = args[++i];
+      if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
+      named[arg.slice(2)] = value; collecting = false; continue;
+    }
     if (arg.startsWith('--')) { flags.push(arg); collecting = false; continue; }
     (collecting ? images : words).push(arg);
   }
-  return { words, images, flags, options, avatar, window, to, todos, checks, owner };
+  return { words, images, flags, options, avatar, window, to, todos, checks, owner, named };
 }
 function question(prompt: string, options: string[], flags: string[]): store.QuestionInput {
   return { prompt, multi: flags.includes('--multi'), allow_other: !flags.includes('--no-other'),
@@ -122,7 +135,7 @@ async function todos(dir: string, flags: string[]): Promise<string> {
 }
 // What `read` prints for one message: who, when, the quoted message if it quotes one, then the text, then any checklist items it added or ticked.
 // A side question prints indented under "Side question", with its answers beneath it.
-const firstLine = (m: store.Message) => (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : '')).slice(0, 120);
+const firstLine = (m: store.Message) => m.redacted ? '🔒 Redacted' : (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : '')).slice(0, 120);
 export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null }
 export function transcript(messages: store.Message[], names: Record<store.Author, string> = { user: 'user', agent: 'agent' }, extra: TranscriptExtra = {}): string {
   const byId = new Map(messages.map(m => [m.id, m]));
@@ -130,9 +143,11 @@ export function transcript(messages: store.Message[], names: Record<store.Author
   const one = (m: store.Message, pad: string, label = ''): string => {
     const quoted = m.reply_to && !m.aside ? byId.get(m.reply_to) : undefined;
     const quote = m.reply_to && !m.aside ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
-    const body = m.divider ? `--- ${m.text} ---` : (m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n');
+    const body = m.divider ? `--- ${m.text} ---` : m.redacted ? `  🔒 Redacted (sensitive) by ${m.redacted.by === 'user' ? names.user : names.agent}, ${m.redacted.at.slice(0, 16)}${m.redacted.reason ? `: ${m.redacted.reason}` : ''}`
+      : (m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n');
+    const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}` : 'not saved yet'}]`] : [];
     const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
-    const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${label}${quote}\n${[body, ...attached].join('\n')}`;
+    const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[body, ...secret, ...attached].join('\n')}`;
     return pad ? text.split('\n').map(l => `${pad}${l}`).join('\n') : text;
   };
   const groups = asideGroups(messages, extra.acked ?? null);
@@ -151,10 +166,10 @@ async function list(dir: string, waiting: boolean): Promise<string> {
   if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
   return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}${t.waiting_aside ? '  [side question waiting]' : ''}`).join('\n');
 }
-export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig): Promise<string> {
+export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig, env: Record<string, string | undefined> = process.env): Promise<string> {
   const [command, ...rest] = argv;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
-  const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner } = split(rest);
+  const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
     const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
@@ -164,6 +179,19 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     if (!to) throw new store.Invalid('move needs --to <thread>');
     const r = await store.moveMessages(dir, words[0]!, words.slice(1), to, 'agent');
     return r.moved.length ? `Moved ${r.moved.join(' ')} from ${words[0]} to ${to}` : `Those messages were already moved to ${to}`;
+  }
+  if (command === 'ask-secret' && words.length === 1) {
+    if (!named.name || !named.label) throw new store.Invalid('ask-secret needs --name and --label');
+    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: undefined, flag: flagOf(flags), secret: { name: named.name, label: named.label, help_url: named['help-url'] } });
+    return `Asked for ${named.name} on ${words[0]} (${message.id}); the value goes straight to the app and never comes here`;
+  }
+  if (command === 'redact' && words.length === 2) {
+    const r = await redactMessage(dir, words[0]!, words[1]!, { by: 'agent', reason: named.reason, vault: loadVaultDir(env) });
+    return r.redacted ? `Redacted ${words[1]} on ${words[0]}: its text and images are in the vault` : `${words[1]} on ${words[0]} was already redacted`;
+  }
+  if (command === 'unredact' && words.length === 2) {
+    const r = await unredactMessage(dir, words[0]!, words[1]!, loadVaultDir(env));
+    return r.restored ? `Restored ${words[1]} on ${words[0]} from the vault` : `${words[1]} on ${words[0]} was not redacted`;
   }
   if (command === 'todos') return todos(dir, flags);
   if (command === 'tracker' && words.length === 0) return tracker(dir, flags);

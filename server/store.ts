@@ -40,7 +40,32 @@ export interface Message { id: string; author: Author; text: string; images: str
   // A side question (`/btw`): `aside` marks it and its answers; an answer's `reply_to` is the aside's id. `added_items` and `ticked_items` are the checklist items this message added or ticked.
   aside?: true; added_items?: string[]; ticked_items?: string[];
   // `moved_to` (a thread id) marks the stub left where a message was moved away; `moved_from` (`<thread>/<message>`) marks a copy that arrived by a move, so an interrupted move can tell what it already did.
-  moved_to?: string; moved_from?: string }
+  moved_to?: string; moved_from?: string;
+  // `kind: 'secret_request'` is the agent asking for a key: `secret` holds what to ask for and, once the user has saved it (straight to the app, never here), a non-secret `status` and `hint`.
+  // `redacted` replaces a sensitive message's text and images, which live in the vault; `key` says which vault file.
+  kind?: 'secret_request'; secret?: SecretRequest; redacted?: Redaction;
+  // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
+  client_id?: string; written_at?: string }
+export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string }
+export interface Redaction { at: string; by: Author; reason?: string; key: string }
+export const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
+export const SECRET_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const MAX_HINT = 8;
+export function checkHelpUrl(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > 500) throw new Invalid('help_url must be an https URL of up to 500 characters');
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Invalid('help_url must be an https URL'); }
+  if (url.protocol !== 'https:' || url.username || url.password) throw new Invalid('help_url must be an https URL without a login');
+  return url.href;
+}
+export function checkSecretRequest(input: unknown): SecretRequest {
+  if (!isObject(input)) throw new Invalid('A secret request needs a name and a label');
+  if (typeof input.name !== 'string' || !SECRET_NAME.test(input.name)) throw new Invalid('The key name must be 1–64 letters, digits, - or _, starting with a letter or digit');
+  if (typeof input.label !== 'string' || !input.label.trim() || input.label.length > 120) throw new Invalid('The key label must be 1–120 characters');
+  const help_url = checkHelpUrl(input.help_url);
+  return { name: input.name, label: input.label.trim(), ...(help_url ? { help_url } : {}) };
+}
 export interface Image { bytes: Buffer; ext: Extension }
 export type ItemData = Record<string, unknown>;
 
@@ -172,6 +197,16 @@ export function checkAnswer(messages: Message[], raw: unknown): { answer: Answer
   return { answer: { question_id: asked.id, option_ids: ids as string[], ...(otherText ? { other_text: otherText } : {}) }, text, labels: [...labels, ...(otherText ? [otherText] : [])] };
 }
 
+function parseSecret(m: ItemData): SecretRequest | undefined {
+  const s = m.secret;
+  if (m.kind !== 'secret_request' || !isObject(s) || typeof s.name !== 'string' || !SECRET_NAME.test(s.name) || typeof s.label !== 'string') return undefined;
+  return { name: s.name, label: s.label, ...(typeof s.help_url === 'string' && /^https:\/\//.test(s.help_url) ? { help_url: s.help_url } : {}),
+    ...(s.status === 'saved' ? { status: 'saved' as const, ...(typeof s.hint === 'string' && s.hint.length <= MAX_HINT ? { hint: s.hint } : {}), ...(typeof s.saved_at === 'string' ? { saved_at: s.saved_at } : {}) } : {}) };
+}
+function parseRedaction(r: unknown): Redaction | undefined {
+  if (!isObject(r) || typeof r.at !== 'string' || (r.by !== 'user' && r.by !== 'agent') || typeof r.key !== 'string') return undefined;
+  return { at: r.at, by: r.by, key: r.key, ...(typeof r.reason === 'string' && r.reason ? { reason: r.reason.slice(0, 200) } : {}) };
+}
 const ids = (v: unknown): string[] | undefined => { const out = Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && /^c\d+$/.test(x)) : []; return out.length ? out : undefined; };
 function parseMessages(raw: string | null): Message[] {
   const out: Message[] = [];
@@ -188,7 +223,9 @@ function parseMessages(raw: string | null): Message[] {
           ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}),
           ...(typeof m.reply_to === 'string' && m.reply_to ? { reply_to: m.reply_to } : {}), ...(m.aside === true ? { aside: true as const } : {}),
           ...(typeof m.moved_to === 'string' && ID.test(m.moved_to) ? { moved_to: m.moved_to } : {}), ...(typeof m.moved_from === 'string' && m.moved_from ? { moved_from: m.moved_from } : {}),
-          ...(ids(m.added_items) ? { added_items: ids(m.added_items)! } : {}), ...(ids(m.ticked_items) ? { ticked_items: ids(m.ticked_items)! } : {}) });
+          ...(ids(m.added_items) ? { added_items: ids(m.added_items)! } : {}), ...(ids(m.ticked_items) ? { ticked_items: ids(m.ticked_items)! } : {}),
+          ...(typeof m.client_id === 'string' && CLIENT_ID.test(m.client_id) ? { client_id: m.client_id } : {}), ...(typeof m.written_at === 'string' && !Number.isNaN(Date.parse(m.written_at)) ? { written_at: m.written_at } : {}),
+          ...(parseSecret(m) ? { kind: 'secret_request' as const, secret: parseSecret(m)! } : {}), ...(parseRedaction(m.redacted) ? { redacted: parseRedaction(m.redacted)! } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
   }
@@ -218,7 +255,7 @@ export async function readMessages(path: string, item: ItemData): Promise<Messag
 }
 // Writes the implicit messages into thread.jsonl so a later agent message cannot hide them. Old files are not rewritten.
 // The first write is exclusive (`wx`): if another writer created the file first, read it again instead of duplicating history.
-async function materialise(path: string, item: ItemData): Promise<Message[]> {
+export async function materialise(path: string, item: ItemData): Promise<Message[]> {
   const file = join(path, 'thread.jsonl');
   for (let attempt = 0; attempt < 3; attempt++) {
     const raw = await optional(file);
@@ -236,7 +273,7 @@ async function materialise(path: string, item: ItemData): Promise<Message[]> {
   throw new Error('thread.jsonl kept changing under us');
 }
 // An exclusive lock file per thread, so concurrent appends (server and CLI) get distinct ids and image numbers.
-async function withLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+export async function withLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   const lock = join(path, '.lock');
   const giveUp = Date.now() + 15000; // later than the 10 s stale age, so a lock left by a crash is cleared first
   for (;;) {
@@ -250,7 +287,7 @@ async function withLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   }
   try { return await fn(); } finally { await rm(lock, { force: true }); }
 }
-async function saveImages(path: string, images: Image[]): Promise<string[]> {
+export async function saveImages(path: string, images: Image[]): Promise<string[]> {
   let highest = 0;
   for (const name of await readdir(path)) {
     const match = /^msg-(\d+)\./.exec(name);
@@ -264,7 +301,7 @@ async function saveImages(path: string, images: Image[]): Promise<string[]> {
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move'; text: string; reply_to?: string; aside?: boolean; author?: Author }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'secret'; text: string; reply_to?: string; aside?: boolean; author?: Author }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -305,7 +342,16 @@ const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
 // `aside`: a side question (user) or its answer (agent, with `reply_to` naming the aside). `add_items` and `check_items` ride on the message:
 // new checklist items (`owner` says who has to do them) and ids of items the agent ticks.
-export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown }
+export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown }
+// A message that arrived again with the same client_id is the one already stored: it is returned, not written twice.
+const duplicates = new WeakSet<Message>();
+export const wasDuplicate = (m: Message) => duplicates.has(m);
+// When the user wrote a message that waited in an offline queue: ignored when it is unreadable, in the future, or more than 30 days old.
+function writtenAt(value: unknown, now = Date.now()): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const t = Date.parse(value);
+  return !Number.isNaN(t) && t <= now + 5 * 60e3 && t >= now - 30 * 86400e3 ? new Date(t).toISOString() : undefined;
+}
 export interface ItemToAdd { owner: Author; text: string }
 // A side question is a root (no quote); an answer is the agent's, quotes an aside root, and takes no flag but FYI. A main message cannot quote an aside.
 function checkAside(stored: Message[], input: NewMessage): { aside: boolean; replyTo: unknown } {
@@ -361,21 +407,27 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   const path = await itemDir(dir, id);
   if (input.question && input.author !== 'agent') throw new Invalid('Only the agent can ask questions', 403);
   if (input.answer && input.author !== 'user') throw new Invalid('Only the user can answer', 403);
-  const flag = messageFlag(input.author, input.flag, !!input.question);
+  if (input.secret !== undefined && input.author !== 'agent') throw new Invalid('Only the agent can ask for a key', 403);
+  if (input.secret !== undefined && (input.question || input.answer !== undefined || input.aside || (input.images ?? []).length)) throw new Invalid('A key request is a message of its own: no question, side question or images');
+  const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
+  if (input.client_id !== undefined && (typeof input.client_id !== 'string' || !CLIENT_ID.test(input.client_id))) throw new Invalid('Invalid client_id');
+  const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
+  const flag = messageFlag(input.author, input.flag, !!input.question || !!secret);
   const attached = checkAttached(input.author, input);
   let addedItems: ChecklistItem[] = [];
   let eventKind: 'message' | 'answer' = 'message';
   let eventText = '';
   const message = await withLock(path, async () => {
     const item = await readItem(path);
-    if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
-    if (input.question && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it', 409);
     const stored = await materialise(path, item);
+    if (client_id) { const again = stored.find(m => m.client_id === client_id && m.author === input.author); if (again) { duplicates.add(again); return again; } }
+    if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
+    if ((input.question || secret) && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question or a key request: nobody could answer it', 409);
     const { aside, replyTo } = checkAside(stored, input);
     const quoted = checkReplyTo(stored, replyTo);
     const n = stored.length + 1;
-    let text = input.answer !== undefined || input.question ? '' : messageText(input.text, images.length > 0);
-    let extra: Partial<Message> = {};
+    let text = input.answer !== undefined || input.question ? '' : secret ? messageText(input.text ?? `Please add ${secret.label}. Paste it in the secure box below; it goes straight to the app and is never saved in this thread.`, false) : messageText(input.text, images.length > 0);
+    let extra: Partial<Message> = secret ? { kind: 'secret_request', secret } : {};
     if (input.question) { text = messageText(input.text ?? input.question.prompt, false); extra = { question: buildQuestion(`q${n}`, input.question) }; }
     if (input.answer !== undefined) {
       const checked = checkAnswer(stored, input.answer);
@@ -390,7 +442,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
       ticked = attached.check.filter(c => tickItem(items, c));
       await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
     }
-    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
       ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
     addedItems = added;
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
@@ -400,6 +452,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
     if (input.author === 'user') await writeStatus(path, 'open'); // a user message reopens a done thread
     return created;
   });
+  if (wasDuplicate(message)) return message;
   if (input.author === 'user') {
     await logEvent(dir, { id, kind: eventKind, text: (eventKind as string) === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}), ...(message.aside ? { aside: true } : {}) });
     for (const i of addedItems) await userEvent(dir, id, 'checklist', `add (${i.owner === 'user' ? 'for you' : 'for the agent'}): ${i.text}`);

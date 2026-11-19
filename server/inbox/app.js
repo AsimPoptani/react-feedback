@@ -5,6 +5,8 @@ import { donutLabel, donutNode } from './donut.js';
 import { asideGroups, isAside, parseBtw } from './aside.js';
 import { ageOf, filterRows, stateOf } from './tracker.js';
 import { firstPlainLine, inline, markdown, plainText } from './markdown.js';
+import { secretStatusLine, secretUrl } from './secret.js';
+import { createOutbox, newCid } from './outbox.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
@@ -17,6 +19,7 @@ const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
 const state = { trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
+  config: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -24,8 +27,12 @@ function loadClPref() { try { const v = JSON.parse(localStorage.getItem(CL_KEY) 
 function saveClPref() { try { localStorage.setItem(CL_KEY, JSON.stringify(state.clPref)); } catch { /* storage may be blocked */ } }
 function saveFolds() { try { localStorage.setItem(FOLD_KEY, JSON.stringify(state.folds)); } catch { /* storage may be blocked */ } }
 
+// A request that got no answer at all is a NetworkError (`network: true`): the inbox goes offline-aware instead of showing a failure.
 async function api(path, options) {
-  const response = await fetch(API + path, options);
+  let response;
+  try { response = await fetch(API + path, options); }
+  catch { setOffline(true); const e = new Error("You're offline, or the server can't be reached."); e.network = true; throw e; }
+  setOffline(!!response.headers?.get?.('X-Fb-Offline')); // the service worker marks a saved copy it served in place of the network
   if (!response.ok) {
     let detail = '';
     try { detail = (await response.json()).detail || ''; } catch { /* not JSON */ }
@@ -36,6 +43,12 @@ async function api(path, options) {
 const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 const fileUrl = (id, name) => `${API}items/${id}/${name}`;
 const noop = () => {};
+const isOffline = () => state.offline || navigator.onLine === false;
+function setOffline(value) { if (state.offline === value) return; state.offline = value; drawOffline(); if (state.detail) drawMessages(state.detail); }
+const COARSE = !!matchMedia?.('(hover: none) and (pointer: coarse)')?.matches;
+const isPhone = () => !!matchMedia?.('(max-width: 759px)')?.matches;
+const sentTitle = m => (m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60000 ? { title: `Written offline, sent ${when(m.created_at)}` } : {});
+const lockedText = m => `🔒 Redacted (sensitive) · ${when(m.redacted.at)} · by ${state.profile[m.redacted.by]?.name || 'someone'}`;
 const when = iso => new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 function el(tag, props = {}, ...kids) {
   const node = document.createElement(tag);
@@ -60,6 +73,50 @@ const SHORTCUTS = [
   ['1–9, Enter', 'Pick an option on the latest open question, then answer'], ['← / →', 'Flip images in the viewer'], ['?', 'This cheat sheet'], ['Esc', 'Close the viewer or a dialog']];
 
 // ---- Profile and avatars
+// ---- Offline: messages written with no signal wait in an outbox and go out in order, each once (the server dedupes by client id).
+async function postQueued(e) {
+  try {
+    const r = await fetch(`${API}threads/${e.thread}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: e.text, images: e.images, ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : {}), client_id: e.cid, written_at: e.written_at }) });
+    if (r.ok || r.status < 500) setOffline(false);
+    let reason; if (!r.ok) { try { reason = (await r.json()).detail; } catch { /* no detail */ } }
+    return { status: r.status, reason };
+  } catch { setOffline(true); return { network: true }; }
+}
+const outbox = createOutbox({ post: postQueued, canSend: () => !isOffline(),
+  onChange: () => { drawOffline(); if (state.detail) drawMessages(state.detail); },
+  onSent: e => { state.echo.set(e.cid, e); const id = e.thread; Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
+function drawOffline() {
+  const banner = $('offline-banner'), n = outbox.pending(), off = isOffline();
+  const waiting = n ? ` · ${n} waiting to send` : '';
+  const warn = !outbox.persistent() && n ? ' · Closing this tab would lose them' : '';
+  banner.hidden = !off && !n;
+  banner.replaceChildren(...(off ? [el('span', { text: `Offline · showing what you last saw${waiting}` }), ...(warn ? [el('small', { text: warn })] : [])]
+    : [el('span', { text: `Reconnecting · ${n} waiting to send` })]));
+}
+// ---- Small popup menus (the header's ⋯, the composer's ＋, a message's ⋯). One at a time; Escape or a click elsewhere closes it.
+let menuAnchor = null;
+function closeMenu(restore = true) {
+  const menu = $('popmenu'); if (menu.hidden) return;
+  menu.hidden = true; menu.replaceChildren();
+  if (menuAnchor) { menuAnchor.setAttribute('aria-expanded', 'false'); if (restore) menuAnchor.focus?.(); }
+  menuAnchor = null;
+}
+let menuUp = false;
+function placeMenu() {
+  const menu = $('popmenu'); if (menu.hidden || !menuAnchor) return;
+  const r = menuAnchor.getBoundingClientRect(), w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(innerWidth - w - 8, menuUp ? r.left : r.right - w))}px`;
+  menu.style.top = `${menuUp ? Math.max(8, r.top - h - 6) : Math.max(8, Math.min(innerHeight - h - 8, r.bottom + 6))}px`;
+}
+function openMenu(anchor, items, { up = false } = {}) {
+  closeMenu(false);
+  const menu = $('popmenu');
+  menu.replaceChildren(...items.map(it => (it.note ? el('p', { class: 'note', text: it.note }) : el('button', { type: 'button', role: 'menuitem', ...(it.disabled ? { disabled: '' } : {}), onclick: () => { closeMenu(false); it.onclick(); } }, it.label))));
+  menu.hidden = false; menuAnchor = anchor; menuUp = up; anchor.setAttribute('aria-expanded', 'true');
+  placeMenu();
+  menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+}
 function avatar(who, big = false) {
   const p = state.profile[who];
   const initial = ([...(p.name || '?')][0] || '?').toUpperCase();
@@ -399,22 +456,86 @@ function messageNode(d, m) {
   const folded = quiet(d, m) && !farewell && !state.expanded.has(expandKey(d, m));
   const badge = m.author === 'agent' ? flagBadge(m.flag) : null;
   if (folded) {
-    const first = (firstPlainLine(m.text) || (m.images.length ? '[image]' : '')).slice(0, 160);
+    const first = (m.redacted ? '🔒 Redacted' : firstPlainLine(m.text) || (m.images.length ? '[image]' : '')).slice(0, 160);
     return el('article', { class: 'msg agent collapsed', 'data-mid': m.id, 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
       avatar(m.author), ...(badge ? [badge] : []), el('span', { class: 'peek', text: first }), el('time', { datetime: m.created_at, text: when(m.created_at) }),
       el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Show'));
   }
-  const head = el('div', { class: 'who' }, avatar(m.author), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.created_at, text: when(m.created_at) }), ...(badge ? [badge] : []));
+  const head = el('div', { class: 'who' }, avatar(m.author), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.written_at || m.created_at, text: when(m.written_at || m.created_at), ...sentTitle(m) }), ...(badge ? [badge] : []));
   if (quiet(d, m) && !farewell) head.append(el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Hide'));
   if (m.author === 'user' && d.acked_through === m.created_at) head.append(el('span', { class: 'acked-note', text: `· ${state.profile.agent.name} acknowledged` }));
   const ticks = ticksFor(d, m); if (ticks) head.append(ticks);
   if (!d.read_only) head.append(el('button', { type: 'button', class: 'reply-btn', 'aria-label': `Reply to ${who.name}, ${when(m.created_at)}`, onclick: () => startReply(m.id) }, 'Reply'));
+  if (m.author === 'user' && !m.redacted && state.config?.redact) head.append(el('button', { type: 'button', class: 'msg-more', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `More actions for your message of ${when(m.created_at)}`, onclick: e => openMenu(e.currentTarget, [{ label: 'Redact…', onclick: () => askRedact(d, m) }]) }, '⋯'));
   const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '-1', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
+  if (m.redacted) { node.classList.add('redacted'); node.append(el('p', { class: 'locked', ...(m.redacted.reason ? { title: m.redacted.reason } : {}), text: lockedText(m) })); return node; }
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
+  if (m.kind === 'secret_request' && m.secret) node.append(secretNode(d, m));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
   const attached = attachedNode(d, m); if (attached) node.append(attached);
   return node;
+}
+// ---- The key box. The value goes from this page straight to the app's own key store (FEEDBACK_SECRET_TARGET, a path on this same site).
+// It never goes to the feedback server, a thread, the events log, localStorage or the offline outbox: it lives only in this input until the app has it, and is cleared on success.
+// All the feedback server hears is "saved" and the app's short hint ("…abcd").
+function secretNode(d, m) {
+  const key = `${d.id}:${m.id}`;
+  let s = state.secrets.get(key);
+  if (!s) {
+    const input = el('input', { type: 'password', id: `secret-${d.id}-${m.id}`, autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', 'aria-label': m.secret.label, placeholder: 'Paste it here', 'data-lpignore': 'true', 'data-1p-ignore': 'true', 'data-bwignore': 'true' });
+    s = { box: el('div', { class: 'secret', 'data-secret': m.secret.name }), input, error: '', busy: false };
+    state.secrets.set(key, s);
+  }
+  paintSecret(s, d, m, key);
+  return s.box;
+}
+function paintSecret(s, d, m, key) {
+  const sec = m.secret, target = state.config?.secret_target;
+  const help = sec.help_url && /^https:\/\//.test(sec.help_url) ? [el('a', { href: sec.help_url, target: '_blank', rel: 'noopener noreferrer', text: 'Where to get this' })] : [];
+  const saved = sec.status === 'saved' && !state.replacing.has(key);
+  if (saved) {
+    s.box.replaceChildren(el('div', { class: 'secret-meta' }, el('span', { class: 'secret-ok', role: 'status', text: secretStatusLine(sec) }),
+      el('button', { type: 'button', class: 'show', onclick: () => { state.replacing.add(key); state.shown = ''; drawMessages(state.detail); s.input.focus(); } }, 'Replace')));
+    return;
+  }
+  if (state.config && !target) { s.box.replaceChildren(el('p', { class: 'secret-note', text: "Secure entry isn't set up on this server" })); return; }
+  const off = isOffline();
+  s.input.disabled = off || s.busy;
+  const save = el('button', { type: 'submit', class: 'primary', ...(off || s.busy ? { disabled: '' } : {}), text: s.busy ? 'Saving…' : 'Save' });
+  const form = el('form', { class: 'secret-form', autocomplete: 'off', onsubmit: e => { e.preventDefault(); void saveSecret(s, d, m, key); } },
+    el('div', { class: 'secret-row' }, s.input, save),
+    el('div', { class: 'secret-meta' }, ...help, el('span', { class: 'secret-note', style: 'margin:0', text: 'Goes straight to the app. Never saved in this thread.' })));
+  const err = el('p', { class: 'error', role: 'alert', text: s.error }); err.hidden = !s.error;
+  s.box.replaceChildren(form, ...(off ? [el('p', { class: 'secret-note', role: 'status', text: 'Connect to save this key' })] : []), err);
+}
+async function saveSecret(s, d, m, key) {
+  const value = s.input.value;
+  if (!value.trim() || s.busy) return;
+  const url = secretUrl(state.config?.secret_target, m.secret.name, location.origin);
+  const fail = message => { s.error = message; s.busy = false; paintSecret(s, d, m, key); };
+  if (!url) return fail("Secure entry isn't set up correctly on this server.");
+  if (isOffline()) return fail('Connect to save this key.');
+  s.busy = true; s.error = ''; paintSecret(s, d, m, key);
+  let response;
+  try { response = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }), credentials: 'same-origin', redirect: 'error', cache: 'no-store' }); }
+  catch { setOffline(true); return fail("Couldn't reach the app, so the key was not saved. Try again when you're connected."); }
+  let data = {};
+  try { data = await response.json(); } catch { /* no body */ }
+  if (!response.ok) { const why = [data.detail, data.error, data.message].find(x => typeof x === 'string' && x); return fail(why ? String(why).slice(0, 200) : `The app refused it (${response.status}).`); }
+  s.input.value = ''; // the app has it: nothing keeps it here
+  const hint = typeof data.hint === 'string' ? data.hint.slice(0, 8) : '';
+  s.busy = false; state.replacing.delete(key);
+  try { await post(`threads/${d.id}/messages/${m.id}/secret`, { status: 'saved', ...(hint ? { hint } : {}) }); }
+  catch { s.error = 'Saved in the app, but the thread could not be told. It will show as saved once you reload.'; }
+  state.shown = ''; if (state.detail) await loadThread(d.id, { quiet: true }); else paintSecret(s, d, m, key);
+}
+// ---- Redact one of your own messages: its text and pictures move to the server's private vault. There is no restore here.
+function askRedact(d, m) { state.redactFor = { thread: d.id, mid: m.id }; showError($('redact-error'), ''); $('redact-dialog').showModal(); $('redact-go').focus(); }
+async function doRedact() {
+  const r = state.redactFor; if (!r) return;
+  try { await post(`threads/${r.thread}/messages/${r.mid}/redact`, {}); $('redact-dialog').close(); state.redactFor = null; state.shown = ''; await Promise.all([loadThread(r.thread, { quiet: true }), refreshList()]); }
+  catch (error) { showError($('redact-error'), error.message); }
 }
 // Checklist items a message added or ticked: a small list inside the bubble; each item jumps to its row in the checklist panel.
 function attachedNode(d, m) {
@@ -444,6 +565,7 @@ function toggleAside(d, g) { state.asideOpen.set(asideKey(d, g.root), !asideIsOp
 function asideMsgNode(d, m) {
   const who = state.profile[m.author];
   const node = el('div', { class: `aside-msg ${m.author}`, 'data-aside-mid': m.id }, el('div', { class: 'who' }, avatar(m.author), el('strong', { text: who.name }), ' · ', el('time', { datetime: m.created_at, text: when(m.created_at) })));
+  if (m.redacted) { node.append(el('p', { class: 'locked', text: lockedText(m) })); return node; }
   if (m.text) node.append(markdown(m.text));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
   const attached = attachedNode(d, m); if (attached) node.append(attached);
@@ -451,7 +573,7 @@ function asideMsgNode(d, m) {
 }
 function asideNode(d, g) {
   const open = asideIsOpen(d, g), agent = state.profile.agent.name;
-  const first = (firstPlainLine(g.root.text) || (g.root.images.length ? '[image]' : '')).slice(0, 120);
+  const first = (g.root.redacted ? '🔒 Redacted' : firstPlainLine(g.root.text) || (g.root.images.length ? '[image]' : '')).slice(0, 120);
   const id = `aside-${g.root.id}`;
   const head = el('button', { type: 'button', class: 'aside-head', 'aria-expanded': String(open), 'aria-controls': id, onclick: () => toggleAside(d, g) },
     el('span', { class: 'chev', 'aria-hidden': 'true', text: '▾' }), el('strong', { text: 'Side question' }),
@@ -470,12 +592,34 @@ function threadNodes(d) {
     if (g) return [asideNode(d, g)];
     if (isAside(m) && !grouped.has(m.id)) return []; // an answer whose question is gone
     return [messageNode(d, m)];
-  });
+  }).concat(queuedNodes(d));
+}
+// Messages written offline (or still sending) show at the end of the thread, with a clock until the server has them.
+const clockIcon = () => svg('svg', { viewBox: '0 0 24 24', width: 14, height: 14, 'aria-hidden': 'true', class: 'clock' }, svg('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }), svg('path', { d: 'M12 7v5l3 2', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round' }));
+function queuedEntries(d) {
+  const mine = outbox.forThread(d.id), have = new Set(d.messages.map(m => m.client_id).filter(Boolean));
+  return [...mine, ...[...state.echo.values()].filter(e => e.thread === d.id && !have.has(e.cid))];
+}
+function queuedNodes(d) { return queuedEntries(d).filter(e => !((d.messages || []).some(m => m.client_id === e.cid))).map(e => queuedNode(d, e)); }
+function queuedNode(d, e) {
+  const failed = e.state === 'failed', sent = state.echo.has(e.cid);
+  const head = el('div', { class: 'who' }, avatar('user'), el('strong', { text: state.profile.user.name }), ' · ', el('time', { datetime: e.written_at, text: when(e.written_at) }));
+  const node = el('article', { class: `msg user queued${failed ? ' failed' : ''}`, 'data-queued': e.cid, 'aria-label': `${state.profile.user.name}, ${when(e.written_at)}, ${failed ? 'not sent' : 'waiting to send'}` }, head);
+  if (e.aside) node.append(el('p', { class: 'hint', style: 'margin:0 0 2px', text: 'Side question' }));
+  const quoted = e.reply_to ? quoteNode(d, { reply_to: e.reply_to }) : null; if (quoted) node.append(quoted);
+  if (e.text) node.append(markdown(e.text));
+  if (e.images.length) node.append(el('div', { class: 'imgs' }, ...e.images.map((src, i) => el('span', {}, el('img', { src, alt: `Picture ${i + 1}, waiting to send` })))));
+  if (sent) { node.classList.remove('queued'); return node; }
+  if (failed) node.append(el('div', { class: 'qstate bad', role: 'note' }, el('span', { text: `Couldn't send: ${e.reason}` }), el('button', { type: 'button', onclick: () => outbox.retry(e.cid) }, 'Try again'), el('button', { type: 'button', onclick: () => outbox.remove(e.cid) }, 'Delete')));
+  else node.append(el('div', { class: 'qstate', 'data-state': e.sending ? 'sending' : 'waiting' }, clockIcon(), el('span', { text: e.sending ? 'Sending…' : e.attempts ? 'Waiting to send · will retry' : 'Waiting to send' }),
+    ...(e.sending ? [] : [el('button', { type: 'button', 'aria-label': 'Delete this message before it sends', onclick: () => outbox.remove(e.cid) }, 'Delete')])));
+  return node;
 }
 function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join()),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '')),
+    queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
   if (key === state.shown) return;
@@ -483,7 +627,9 @@ function drawMessages(d) {
   const scroll = $('scroll');
   const stick = first || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
   state.shown = key;
+  const focused = document.activeElement?.matches?.('.secret input') ? document.activeElement : null; // a key being typed keeps its place
   $('msgs').replaceChildren(...threadNodes(d));
+  if (focused?.isConnected) focused.focus();
   applyStop();
   if (stick) scroll.scrollTop = scroll.scrollHeight;
 }
@@ -644,7 +790,7 @@ function applyLayout(d) {
   $('cl-hide').setAttribute('aria-expanded', String(open)); $('cl-hide').hidden = narrow; $('cl-close').hidden = !narrow;
   const btn = $('cl-btn');
   btn.hidden = !(want && narrow);
-  btn.replaceChildren(donutNode(d.checklist || { total: 0 }), `Checklist${count ? ` ${count}` : ''}`);
+  btn.replaceChildren(donutNode(d.checklist || { total: 0 }), el('span', { class: 'cl-word', text: 'Checklist' }), el('span', { class: 'cl-n', text: count ? ` ${count}` : '' }));
   btn.setAttribute('aria-expanded', String(sheet));
   $('cl-foot').hidden = d.read_only === true;
 }
@@ -776,8 +922,8 @@ function route() {
   state.focusItem = id && item ? item : null;
   if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn) { if (state.focusItem && state.detail) focusItemNow(); return; }
   state.metricsOn = metrics; state.trackerOn = tracker;
-  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true;
-  $('text').value = ''; drawPreviews($('previews'), state.images, noop); showError($('error'), '');
+  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); closeMenu(false);
+  $('text').value = ''; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
   if (id) loadThread(id);
@@ -957,10 +1103,22 @@ async function send(event, forceAside = false) {
   if (state.busy || !id) return;
   if (aside && !text.trim() && !state.images.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
   if (!text.trim() && !state.images.length) return;
+  if (state.detail?.read_only) { showError($('error'), 'This thread is read-only, so nothing can be sent or queued.'); return; }
+  const cid = newCid(), written_at = new Date().toISOString(), reply_to = !aside && state.replyTo ? state.replyTo : undefined, images = [...state.images];
   state.busy = true; $('send').disabled = true; $('btw').disabled = true; showError($('error'), '');
+  const cleared = () => { if (id === state.openId) { if (!aside) state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); growText(); } };
+  const queue = async () => { // the composer is emptied first, so anything typed while it is stored is not wiped
+    const before = $('text').value, replying = state.replyTo; cleared();
+    try { await outbox.add({ cid, thread: id, text, images, reply_to, aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.replyTo = replying; redrawComposer(); throw error; }
+    drawReplyBar();
+  };
   try {
-    await post(`threads/${id}/messages`, { text, images: state.images, ...(aside ? { aside: true } : state.replyTo ? { reply_to: state.replyTo } : {}) });
-    if (id === state.openId) { if (!aside) state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); }
+    // With no signal, or messages already waiting (they go first, to keep the order), the message joins the outbox.
+    if (isOffline() || outbox.pending()) { await queue(); return; }
+    try {
+      await post(`threads/${id}/messages`, { text, images, ...(aside ? { aside: true } : reply_to ? { reply_to } : {}), client_id: cid, written_at });
+    } catch (error) { if (error.network) { await queue(); return; } throw error; }
+    cleared();
     await Promise.all([loadThread(id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
   finally { state.busy = false; $('send').disabled = false; $('btw').disabled = false; $('text').focus(); }
@@ -970,6 +1128,40 @@ async function toggleDone() {
   const d = state.detail; if (!d) return;
   try { await post(`threads/${d.id}/status`, { status: d.status === 'done' ? 'open' : 'done' }); await Promise.all([loadThread(d.id), refreshList()]); }
   catch (error) { showError($('error'), error.message); }
+}
+
+// ---- What this server offers: the key box target and whether Redact is on. Unknown (offline, never loaded) draws neither.
+async function refreshConfig() {
+  try { const c = await api('config'); const next = { secret_target: typeof c.secret_target === 'string' ? c.secret_target : null, redact: c.redact === true }; if (JSON.stringify(next) !== JSON.stringify(state.config)) { state.config = next; if (state.detail) drawMessages(state.detail); } }
+  catch { /* keep what we knew */ }
+}
+// ---- The phone's header ⋯ and composer ＋ menus: the same actions as the desktop buttons.
+function openMore() {
+  const d = state.detail; if (!d) return;
+  openMenu($('more'), [{ label: isPinned('thread', d.id) ? 'Unpin' : 'Pin', onclick: () => togglePin('thread', d.id) },
+    ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
+    { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
+    ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : [])]);
+}
+function openPlus() {
+  openMenu($('plus'), [{ label: 'Attach image', onclick: () => $('file').click() }, { label: 'Side question', onclick: startAside }], { up: true });
+}
+// The text box grows with what is typed, up to about five lines, on a phone. On a wide screen it stays as it was.
+function growText() {
+  const t = $('text');
+  if (!isPhone()) { t.style.height = ''; t.removeAttribute('rows'); return; }
+  t.rows = 1; t.style.height = 'auto';
+  const cap = parseFloat(getComputedStyle(t).maxHeight);
+  t.style.height = `${Math.min(t.scrollHeight, Number.isFinite(cap) ? cap : 140)}px`;
+}
+// The page follows the visual viewport, so an open keyboard shrinks the layout (and the list keeps the rest) instead of covering the composer.
+function fitViewport() {
+  const vv = window.visualViewport; if (!vv) return;
+  const root = document.documentElement, kb = innerHeight - vv.height > 150, was = root.classList.contains('kb');
+  root.style.setProperty('--vvh', `${Math.round(vv.height)}px`); root.style.setProperty('--vvt', `${Math.round(vv.offsetTop)}px`);
+  root.classList.toggle('kb', kb);
+  if (state.atBottom || kb !== was) requestAnimationFrame(() => { if (state.atBottom) $('scroll').scrollTop = $('scroll').scrollHeight; });
+  placeMenu();
 }
 
 // ---- New thread dialog
@@ -990,6 +1182,7 @@ const typing = t => !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT
 const anyDialog = () => [...document.querySelectorAll('dialog')].some(d => d.open);
 function onKey(e) {
   if (e.isComposing) return;
+  if (!$('popmenu').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const b = [...$('popmenu').querySelectorAll('button:not(:disabled)')], i = b.indexOf(document.activeElement); b[(i + (e.key === 'ArrowDown' ? 1 : -1) + b.length) % b.length]?.focus(); } else if (e.key === 'Tab') closeMenu(false); return; }
   const mod = (e.metaKey || e.ctrlKey) && !e.altKey;
   if (mod && !e.shiftKey && e.code === 'KeyK') { e.preventDefault(); $('search').focus(); $('search').select(); return; }
   if (mod && !e.shiftKey && e.code === 'KeyI') {
@@ -1029,6 +1222,21 @@ function onKey(e) {
 paintKeys();
 $('help-rows').replaceChildren(...SHORTCUTS.map(([k, what]) => el('tr', {}, el('td', {}, ...k.split(' / ').flatMap((part, i) => [...(i ? [' or '] : []), kbd(part)])), el('td', { text: what }))));
 $('composer').addEventListener('submit', send);
+$('more').addEventListener('click', openMore);
+$('plus').addEventListener('click', openPlus);
+$('text').addEventListener('input', growText);
+$('text').addEventListener('focus', () => { if (state.atBottom) setTimeout(() => { $('scroll').scrollTop = $('scroll').scrollHeight; }, 250); });
+$('scroll').addEventListener('scroll', () => { const s = $('scroll'); state.atBottom = s.scrollHeight - s.scrollTop - s.clientHeight < 80; placeMenu(); }, { passive: true });
+document.addEventListener('pointerdown', e => { const m = $('popmenu'); if (!m.hidden && !m.contains(e.target) && !menuAnchor?.contains(e.target)) closeMenu(false); });
+window.visualViewport?.addEventListener('resize', fitViewport); window.visualViewport?.addEventListener('scroll', fitViewport);
+$('redact-cancel').addEventListener('click', () => $('redact-dialog').close());
+$('redact-go').addEventListener('click', doRedact);
+if (COARSE) $('text').placeholder = 'Message';
+window.addEventListener('online', () => { setOffline(false); drawOffline(); outbox.flush(); poll(); });
+window.addEventListener('offline', () => { setOffline(true); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.onLine !== false) outbox.flush(); });
+// The saved copy of the page and the last thread data, so the inbox opens with no signal. Only where the browser allows it (https or localhost).
+try { navigator.serviceWorker?.register('sw.js'); } catch { /* no service worker here */ }
 $('btw').addEventListener('click', e => { if (!$('text').value.trim() && !state.images.length) { startAside(); return; } send(e, true); });
 $('text').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('composer').requestSubmit(); } else if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); cancelReply(); } });
 $('replybar-x').addEventListener('click', () => { cancelReply(); $('text').focus(); });
@@ -1068,7 +1276,7 @@ $('msgs').addEventListener('focusin', e => { const n = e.target.closest?.('.msg[
 $('back').addEventListener('click', () => { location.hash = '#/'; });
 $('metrics-back').addEventListener('click', () => { location.hash = '#/'; });
 let resizeTimer;
-window.addEventListener('resize', () => { if (state.detail) applyLayout(state.detail); clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.metricsOn && state.mdata) { state.mdrawn = ''; drawMetrics(); } }, 120); });
+window.addEventListener('resize', () => { growText(); if (state.detail) applyLayout(state.detail); clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.metricsOn && state.mdata) { state.mdrawn = ''; drawMetrics(); } }, 120); });
 $('new-thread').addEventListener('click', openNew);
 $('new-cancel').addEventListener('click', () => $('new-dialog').close());
 $('new-form').addEventListener('submit', startThread);
@@ -1105,7 +1313,7 @@ document.addEventListener('keydown', onKey);
 window.addEventListener('hashchange', route);
 async function poll() {
   if (document.visibilityState !== 'visible') return;
-  await Promise.all([refreshList(), refreshProfile(), refreshPins()]);
+  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig()]);
   if (state.openId) await loadThread(state.openId, { quiet: true });
   if (state.metricsOn) await loadMetrics();
   if (state.trackerOn) await loadTracker();
@@ -1114,4 +1322,5 @@ setInterval(poll, POLL_MS);
 document.addEventListener('visibilitychange', poll);
 drawMe();
 refreshPins();
-Promise.all([refreshProfile(), refreshAreas()]).then(refreshList).then(route);
+fitViewport(); drawOffline(); outbox.start();
+Promise.all([refreshProfile(), refreshAreas(), refreshConfig()]).then(refreshList).then(route);

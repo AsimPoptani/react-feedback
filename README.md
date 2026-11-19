@@ -100,6 +100,8 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_AREAS_JSON` | none | the same configuration as inline JSON (set only one of the two) |
 | `FEEDBACK_FOLD_FYI` | off | set to `1`, `on`, `true` or `yes` to fold the agent's FYI and Done messages to one line with a Show button; by default every message is shown in full |
 | `FEEDBACK_INBOX_WIDGET` | on | set to `0`, `off`, `false` or `no` to keep the capture widget off the inbox page itself |
+| `FEEDBACK_SECRET_TARGET` | none | a path on the same site, with `{name}` in it (for example `/api/keys/{name}`), that the inbox's key box sends a pasted key to (see [Secure key box](#secure-key-box)). Must be relative; an absolute or protocol-relative URL stops the server at startup. Unset: no key box |
+| `FEEDBACK_VAULT_DIR` | none | where redacted messages go (see [Redacting sensitive messages](#redacting-sensitive-messages)). Must be **outside** `FEEDBACK_DIR`. Unset: redaction is off |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
 
@@ -153,6 +155,7 @@ feedback-data/
     agent-read.json when the agent last read it
     checklist.json  the thread's checklist, written atomically
     merged.json     only on a thread that was merged away
+    (redacted messages leave no text or images here: see the vault)
   _events.jsonl     one line per user message or new thread: watch it to know when to look
   _profile/         names, avatars and pins.json
 ```
@@ -259,6 +262,9 @@ react-feedback new "title" "text" --read-only                   # an updates thr
 react-feedback readonly <id> on|off
 react-feedback profile agent --avatar path                      # square PNG, JPEG or WebP, up to 2 MB
 react-feedback metrics [--window 24h|7d|all]
+react-feedback ask-secret <id> --name <key-name> --label "Label" [--help-url <https url>]   # a secure key box in the thread
+react-feedback redact <id> <message-id> [--reason "why"]        # move a sensitive message into the vault (needs FEEDBACK_VAULT_DIR)
+react-feedback unredact <id> <message-id>                       # put it back from the vault (CLI only)
 ```
 
 ## Quote replies
@@ -297,15 +303,50 @@ Type `/btw your question` in the inbox composer (or press **B**, or use the **Si
 
 Message bodies render a safe GitHub-flavoured subset: headings (`#` to `####`), tables (with alignment, scrolling inside the bubble), nested and ordered lists, read-only task lists, blockquotes, rules, inline and fenced code, links (https, mailto and in-app only, opened in a new tab with `rel="noopener noreferrer"`), bold, italic, strikethrough and line breaks. No HTML is ever parsed: everything is built with `createElement` and `textContent`. Quote snippets, previews and the tracker show plain text; the CLI prints the raw text. The renderer is `server/inbox/markdown.js` (no dependency).
 
+## Secure key box
+
+`react-feedback ask-secret <id> --name openrouter --label "OpenRouter API key" --help-url https://openrouter.ai/keys` posts a message of kind `secret_request` (`{ name, label, help_url }`) that asks the user for a key. **No value is ever stored by the feedback server.**
+
+- The inbox draws a password box in the message (autocomplete off, no browser storage, no `name`), with Save and a "Where to get this" link.
+- On Save, the **browser sends the value straight to your app**: `PUT <FEEDBACK_SECRET_TARGET with {name} filled in>` with `{"value": "…"}` and `Content-Type: application/json`, same origin only (`redirect: "error"`, so a redirect cannot carry it elsewhere). The target must be a relative path; the server refuses to start with an absolute URL, and the inbox refuses to send to one. The inbox learns the target from `GET /__feedback/api/config` (`{ secret_target, redact }`).
+- On a 2xx the box is cleared and the inbox records only `saved` and the target's short `hint` (at most 8 characters, such as `…abcd`, read from the target's JSON reply) with `POST api/threads/:id/messages/:mid/secret`. The route refuses any other field, so a value cannot ride along. The message then reads "Saved ✓ · ends …abcd", stops asking for the user's attention, and logs a `secret` event (`<name> saved`, never a value) so the agent can carry on. On a non-2xx the box stays and shows the target's error text (`detail`, `error` or `message`).
+- With `FEEDBACK_SECRET_TARGET` unset the message says "Secure entry isn't set up on this server" and shows no box. Offline it says "Connect to save this key": a key is never queued or stored for later.
+- The value never reaches the thread, `_events.jsonl`, any log, `localStorage` or the offline cache. It exists only in the input until your app has it.
+
+Your app's route must accept the same-origin `PUT`, check its own authentication and Origin as it does for any write, and answer JSON such as `{ "hint": "…abcd" }`; it must never echo the value in an error.
+
+## Redacting sensitive messages
+
+If something private lands in a thread, redact it. The agent runs `redact <id> <message-id> [--reason "…"]`; the user opens the **⋯** on one of their own messages and chooses **Redact…** (the inbox only offers it when `FEEDBACK_VAULT_DIR` is set, and only on the user's own messages).
+
+- The message's text and pictures move to the **vault**: `FEEDBACK_VAULT_DIR/<thread>/<message>.json`, a directory at `0700` and files at `0600`, written atomically. It must be outside `FEEDBACK_DIR` and is **never served over HTTP**.
+- In the thread the message becomes `{ text: "", images: [], redacted: { at, by, reason?, key } }`, shown as "🔒 Redacted (sensitive)" with the time and who did it. Quotes and snippets of it show "🔒 Redacted". The image files are deleted from the thread folder; the text is removed from `thread.jsonl`, search, the API and the CLI; its first line is blanked in `_events.jsonl` in place (the line keeps its byte length, so anything following the file by offset stays in step). A first message that a thread repeats in `item.json` and `feedback.md` is blanked there too, and the copy a merge made in the other thread is redacted with it.
+- A question's prompt and option labels are hidden the same way.
+- **Restore** is CLI only: `unredact <id> <message-id>` reads the vault back (pictures return under new numbers) and removes the vault file. The inbox has no restore.
+- Redaction works on read-only threads. Back up the vault separately; it is the only copy.
+
+## Offline sending (inbox)
+
+The inbox registers a small service worker (`sw.js`, scoped to the inbox path) that saves the page, its scripts, the thread list and each thread you opened. With no signal the inbox still opens and shows what you last saw, with an "Offline · showing what you last saw" banner. (Service workers need https or localhost.)
+
+- Sending while offline, or when a send fails on the network, stores the message (text, pictures, `/btw` side questions and quote-replies) in an **IndexedDB outbox** and shows it in the thread with a clock and "Waiting to send". You can delete it before it sends.
+- When the connection returns (the `online` event, or a retry with backoff) queued messages go out **in order**, one at a time; a failed one holds the ones behind it. Each carries a `client_id`, and the server stores a message with a given `client_id` once however often it arrives (a repeat answers 200 with the stored message). A message the server refuses (a thread that became read-only, say) is marked "Couldn't send" with Try again and Delete.
+- The message keeps the time you wrote it as `written_at`, shown in the thread. `created_at` stays the time it arrived, so read ticks and acknowledgements stay right; a bad `written_at` (in the future, over 30 days old) is ignored.
+- Read-only threads refuse to queue anything. Secret key entry is never queued. Nothing but ordinary messages is stored, and no pictures or secrets are cached by the service worker; a browser without IndexedDB keeps the queue in memory and says so. The saved copy of a thread is replaced the next time you are online and open it, so a message redacted since then disappears from it too.
+
+## Phone layout
+
+At 760 px and narrower the thread view is one slim header (← title, the checklist donut, **⋯** with Pin, Merge into…, Mark done or Reopen, and the read-only note), and a one-line composer: **＋** (Attach image, Side question), an auto-growing text box (about five lines at most) and a send arrow. Enter adds a new line; Send is the button. Keyboard hints are hidden on touch screens (`(hover: none) and (pointer: coarse)`), the Feedback launcher hides while the composer has focus, and the page follows `visualViewport` so an open keyboard leaves the message list the remaining height, scrolled to the newest message. Wide screens keep the old layout.
+
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`. A message body may also carry `aside: true`, `todo` and `for`.
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config`; `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
 ## Security notes
 
-This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox.
+This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox. The key box and the vault do not change that: they keep a key out of the thread, and a redacted message out of the served data, but they do not authenticate anyone. Anyone who can reach the server can still ask it to redact the user's messages.
 
 ## Development
 
@@ -314,6 +355,7 @@ bun install
 bun run typecheck && bun run lint
 bun run test        # vitest (widget and the inbox page in happy-dom) and bun test (server, store, CLI)
 bun run test:e2e    # optional browser smoke test (needs Playwright and a built dist/)
+bun e2e/rf6.mjs     # optional browser test: phone layout, key box, redaction, offline sending (same needs)
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

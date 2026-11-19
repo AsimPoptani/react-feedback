@@ -109,3 +109,5 @@
 .fb-outbox-actions { display: flex; gap: 8px; margin-top: 4px; }
 .fb-outbox-note { margin: 4px 0; padding: 6px; max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; border: 1px dashed var(--fb-border); border-radius: 6px; user-select: text; }
 .fb-outbox li[data-status="stuck"] > span:first-of-type { color: #b8741a; }
+/* No keyboard hints on a touch screen. */
+@media (hover: none) and (pointer: coarse) { .fb-root kbd { display: none; } }
