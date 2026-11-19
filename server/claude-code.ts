@@ -16,7 +16,8 @@ const MAX_WAKE = 8000;
 
 // `seen`: per thread the session follows (its own and the captures it claimed), the newest message of yours it was woken with.
 // `reply`: where this turn's final message goes (a claimed capture, or a side question), set when the session is woken.
-export interface Session { session_id: string; thread: string; name: string; cwd: string; seen: Record<string, string>; next_flag?: store.Flag; reply?: { thread: string; aside?: string }; ended?: boolean }
+// `delivered`: fingerprints of messages already woken with, so a copy a merge or move brings into another followed thread never wakes twice.
+export interface Session { session_id: string; thread: string; name: string; cwd: string; seen: Record<string, string>; delivered?: string[]; next_flag?: store.Flag; reply?: { thread: string; aside?: string }; ended?: boolean }
 export interface HookInput { session_id?: unknown; cwd?: unknown; prompt?: unknown; last_assistant_message?: unknown; reason?: unknown }
 export type Projects = Record<string, string>;
 
@@ -81,6 +82,8 @@ function titleOf(text: string): string {
   return line.length > 80 ? `${line.slice(0, 79)}…` : line;
 }
 const mirrorId = () => `${MIRROR}${randomBytes(8).toString('hex')}`;
+// The same message after a merge or move: copies keep client_id, author time and text.
+const fingerprint = (m: store.Message) => m.client_id ?? `${m.created_at}:${m.text.length}:${m.text.slice(0, 40)}`;
 
 async function threadExists(dir: string, id: string): Promise<boolean> {
   try { await store.itemDir(dir, id); return true; } catch { return false; }
@@ -185,12 +188,21 @@ export async function unseen(dir: string, id: string, thread: string): Promise<s
   const item = await store.readItem(path);
   const messages = await store.readMessages(path, item);
   const since = session.seen[thread]!;
-  const fresh = messages.filter(m => m.author === 'user' && m.created_at > since && !m.divider && !m.moved_to && !m.redacted && !m.client_id?.startsWith(MIRROR));
-  if (!fresh.length) return null;
+  const delivered = new Set(session.delivered ?? []);
+  const newer = messages.filter(m => m.author === 'user' && m.created_at > since && !m.divider && !m.moved_to && !m.redacted && !m.client_id?.startsWith(MIRROR));
+  const fresh = newer.filter(m => !delivered.has(fingerprint(m)));
+  if (!fresh.length) {
+    if (newer.length) await updateSession(dir, id, s => { s.seen[thread] = newer[newer.length - 1]!.created_at; });
+    return null;
+  }
   const last = fresh[fresh.length - 1]!;
   const own = thread === session.thread;
   const aside = fresh.every(m => m.aside) ? last.id : undefined;
-  await updateSession(dir, id, s => { s.seen[thread] = last.created_at; if (own && !aside) delete s.reply; else s.reply = { thread, ...(aside ? { aside } : {}) }; });
+  await updateSession(dir, id, s => {
+    s.seen[thread] = newer[newer.length - 1]!.created_at;
+    s.delivered = [...(s.delivered ?? []), ...fresh.map(fingerprint)].slice(-500);
+    if (own && !aside) delete s.reply; else s.reply = { thread, ...(aside ? { aside } : {}) };
+  });
   const byId = new Map(messages.map(m => [m.id, m]));
   const capture = item.mode !== 'thread';
   const files = capture ? ['annotated', 'image', 'context_image'].map(k => item[k]).filter((f): f is string => typeof f === 'string').map(f => join(path, f)) : [];

@@ -154,3 +154,16 @@ test('the proxy puts the widget before </body>', () => {
   expect(injectWidget('<html><body><div id="root"></div></body></html>')).toBe('<html><body><div id="root"></div><script src="/__feedback/embed.js" data-endpoint="/__feedback"></script></body></html>');
   expect(injectWidget('<p>x', 'bottom-right')).toContain('data-position="bottom-right"');
 });
+
+test('a message merged into another followed thread does not wake the session twice', async () => {
+  const a = await capture('http://localhost:5185/a', 'first capture');
+  const b = await capture('http://localhost:5185/b', 'second capture');
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  const outs: string[] = [];
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: t => outs.push(t) })).toBe(2);
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: t => outs.push(t) })).toBe(2);
+  await store.appendMessage(dir, a, { author: 'user', text: 'merge these please', client_id: 'inbox-abcdef12' });
+  expect(await unseen(dir, 'sess-1', a)).toContain('merge these please');
+  await store.mergeThreads(dir, a, b, 'agent');
+  expect(await unseen(dir, 'sess-1', b)).toBeNull();
+});
