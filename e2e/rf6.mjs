@@ -9,7 +9,7 @@ process.env.FEEDBACK_DIR = join(root, 'data'); process.env.FEEDBACK_VAULT_DIR = 
 const DIR = process.env.FEEDBACK_DIR, SHOTS = process.env.SHOTS;
 const store = await import('../server/store.ts');
 const { serverOptions } = await import('../server/server.ts');
-const { chromium } = await import(process.env.PLAYWRIGHT ?? 'playwright');
+const { chromium, webkit } = await import(process.env.PLAYWRIGHT ?? 'playwright');
 const SECRET = 'sk-test-0123456789-WXYZ', SENSITIVE = 'my pin is 482913';
 
 const { id } = await store.createThread(DIR, { title: 'Phone test', text: 'Hello there', origin: 'user' });
@@ -55,6 +55,10 @@ try {
   check('phone: no keyboard hints on a touch screen', await phone.evaluate(() => [...document.querySelectorAll('kbd')].filter(k => k.offsetParent).length) === 0);
   check('phone: no sideways scroll', await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await shot(phone, 'phone-after-390-thread');
+  const scroll = await phone.evaluate(() => ({ doc: document.scrollingElement.scrollHeight <= innerHeight, list: document.querySelector('#scroll').scrollHeight > document.querySelector('#scroll').clientHeight,
+    html: getComputedStyle(document.documentElement).overscrollBehaviorY, body: getComputedStyle(document.body).overscrollBehaviorY, listOb: getComputedStyle(document.querySelector('#scroll')).overscrollBehaviorY, bodyOverflow: getComputedStyle(document.body).overflowY }));
+  check('phone: the document never scrolls, only the message list does (no pull-to-refresh)', scroll.doc && scroll.bodyOverflow === 'hidden');
+  check('phone: overscroll-behavior is none on html and body, contain on the list', scroll.html === 'none' && scroll.body === 'none' && scroll.listOb === 'contain');
   await phone.locator('#more').tap();
   check('phone: ⋯ holds Pin, Mark done', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Mark done');
   await shot(phone, 'phone-header-menu-390');
@@ -138,6 +142,25 @@ try {
   await w2.locator('[data-queued] .qstate button').click(); await w2.waitForFunction(() => !document.querySelector('[data-queued]')).catch(() => {});
   check('offline: a queued message can be deleted before it sends', await w2.locator('[data-queued]').count() === 0);
   await wctx.setOffline(false);
+  // ---- no pull-to-refresh: in WebKit (iOS Chrome and Safari both use it) as well as Chromium, the document cannot scroll and the list still does
+  for (const [name, engine] of [['chromium', chromium], ['webkit', webkit]]) {
+    if (!engine) continue;
+    let b2; try { b2 = await engine.launch(); } catch { console.log(`skip ${name}: not installed`); continue; }
+    try {
+      for (let i = 0; i < 3; i++) await store.appendMessage(DIR, id, { author: 'agent', text: `filler ${i}\n\n`.repeat(30) });
+      const ctx = await b2.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }), pg = await ctx.newPage();
+      await pg.goto(url); await pg.waitForSelector('#msgs .msg'); await pg.waitForTimeout(500);
+      const info = await pg.evaluate(() => ({ doc: document.scrollingElement.scrollHeight <= innerHeight, listScrolls: document.querySelector('#scroll').scrollHeight > document.querySelector('#scroll').clientHeight,
+        html: getComputedStyle(document.documentElement).overscrollBehaviorY, body: getComputedStyle(document.body).overscrollBehaviorY, list: getComputedStyle(document.querySelector('#scroll')).overscrollBehaviorY, pos: getComputedStyle(document.body).position }));
+      check(`${name}: the document cannot scroll; the long thread's list can`, info.doc && info.listScrolls && info.pos === 'fixed');
+      check(`${name}: overscroll-behavior none on html and body, contain on the list`, info.html === 'none' && info.body === 'none' && info.list === 'contain');
+      await pg.evaluate(() => { const s = document.querySelector('#scroll'); s.scrollTop = 0; });
+      if (name === 'chromium') { await pg.mouse.move(200, 300); await pg.mouse.wheel(0, -400); } await pg.evaluate(() => { window.scrollBy(0, -300); document.scrollingElement.scrollTop = -50; }); await pg.waitForTimeout(200);
+      check(`${name}: scrolling up at the top of the list leaves the page where it is`, await pg.evaluate(() => scrollY === 0 && document.scrollingElement.scrollTop === 0));
+      await pg.evaluate(() => document.querySelector('#scroll').scrollBy(0, 500)); await pg.waitForTimeout(300);
+      check(`${name}: the list still scrolls`, await pg.evaluate(() => document.querySelector('#scroll').scrollTop > 0));
+    } finally { await b2.close(); }
+  }
 } finally { await browser.close(); server.stop(true); }
 console.log(failed ? `${failed} failed` : 'all passed');
 process.exit(failed ? 1 : 0);

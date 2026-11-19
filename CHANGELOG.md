@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+### Fixed
+- Inbox on a phone: scrolling up past the top of a thread no longer pulls the whole page and reloads it. The page itself never scrolls (`overflow: hidden`, `overscroll-behavior: none` on `html` and `body`), and each scroller inside it (message list, thread list, checklist, metrics) uses `overscroll-behavior-y: contain`. Only the inbox page changes; the widget on a host page is untouched.
+
 ## 0.7.0
 
 ### Added
