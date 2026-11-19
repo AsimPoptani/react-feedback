@@ -167,3 +167,13 @@ test('a message merged into another followed thread does not wake the session tw
   await store.mergeThreads(dir, a, b, 'agent');
   expect(await unseen(dir, 'sess-1', b)).toBeNull();
 });
+
+test('saving a key in the key box wakes the session that asked for it', async () => {
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  let woke = '';
+  const waiting = wait(dir, S, { poll: 20, projects: PROJECTS, out: t => { woke = t; } });
+  await Bun.sleep(60);
+  await store.logEvent(dir, { id: await thread(), kind: 'secret', text: 'elevenlabs saved' });
+  expect(await waiting).toBe(2);
+  expect(woke).toContain('elevenlabs saved');
+});

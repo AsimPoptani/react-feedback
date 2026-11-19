@@ -265,10 +265,16 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
     const { lines, end } = await readFrom(events, offset);
     offset = end;
     for (const line of lines) {
-      let e: { id?: unknown; author?: unknown; kind?: unknown };
+      let e: { id?: unknown; author?: unknown; kind?: unknown; first_line?: unknown };
       try { e = JSON.parse(line); } catch { continue; }
       if (e.author !== 'user' || typeof e.id !== 'string') continue;
       session = (await readSession(dir, id)) ?? session;
+      // A key saved in the key box adds no message, only this event ("<name> saved"; never the value).
+      if (e.kind === 'secret' && session.seen?.[e.id] !== undefined) {
+        await rm(pidFile(dir, id), { force: true });
+        out(`🔑 You saved a key in the inbox's secure box (thread ${e.id}): ${String(e.first_line ?? '').slice(0, 80)}. The value went straight to the app, not here; carry on with what needed it.`);
+        return 2;
+      }
       if (session.seen?.[e.id] !== undefined) { if (await wake(e.id)) return 2; continue; }
       if (e.kind === 'thread' && await claimable(dir, e.id, session, projects) && await claim(dir, e.id, id) && await wake(e.id)) return 2;
     }
