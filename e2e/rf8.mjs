@@ -37,7 +37,7 @@ try {
   const text = await header(phone);
   check('phone: the header shows the agent as active 2 min ago', /Agent · active 2 min ago/.test(text));
   check('phone: another agent last active hours ago shows a time, not a relative one', /Codex · active \d/.test(text) && !/Codex · active \d+ min ago/.test(text));
-  check('phone: the header shows when the user was last here', /You · last seen (just now|\d+ min ago)/.test(text));
+  check('phone: the user is not shown their own last seen', !/You ·/.test(text));
   check('phone: no reminder line in the thread', await phone.locator('[data-reminder], .sysline').count() === 0 && !(await phone.locator('#msgs').innerText()).includes('Reminder'));
   check('phone: the presence line does not scroll the page sideways', await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await shot(phone, 'presence-390');
@@ -55,7 +55,7 @@ try {
 
   const wide = await (await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' })).newPage();
   await wide.goto(base + id); await wide.waitForSelector('#msgs .msg');
-  check('desktop: the header shows both sides', /Agent · active 2 min ago/.test(await header(wide)) && /You · last seen/.test(await wide.locator('#presence').innerText()));
+  check('desktop: the header shows the agents, not the user\'s own entry', /Agent · active 2 min ago/.test(await header(wide)) && !/You ·/.test(await wide.locator('#presence').innerText()));
   check('desktop: no reminder line in the thread', await wide.locator('[data-reminder], .sysline').count() === 0);
   await shot(wide, 'presence-1280');
   await wide.locator('#remind-open').click(); await wide.waitForSelector('#remind-dialog[open]');

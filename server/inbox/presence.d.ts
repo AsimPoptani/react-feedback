@@ -2,4 +2,6 @@ export interface PresenceData { user: { at: string } | null; agents: { name: str
 export interface PresenceLine { who: 'agent' | 'user'; name: string; at: string; text: string }
 export function relative(iso: string, now: number): string;
 export function whenText(iso: string, now: number, clock: (iso: string, now: number) => string): string;
-export function presenceLines(presence: PresenceData | null | undefined, now: number, options: { agentName?: string; clock: (iso: string, now: number) => string }): PresenceLine[];
+export type Viewer = 'user' | { agent: string | null | undefined };
+export function forViewer(presence: PresenceData | null | undefined, viewer: Viewer): PresenceData | null;
+export function presenceLines(presence: PresenceData | null | undefined, now: number, options: { agentName?: string; clock: (iso: string, now: number) => string; viewer?: Viewer }): PresenceLine[];

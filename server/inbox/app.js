@@ -1433,7 +1433,7 @@ window.addEventListener('hashchange', route);
 // "Claude · active 2 min ago" and "You · last seen 10:42": quiet, and gone when there is no data. The time after an hour is in this browser's zone.
 const clockText = (iso, now) => { const d = new Date(iso), t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toDateString() === new Date(now).toDateString() ? t : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${t}`; };
 function drawPresence() {
-  const lines = presenceLines(state.presence, Date.now(), { agentName: state.profile.agent.name, clock: clockText });
+  const lines = presenceLines(state.presence, Date.now(), { agentName: state.profile.agent.name, clock: clockText, viewer: 'user' });
   const box = $('presence');
   box.hidden = !lines.length;
   box.replaceChildren(...lines.flatMap((l, i) => [...(i ? [el('span', { 'aria-hidden': 'true', text: ' · ' })] : []), el('span', { class: `pres ${l.who}`, 'data-who': l.who, text: l.text })]));
