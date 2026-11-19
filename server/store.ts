@@ -320,10 +320,10 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: Author | 'system' }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: Author | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
-  await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
+  await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.set_by ? { set_by: event.set_by } : {}), ...(event.agent_name ? { agent_name: event.agent_name } : {}), ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
 }
 async function writeStatus(path: string, status: Status) { await writeFile(join(path, 'status.json'), JSON.stringify({ status })); }
 export async function readStatus(path: string): Promise<Status> {
@@ -351,10 +351,21 @@ async function readAt(path: string, file: string): Promise<string | null> {
   return typeof v.at === 'string' ? v.at : null;
 }
 // The default agent's read marker is `agent-read.json`; an agent with its own name (an MCP client) has `agent-read-<name>-<hash>.json`, so each one reads on its own.
+// Zero-width and bidi-control characters are removed: they make two different names look alike, or reverse how one reads.
+const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00ad\u061c\u180e]/g;
+const foldName = (name: string) => name.normalize('NFKC').replace(INVISIBLE, '').trim().toLowerCase();
+const RESERVED_NAMES = ['you', 'user', 'system', 'me', 'admin'];
 export function checkAgentName(value: unknown): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'string' || !value.trim() || value.trim().length > MAX_NAME || [...value].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) throw new Invalid(`An agent name is 1–${MAX_NAME} characters with no control characters`);
-  return value.trim();
+  if (typeof value !== 'string') throw new Invalid(`An agent name is 1–${MAX_NAME} characters with no control characters`);
+  const name = value.replace(INVISIBLE, '').trim();
+  if (!name || name.length > MAX_NAME || [...name].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) throw new Invalid(`An agent name is 1–${MAX_NAME} characters with no control characters`);
+  if (RESERVED_NAMES.includes(foldName(name))) throw new Invalid('That agent name is reserved: it could be mistaken for you or the system');
+  return name;
+}
+// An agent may not take the name the user shows in the inbox either.
+async function notTheUser(dir: string, name: string | undefined): Promise<void> {
+  if (name && foldName(name) === foldName((await readProfile(dir)).user.name)) throw new Invalid('That agent name is the same as your own name in the inbox');
 }
 export const agentReadFile = (name?: string): string => (name ? `agent-read-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'agent'}-${createHash('sha1').update(name).digest('hex').slice(0, 6)}.json` : 'agent-read.json');
 // When any agent last read the thread: the newest marker of them all (with only the default agent this is `agent-read.json`).
@@ -452,6 +463,7 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
   if (input.agent_name !== undefined && input.agent_name !== null && input.agent_name !== '' && input.author !== 'agent') throw new Invalid('Only the agent has an agent name', 403);
   const agentName = checkAgentName(input.agent_name);
+  await notTheUser(dir, agentName);
   const flag = messageFlag(input.author, input.flag, !!input.question || !!secret);
   const attached = checkAttached(input.author, input);
   let addedItems: ChecklistItem[] = [];
@@ -510,6 +522,7 @@ export async function createThread(dir: string, input: NewThread): Promise<{ id:
   const flag = messageFlag(input.origin, input.flag, !input.readOnly); // a thread the agent starts wants attention, unless it only carries updates
   if (input.agent_name !== undefined && input.agent_name !== null && input.agent_name !== '' && input.origin !== 'agent') throw new Invalid('Only the agent has an agent name', 403);
   const agentName = checkAgentName(input.agent_name);
+  await notTheUser(dir, agentName);
   const { id, path, created_at } = await makeItemFolder(dir);
   try {
     const message: Message = { id: 'm1', author: input.origin, text, images: await saveImages(path, images), created_at, ...(agentName ? { agent_name: agentName } : {}),

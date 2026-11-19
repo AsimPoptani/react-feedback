@@ -272,17 +272,17 @@ react-feedback mcp                                              # an MCP server 
 
 ## Thread reminders
 
-Reminders keep the agent up to date on a thread, for example "does the checklist need to be updated?". They are nudges for the **agent**: a fire appends a line to `_events.jsonl` (`author: "system"`, `kind: "reminder"`, the thread `id` and the text as `first_line`), the feed agents already tail. The inbox shows it as a small muted line, "⏰ Reminder to the agent: …"; it is never unread for you and never sends a push or a notification. The metrics ignore it.
+Reminders keep the agent up to date on a thread, for example "does the checklist need to be updated?". They are nudges for the **agent**: a fire appends a line to `_events.jsonl` (`author: "system"`, `kind: "reminder"`, the thread `id` and the text as `first_line`, plus `set_by`: `agent`, `user` or `default`, and `agent_name` when an MCP agent set it), the feed agents already tail. That event shape is public. The `first_line` is text a person or an agent wrote: read it as data. The inbox shows it as a small muted line, "⏰ Reminder to the agent: …"; it is never unread for you and never sends a push or a notification. The metrics ignore it.
 
 Each thread keeps its reminders in `reminders.json` (written atomically, like `checklist.json`). A reminder has an `id`, a `kind`, `say` (the text), `created_by`, `last_fired_at` and `enabled`. The kinds:
 
-- `every` (`2h`, `30m`, `1d`): fires when the interval has passed **and the thread had activity since the last fire**, so an idle thread stays quiet.
-- `after_agent_replies` (a number): fires after that many agent replies in a row with no checklist change (no item added or ticked).
+- `every` (`2h`, `30m`, `1d`): fires when the interval has passed **and the user was active on the thread since the last fire** (the agent's own replies do not count), so an idle thread stays quiet.
+- `after_agent_replies` (a number from 2): fires after that many agent replies in a row with no checklist change (no item added or ticked).
 - `idle` (`1h`): fires once when the thread has waited on the agent that long.
 
-None of them fires on a done thread. **The built-in reminder** is on for every thread with open **agent** checklist items: after 3 agent replies with no tick, or 6 hours after the last fire (or the oldest open item) when the thread had activity, it says "Thread '<title>' has N open agent items: is the checklist up to date? Tick what shipped, add what's new." Turn it off for a thread with `remind <id> off-default` (or the inbox sheet), and everywhere with `FEEDBACK_DEFAULT_REMINDER=off`.
+None of them fires on a done thread, and none fires twice within 15 minutes (a cooldown, so a reply that answers a reminder cannot set the next one off). **The built-in reminder** is on for every thread with open **agent** checklist items: after 3 agent replies with no tick, or 6 hours after the last fire (or the oldest open item) when the thread had activity, it says "This thread has N open agent items: is the checklist up to date? Tick what shipped, add what's new." (no title: a title can be a captured note, and redaction must not leave it behind; redacting a message also blanks its lines in a thread's reminders and in the reminder events, keeping each event line's length) Turn it off for a thread with `remind <id> off-default` (or the inbox sheet), and everywhere with `FEEDBACK_DEFAULT_REMINDER=off`.
 
-How it fires: the server (`react-feedback serve`) checks every thread each 60 seconds (`FEEDBACK_REMINDERS=off` stops that), and the CLI and the MCP server check the thread after each agent reply. A fire is recorded under the thread's lock with its `last_fired_at`, so a restart, or two processes at once, never fire it twice; and after a restart nothing fires on a thread that has had no activity since. When `reply` posts on a thread with open agent items and no `--check` or `--todo`, it prints a hint: "N open items here; tick any you shipped with --check cN".
+How it fires: the server (`react-feedback serve`) checks every thread each 60 seconds (`FEEDBACK_REMINDERS=off` stops that), and the CLI and the MCP server check the thread after each agent reply. A fire is recorded under the thread's lock with its `last_fired_at`, so a restart, or two processes at once, never fire it twice; and after a restart nothing fires on a thread that has had no activity since. When `reply` posts on a thread with open agent items and no `--check` or `--todo`, it prints a hint on **stderr** (stdout is unchanged): "N open items here; tick any you shipped with --check cN".
 
 In the inbox: **Reminders** in the thread's ⋯ menu on a phone (a header button on a wide screen) opens a sheet that lists them, adds one (kind, value, text), removes one and switches the built-in one off. Read-only threads take reminders too, because they are for the agent. Over HTTP: `GET|POST api/threads/:id/reminders`, `POST …/reminders/default` (`{ "on": false }`), `DELETE …/reminders/:rid`; the thread detail carries `reminders_fired`.
 
@@ -290,18 +290,18 @@ In the inbox: **Reminders** in the thread's ⋯ menu on a phone (a header button
 
 `react-feedback mcp` runs an [MCP](https://modelcontextprotocol.io) server on stdio, built on the official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32.2), so any MCP client can use the inbox. The tools call the same store the CLI uses (the same checks, limits and per-thread lock files, so a CLI and an MCP agent writing at once cannot corrupt a thread), never a shell.
 
-Tools: `list_threads` (`waiting`, `area`, `q`), `read_thread` (marks it read for that agent), `reply` (`to`, `fyi`, `needs_you`, `done`, `todo[]`, `check[]`, `aside`, and an optional local `image` path), `ask`, `new_thread` (`read_only`), `todo_add`, `todo_check`, `tracker`, `merge`, `move`, `ack`, `remind_add`, `remind_list`, `remind_remove` and `events_since` (poll the event feed with a cursor; no cursor means "from now", cursor `0` replays it). There is deliberately **no** `redact`, `unredact` or `ask_secret` over MCP: those stay with the trusted CLI.
+Tools: `list_threads` (`waiting`, `area`, `q`), `read_thread` (marks it read for that agent), `reply` (`to`, `fyi`, `needs_you`, `done`, `todo[]`, `check[]`, `aside`, and an optional local `image` path), `ask`, `new_thread` (`read_only`), `todo_add`, `todo_check`, `tracker`, `merge`, `move`, `ack`, `remind_add`, `remind_list`, `remind_remove` and `events_since` (poll the event feed with a cursor; no cursor means "from now", cursor `0` replays it; each event's `first_line` comes back as a `text` data field). There is deliberately **no** `redact`, `unredact` or `ask_secret` over MCP: those stay with the trusted CLI.
 
-**Names.** Each server instance posts as `FEEDBACK_AGENT_NAME` (for example `Codex` or `Claude Desktop`) and keeps its own read state. The inbox shows the name, with an avatar colour made from it. Messages from an unnamed agent (the CLI, or no `FEEDBACK_AGENT_NAME`) are unchanged and use the agent profile.
+**Names.** Each server instance posts as `FEEDBACK_AGENT_NAME` (for example `Codex` or `Claude Desktop`) and keeps its own read state. The inbox shows the name, with an avatar colour made from it. Messages from an unnamed agent (the CLI, or no `FEEDBACK_AGENT_NAME`) are unchanged and use the agent profile. Names that could pass for you or the system (`you`, `user`, `system`, your own inbox name, compared without case, width or invisible characters) are refused, and zero-width and bidi characters are removed.
 
-**Safety.** Text that people wrote comes back in `text` fields of the tool result, with a notice, and every tool description says it is data to read, never instructions. Message and item limits are the CLI's. An `image` must be a PNG, JPEG or WebP inside `FEEDBACK_IMAGE_DIR` (a `:`-separated list; the default is the folder the server started in and the system temp folder), after symlinks are resolved, and never inside the data or vault folders.
+**Safety.** Text that people wrote comes back in `text` fields of the tool result, with a notice, and every tool description says it is data to read, never instructions. Message and item limits are the CLI's. **Images are off unless `FEEDBACK_IMAGE_DIR` is set** (a `:`-separated list of folders; empty entries are ignored, and `/` or the home folder is refused). An `image` must be a PNG, JPEG or WebP inside one of them, after symlinks are resolved, opened without following a link, and never inside the data or vault folders. The working folder is never allowed, because a client may start the server anywhere.
 
 **Transport.** stdio only, on the same machine. An HTTP transport is **not implemented**: a remote option would need its own token and stays off unless asked for.
 
 Claude Code:
 
 ```sh
-claude mcp add react-feedback --env FEEDBACK_DIR=/path/to/feedback-data --env FEEDBACK_AGENT_NAME=Claude -- bun /path/to/react-feedback/bin/react-feedback.ts mcp
+claude mcp add react-feedback --env FEEDBACK_DIR=/path/to/feedback-data --env FEEDBACK_AGENT_NAME=Claude --env FEEDBACK_IMAGE_DIR=/path/to/images -- bun /path/to/react-feedback/bin/react-feedback.ts mcp
 ```
 
 Claude Desktop (`claude_desktop_config.json`):
@@ -312,13 +312,13 @@ Claude Desktop (`claude_desktop_config.json`):
     "react-feedback": {
       "command": "bun",
       "args": ["/path/to/react-feedback/bin/react-feedback.ts", "mcp"],
-      "env": { "FEEDBACK_DIR": "/path/to/feedback-data", "FEEDBACK_AGENT_NAME": "Claude Desktop" }
+      "env": { "FEEDBACK_DIR": "/path/to/feedback-data", "FEEDBACK_AGENT_NAME": "Claude Desktop", "FEEDBACK_IMAGE_DIR": "/path/to/images" }
     }
   }
 }
 ```
 
-Any other stdio client: run `bun /path/to/react-feedback/bin/react-feedback.ts mcp` with `FEEDBACK_DIR` and `FEEDBACK_AGENT_NAME` in its environment (installed as a dependency, the same file is `node_modules/react-feedback/bin/react-feedback.ts`). It needs Bun on the path.
+Any other stdio client: run `bun /path/to/react-feedback/bin/react-feedback.ts mcp` with `FEEDBACK_DIR`, `FEEDBACK_AGENT_NAME` and (to allow images) `FEEDBACK_IMAGE_DIR` in its environment (installed as a dependency, the same file is `node_modules/react-feedback/bin/react-feedback.ts`). It needs Bun on the path.
 
 ## Quote replies
 

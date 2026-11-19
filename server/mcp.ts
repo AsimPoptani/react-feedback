@@ -2,9 +2,10 @@
 // Every tool calls the same store functions the CLI and the HTTP server use (so the same checks, limits and per-thread lock files); nothing shells out.
 // Not exposed on purpose: redact, unredact and ask-secret. Those stay with the trusted CLI.
 // stdout carries the protocol: nothing here may print to it.
-import { open, readFile, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, realpath, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -22,23 +23,38 @@ const flagOf = (a: { fyi?: boolean; needs_you?: boolean; done?: boolean }): stor
   if (named.length > 1) throw new store.Invalid('Use only one of fyi, needs_you and done');
   return named[0];
 };
-// Image paths must be inside FEEDBACK_IMAGE_DIR (default: the folder the server was started in, and the system temp folder), after symlinks are resolved, and never in the vault or the inbox data itself.
+// Images are off unless FEEDBACK_IMAGE_DIR names the folder(s) they may come from (a `:`-separated list). Never the working folder: an MCP client may start the server anywhere.
+// Empty entries are ignored, and a folder that is `/` or the home folder is refused: that would allow most of the disk. Paths are checked after symlinks are resolved.
 async function allowedRoots(env: Record<string, string | undefined>): Promise<string[]> {
-  const configured = env.FEEDBACK_IMAGE_DIR?.trim();
-  const roots = configured ? configured.split(':') : [process.cwd(), tmpdir()];
   const out: string[] = [];
-  for (const r of roots) { try { out.push(await realpath(resolve(r))); } catch { /* a missing folder allows nothing */ } }
+  const home = await realpath(homedir()).catch(() => homedir());
+  for (const r of (env.FEEDBACK_IMAGE_DIR ?? '').split(':').map(x => x.trim()).filter(Boolean)) {
+    let real: string;
+    try { real = await realpath(resolve(r)); } catch { continue; } // a missing folder allows nothing
+    if (real === sep || real === home || real === '/') continue;
+    out.push(real);
+  }
   return out;
 }
+const IMAGE_REFUSED = 'That image cannot be used: it must be a PNG, JPEG or WebP file inside FEEDBACK_IMAGE_DIR';
 const inside = (file: string, root: string) => file === root || file.startsWith(root.endsWith(sep) ? root : root + sep);
 export async function readAllowedImage(path: string, dir: string, env: Record<string, string | undefined>): Promise<store.Image> {
+  const roots = await allowedRoots(env);
+  if (!roots.length) throw new store.Invalid('Images are off: the server needs FEEDBACK_IMAGE_DIR set to the folder they may come from');
   let real: string;
-  try { real = await realpath(resolve(path)); } catch { throw new store.Invalid(`Cannot read image ${path}`); }
+  try { real = await realpath(resolve(path)); } catch { throw new store.Invalid(IMAGE_REFUSED); } // the same answer as a path outside, so it does not say what exists
   const forbidden: string[] = [];
   for (const p of [dir, loadVaultDir(env)]) { if (p) { try { forbidden.push(await realpath(resolve(p))); } catch { /* not there yet */ } } }
-  if (forbidden.some(f => inside(real, f)) || !(await allowedRoots(env)).some(r => inside(real, r))) throw new store.Invalid('Images must be inside the allowed image folder (FEEDBACK_IMAGE_DIR)');
-  try { if (!(await stat(real)).isFile()) throw new store.Invalid(`${path} is not a file`); return store.checkedImage(await readFile(real)); }
-  catch (error) { throw error instanceof store.Invalid ? new store.Invalid(`${path}: ${error.message}`) : new store.Invalid(`Cannot read image ${path}`); }
+  if (forbidden.some(f => inside(real, f)) || !roots.some(r => inside(real, r))) throw new store.Invalid(IMAGE_REFUSED);
+  // Open without following a link at the last step, and judge the open file (not the name): a swap after the check cannot change what is read.
+  try {
+    const handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > store.MAX_IMAGE_BYTES) throw new store.Invalid(IMAGE_REFUSED);
+      return store.checkedImage(await handle.readFile());
+    } finally { await handle.close(); }
+  } catch { throw new store.Invalid(IMAGE_REFUSED); }
 }
 const shapeMessage = (m: store.Message) => ({ id: m.id, author: m.author, ...(m.agent_name ? { agent_name: m.agent_name } : {}), created_at: m.created_at, text: m.redacted ? '' : m.text, ...(m.redacted ? { redacted: true } : {}),
   ...(m.flag ? { flag: m.flag } : {}), ...(m.reply_to ? { reply_to: m.reply_to } : {}), ...(m.aside ? { aside: true } : {}), ...(m.divider ? { divider: true } : {}), ...(m.images.length ? { images: m.images } : {}),
@@ -48,6 +64,8 @@ const shapeItem = (i: store.ChecklistItem) => ({ id: i.id, owner: i.owner, text:
 const shapeSummary = (t: store.Summary) => ({ id: t.id, title: t.title, status: t.status, waiting: t.waiting, last_author: t.last_author, last_message_at: t.last_message_at, last_flag: t.last_flag, read_only: t.read_only,
   open_question: t.open_question, ...(t.waiting_aside ? { waiting_aside: true } : {}), checklist: t.checklist, ...(t.merged_into ? { merged_into: t.merged_into } : {}) });
 
+// An event line's `first_line` is text a person (or a reminder someone set) wrote: it goes out as `text`, a data field, with who set a reminder beside it.
+const wrapEvent = (e: unknown) => { const { first_line, ...rest } = e as Record<string, unknown>; return { ...rest, text: first_line }; };
 export async function eventsSince(dir: string, cursor: number | undefined, limit: number): Promise<{ events: unknown[]; cursor: number }> {
   const file = join(dir, '_events.jsonl');
   let size = 0;
@@ -65,7 +83,7 @@ export async function eventsSince(dir: string, cursor: number | undefined, limit
       try { const e = JSON.parse(buffer.subarray(start, nl).toString('utf8')); if (e && typeof e === 'object') events.push(e); } catch { /* a torn line */ }
       start = nl + 1; used = start;
     }
-    return { events, cursor: cursor + used };
+    return { events: events.map(wrapEvent), cursor: cursor + used };
   } finally { await handle.close(); }
 }
 
@@ -84,7 +102,7 @@ export function createMcpServer(options: McpOptions): McpServer {
   const thread = z.string().describe('Thread id, like 20261118-163556-0dac');
   const text = z.string().min(1).max(store.MAX_TEXT);
   const flags = { fyi: z.boolean().optional(), needs_you: z.boolean().optional(), done: z.boolean().optional() };
-  const image = z.string().optional().describe('Local path of one PNG, JPEG or WebP image inside the allowed image folder');
+  const image = z.string().optional().describe('Local path of one PNG, JPEG or WebP image inside the folder the server was given as FEEDBACK_IMAGE_DIR (images are off when it is not set)');
   const images = async (path: string | undefined) => (path ? [await readAllowedImage(path, dir, env)] : []);
 
   tool('list_threads', 'List the inbox threads, newest first.', { waiting: z.boolean().optional().describe('Only threads waiting for the agent'), area: z.string().optional().describe('Only this area key (for example "conversations")'), q: z.string().optional().describe('Words in the title or any message') }, async a => {
@@ -132,7 +150,7 @@ export function createMcpServer(options: McpOptions): McpServer {
     id: thread, say: z.string().min(1).max(reminders.MAX_SAY), every: z.string().optional(), after_replies: z.number().int().optional(), idle: z.string().optional() }, async a => {
     const given = [a.every !== undefined ? ['every', a.every] : null, a.after_replies !== undefined ? ['after_agent_replies', a.after_replies] : null, a.idle !== undefined ? ['idle', a.idle] : null].filter((x): x is [string, string | number] => x !== null);
     if (given.length !== 1) throw new store.Invalid('Give exactly one of every, after_replies or idle');
-    return { reminder: await reminders.addReminder(dir, a.id, { kind: given[0]![0], value: given[0]![1], say: a.say, by: 'agent' }) };
+    return { reminder: await reminders.addReminder(dir, a.id, { kind: given[0]![0], value: given[0]![1], say: a.say, by: 'agent', agent_name: agent }) };
   });
   tool('remind_list', 'List a thread\'s reminders and whether the built-in checklist reminder is on.', { id: thread }, async a => ({ ...(await reminders.listReminders(dir, a.id, env)) }), true);
   tool('remind_remove', 'Remove a reminder.', { id: thread, reminder: z.string().describe('Reminder id, like r1') }, async a => { await reminders.removeReminder(dir, a.id, a.reminder); return { removed: a.reminder }; });

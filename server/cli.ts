@@ -191,7 +191,8 @@ async function list(dir: string, waiting: boolean): Promise<string> {
   if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
   return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}${t.waiting_aside ? '  [side question waiting]' : ''}`).join('\n');
 }
-export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig, env: Record<string, string | undefined> = process.env): Promise<string> {
+// `notice` receives hints that are advice, not results: they go to stderr, so a wrapper that reads the command's output is not affected.
+export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig, env: Record<string, string | undefined> = process.env, notice: (line: string) => void = line => { process.stderr.write(`${line}\n`); }): Promise<string> {
   const [command, ...rest] = argv;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
   const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
@@ -243,8 +244,8 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     const extras = `${aside ? `, side answer to ${message.reply_to}` : ''}${message.added_items ? `, added ${message.added_items.join(' ')}` : ''}${message.ticked_items ? `, ticked ${message.ticked_items.join(' ')}` : ''}`;
     await reminders.checkAfterReply(dir, words[0]!);
     const open = !aside && !addTodos.length && !checks.length ? await reminders.openAgentItems(dir, words[0]!) : [];
-    const hint = open.length ? `\n${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with --check cN (open: ${open.map(i => i.id).join(' ')})` : '';
-    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed})${hint}`;
+    if (open.length) notice(`${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with --check cN (open: ${open.map(i => i.id).join(' ')})`);
+    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed})`;
   }
   if (command === 'read' && words.length === 1) {
     await store.markAgentRead(dir, words[0]!);

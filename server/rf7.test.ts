@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: the tests read loose tool JSON
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -10,17 +10,20 @@ import { run } from './cli';
 import { createMcpServer, eventsSince } from './mcp';
 import * as reminders from './reminders';
 import * as store from './store';
+import * as sensitive from './sensitive';
 
 let dir: string, base: string;
 let handle: ReturnType<typeof createHandler>;
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64');
 const call = (method: string, path: string, data?: unknown) => handle(new Request(`http://local/__feedback/api/${path}`, { method, ...(data === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }) }));
-const cli = (...args: string[]) => run(args, dir);
+let hints: string[] = [];
+const cli = (...args: string[]) => run(args, dir, undefined, undefined, line => { hints.push(line); });
 const start = async (title = 'Thread', text = 'hello') => (await store.createThread(dir, { title, text, origin: 'user' })).id;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const events = async () => (await readFile(join(dir, '_events.jsonl'), 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l));
 const H = 3600e3;
 beforeEach(async () => {
+  hints = [];
   base = await mkdtemp(join(tmpdir(), 'feedback-rf7-'));
   dir = join(base, 'data');
   await mkdir(dir, { recursive: true });
@@ -40,7 +43,7 @@ const ids = (s: reminders.Stored, st: reminders.ThreadState, now: number, armed 
 
 test('every: fires after the interval only when the thread had activity since', () => {
   const s = stored([rem('every', '2h')]);
-  const busy = state([msg(1, 'user', T0 - H), msg(2, 'agent', T0 + 0.5 * H)]);
+  const busy = state([msg(1, 'user', T0 - H), msg(2, 'user', T0 + 0.5 * H)]);
   expect(ids(s, busy, T0 + 1 * H)).toEqual([]);          // too early
   expect(ids(s, busy, T0 + 2 * H + 1)).toEqual(['r1']);  // due
   const idle = state([msg(1, 'user', T0 - H)]);
@@ -48,13 +51,14 @@ test('every: fires after the interval only when the thread had activity since', 
   const fired = stored([rem('every', '2h', { last_fired_at: at(T0 + 2 * H) })]);
   expect(ids(fired, busy, T0 + 5 * H)).toEqual([]);      // no activity since the last fire
   expect(ids(fired, state([...busy.messages, msg(3, 'user', T0 + 3 * H)]), T0 + 3.5 * H)).toEqual([]); // activity, but the interval has not passed again
+  expect(ids(fired, state([...busy.messages, msg(3, 'agent', T0 + 3 * H)]), T0 + 4 * H + 1)).toEqual([]); // the agent's own reply is not activity
   expect(ids(fired, state([...busy.messages, msg(3, 'user', T0 + 3 * H)]), T0 + 4 * H + 1)).toEqual(['r1']);
   expect(ids(s, state(busy.messages, [], { status: 'done' }), T0 + 5 * H)).toEqual([]); // never on a done thread
   expect(ids(stored([rem('every', '2h', { enabled: false })]), busy, T0 + 5 * H)).toEqual([]);
 });
 test('every: nothing fires on activity from before the process started', () => {
   const s = stored([rem('every', '2h')]);
-  const st = state([msg(1, 'agent', T0 + 0.5 * H)]);
+  const st = state([msg(1, 'user', T0 + 0.5 * H)]);
   expect(ids(s, st, T0 + 3 * H, T0 + 2 * H)).toEqual([]);
   expect(ids(s, st, T0 + 3 * H, T0)).toEqual(['r1']);
 });
@@ -87,7 +91,8 @@ test('the built-in reminder: 3 unticked agent replies, or 6 h of activity, with 
   expect(ids(s, state(base, open), T0 + H)).toEqual([]);
   const due = reminders.evaluate(s, state([...base, msg(4, 'agent', T0 + 4)], [item('c1', 'agent', T0), item('c2', 'agent', T0, true), item('c3', 'user', T0)]), T0 + H, 0, {});
   expect(due.map(d => d.id)).toEqual(['default']);
-  expect(due[0]!.text).toBe("Thread 'Plan' has 1 open agent item: is the checklist up to date? Tick what shipped, add what's new.");
+  expect(due[0]!.text).toBe("This thread has 1 open agent item: is the checklist up to date? Tick what shipped, add what's new.");
+  expect(due[0]!.set_by).toBe('default');
   expect(ids(s, state([...base, msg(4, 'agent', T0 + 4)], []), T0 + H)).toEqual([]);                       // no open agent items
   expect(ids(s, state([...base, msg(4, 'agent', T0 + 4)], [item('c3', 'user', T0)]), T0 + H)).toEqual([]);  // only the user's items
   expect(ids(stored([], { default_off: true }), state([...base, msg(4, 'agent', T0 + 4)], open), T0 + H)).toEqual([]);
@@ -135,27 +140,34 @@ test('the default reminder fires after three agent replies in the CLI, once, and
   await cli('todo', id, 'add', 'agent', 'ship it');
   await cli('todo', id, 'add', 'agent', 'write it up');
   const first = await cli('reply', id, 'one');
-  expect(first).toContain('2 open items here; tick any you shipped with --check cN');
+  expect(first).not.toContain('open items here'); // the hint is advice, so it goes to stderr, not into the result
+  expect(hints.join('\n')).toContain('2 open items here; tick any you shipped with --check cN');
   await cli('reply', id, 'two');
   expect((await events()).filter(e => e.kind === 'reminder')).toHaveLength(0);
   await cli('reply', id, 'three');
   const fired = (await events()).filter(e => e.kind === 'reminder');
   expect(fired).toHaveLength(1);
-  expect(fired[0].first_line).toBe("Thread 'Plan' has 2 open agent items: is the checklist up to date? Tick what shipped, add what's new.");
+  expect(fired[0].set_by).toBe('default');
+  expect(fired[0].first_line).toBe("This thread has 2 open agent items: is the checklist up to date? Tick what shipped, add what's new.");
   await cli('reply', id, 'four');
   expect((await events()).filter(e => e.kind === 'reminder')).toHaveLength(1);
 });
 test('the CLI hint is absent when the reply ticks or adds, on a side answer, and on a thread with no open agent items', async () => {
   const id = await start('Plan');
   expect(await cli('reply', id, 'no items')).not.toContain('open item');
+  expect(hints).toEqual([]);
   await cli('todo', id, 'add', 'agent', 'ship it');
   expect(await cli('reply', id, 'ticking', '--check', 'c1')).not.toContain('open item');
   await cli('todo', id, 'add', 'agent', 'again');
   expect(await cli('reply', id, 'adding', '--todo', 'more')).not.toContain('open item');
-  expect(await cli('reply', id, 'plain')).toContain('open items here');
+  hints = [];
+  expect(await cli('reply', id, 'plain')).not.toContain('open item');
+  expect(hints.join('')).toContain('open items here');
   const done = await start('Other');
   await cli('todo', done, 'add', 'user', 'your thing');
+  hints = [];
   expect(await cli('reply', done, 'x')).not.toContain('open item');
+  expect(hints).toEqual([]);
 });
 test('the default reminder can be turned off per thread (CLI) and everywhere (env)', async () => {
   const id = await start('Plan');
@@ -177,6 +189,7 @@ test('CLI: remind add, list and remove', async () => {
   expect(list).toContain('r1'); expect(list).toContain('r3');
   await expect(cli('remind', id, 'add', '--every', '2h', '--idle', '1h', '--say', 'x')).rejects.toThrow('exactly one');
   await expect(cli('remind', id, 'add', '--every', 'soon', '--say', 'x')).rejects.toThrow('A time is a number');
+  await expect(cli('remind', id, 'add', '--after-replies', '1', '--say', 'x')).rejects.toThrow('from 2 to 50');
   await expect(cli('remind', id, 'add', '--every', '2h')).rejects.toThrow('text');
   expect(await cli('remind', id, 'remove', 'r2')).toBe('Removed r2');
   await expect(cli('remind', id, 'remove', 'r2')).rejects.toThrow('No such reminder');
@@ -284,7 +297,8 @@ test('MCP: events_since polls from a cursor, and sees a reminder fire', async ()
   await reminders.addReminder(dir, id, { kind: 'idle', value: '1m', say: 'Answer please', by: 'user' });
   await reminders.fireThread(dir, id, { now: Date.now() + 9 * 60e3, armedAt: 0 });
   const next = await tool('events_since', { cursor });
-  expect(next.data.events.map((e: any) => [e.author, e.kind, e.first_line])).toEqual([['user', 'message', 'a question for you'], ['system', 'reminder', 'Answer please']]);
+  expect(next.data.events.map((e: any) => [e.author, e.kind, e.text, e.first_line])).toEqual([['user', 'message', 'a question for you', undefined], ['system', 'reminder', 'Answer please', undefined]]); // text is a data field
+  expect(next.data.events[1]).toMatchObject({ set_by: 'user' });
   expect((await tool('events_since', { cursor: next.data.cursor })).data.events).toEqual([]);
   expect((await tool('events_since', { cursor: 0, limit: 2 })).data.events).toHaveLength(2);
   await writeFile(join(dir, '_events.jsonl'), '{"ts":"x"}\n{"half":', { flag: 'a' });
@@ -346,7 +360,8 @@ test('MCP: an image must be inside the allowed folder', async () => {
   const ok = await tool('reply', { id, text: 'look', image: join(allowed, 'ok.png') });
   expect(ok.error).toBe(false);
   expect(ok.data.posted.images).toHaveLength(1);
-  expect((await tool('reply', { id, text: 'look', image: join(outside, 'no.png') })).text).toContain('allowed image folder');
+  expect((await tool('reply', { id, text: 'look', image: join(outside, 'no.png') })).text).toContain('FEEDBACK_IMAGE_DIR');
+  expect((await tool('reply', { id, text: 'look', image: join(outside, 'missing.png') })).text).toBe((await tool('reply', { id, text: 'look', image: join(outside, 'no.png') })).text); // a missing file and a forbidden one answer alike
   expect((await tool('reply', { id, text: 'look', image: join(allowed, 'link.png') })).error).toBe(true);        // a symlink out of the folder
   expect((await tool('reply', { id, text: 'look', image: join(allowed, '..', 'elsewhere', 'no.png') })).error).toBe(true);
   expect((await tool('reply', { id, text: 'look', image: join(allowed, 'text.png') })).error).toBe(true);        // not an image
@@ -354,8 +369,103 @@ test('MCP: an image must be inside the allowed folder', async () => {
   expect((await tool('reply', { id, text: 'x'.repeat(10001) })).error).toBe(true);
   await close();
 });
+test('MCP: with cwd / (or no FEEDBACK_IMAGE_DIR) nothing outside the configured folder is accepted', async () => {
+  const allowed = join(base, 'images'), outside = join(base, 'elsewhere');
+  await mkdir(allowed); await mkdir(outside);
+  await writeFile(join(allowed, 'ok.png'), png); await writeFile(join(outside, 'no.png'), png);
+  const was = process.cwd();
+  try {
+    process.chdir('/');
+    const { readAllowedImage } = await import('./mcp');
+    await expect(readAllowedImage(join(outside, 'no.png'), dir, {})).rejects.toThrow('Images are off');
+    await expect(readAllowedImage(join(outside, 'no.png'), dir, { FEEDBACK_IMAGE_DIR: allowed })).rejects.toThrow('FEEDBACK_IMAGE_DIR');
+    await expect(readAllowedImage(join(outside, 'no.png'), dir, { FEEDBACK_IMAGE_DIR: `${allowed}:` })).rejects.toThrow('FEEDBACK_IMAGE_DIR'); // a trailing colon adds no working folder
+    await expect(readAllowedImage(join(outside, 'no.png'), dir, { FEEDBACK_IMAGE_DIR: '/' })).rejects.toThrow('Images are off');           // the whole disk
+    await expect(readAllowedImage(join(outside, 'no.png'), dir, { FEEDBACK_IMAGE_DIR: homedir() })).rejects.toThrow('Images are off');    // the home folder
+    await expect(readAllowedImage(join(outside, 'no.png'), dir, { FEEDBACK_IMAGE_DIR: ':::' })).rejects.toThrow('Images are off');
+    expect((await readAllowedImage(join(allowed, 'ok.png'), dir, { FEEDBACK_IMAGE_DIR: `:${allowed}:` })).ext).toBe('png');
+  } finally { process.chdir(was); }
+});
+test('MCP: agent names that look like the user or the system are refused, invisible characters are removed', async () => {
+  const id = await start('Names');
+  for (const n of ['You', 'USER', 'system', 'Y\u200bou', '\u202eYou', 'ｙｏｕ', ' System ']) expect(() => createMcpServer({ dir, agentName: n, env: {} })).toThrow('reserved');
+  await store.updateProfile(dir, { name: 'Asha' });
+  await expect(store.appendMessage(dir, id, { author: 'agent', agent_name: 'asha', text: 'x' })).rejects.toThrow('your own name');
+  await expect(store.appendMessage(dir, id, { author: 'agent', agent_name: 'A\u200bsha', text: 'x' })).rejects.toThrow('your own name');
+  await expect(store.createThread(dir, { title: 't', text: 'x', origin: 'agent', agent_name: 'ASHA' })).rejects.toThrow('your own name');
+  const m = await store.appendMessage(dir, id, { author: 'agent', agent_name: 'Co\u200bdex', text: 'x' });
+  expect(m.agent_name).toBe('Codex');
+});
 test('MCP: an agent name is checked', () => {
   expect(() => createMcpServer({ dir, agentName: 'x'.repeat(41), env: {} })).toThrow('agent name');
   expect(() => createMcpServer({ dir, agentName: 'bad\u0007name', env: {} })).toThrow('agent name');
   expect(() => createMcpServer({ dir, env: {} })).not.toThrow();
+});
+
+// ---- review fixes
+test('redacting a message scrubs its words from reminders.json, the reminder events, remind_list and events_since', async () => {
+  const { id, path, created_at } = await store.makeItemFolder(dir);
+  const note = 'my token is sk-live-SECRET123\nplease rotate';
+  const item = { id, created_at, note, mode: 'region', target: { selector: 'main' }, context: { url: '/page', viewport: { w: 1, h: 1 } }, image: 'image.png' };
+  await writeFile(join(path, 'item.json'), JSON.stringify(item, null, 2)); await writeFile(join(path, 'status.json'), JSON.stringify({ status: 'open' }));
+  await writeFile(join(path, 'feedback.md'), store.captureSummary(item)); await store.startCaptureThread(dir, id, note, created_at);
+  await store.addChecklistItem(dir, id, { owner: 'agent', text: 'rotate it', by: 'agent' });
+  await sleep(10);
+  for (let i = 0; i < 3; i++) await cli('reply', id, `update ${i}`);
+  await reminders.addReminder(dir, id, { kind: 'idle', value: '1m', say: 'Did you rotate: my token is sk-live-SECRET123 ?', by: 'user' });
+  await store.appendMessage(dir, id, { author: 'user', text: 'again' });
+  await reminders.fireThread(dir, id, { now: Date.now() + 5 * 60e3, armedAt: 0 });
+  const raw = () => readFile(join(dir, '_events.jsonl'), 'utf8');
+  expect(await raw()).toContain('sk-live-SECRET123');            // it was there, in the user's own words
+  const defaults = (await events()).filter(e => e.kind === 'reminder' && e.set_by === 'default');
+  expect(defaults).toHaveLength(1);
+  expect(defaults[0].first_line).not.toContain('SECRET123');     // the built-in text carries no title
+  const lengths = (await raw()).split('\n').map(l => Buffer.byteLength(l));
+  await sensitive.redactMessage(dir, id, 'm1', { by: 'user', vault: join(base, 'vault') });
+  expect(await raw()).not.toContain('SECRET123');
+  expect((await raw()).split('\n').map(l => Buffer.byteLength(l))).toEqual(lengths); // every line keeps its byte length
+  expect(await readFile(join(path, 'reminders.json'), 'utf8')).not.toContain('SECRET123');
+  const { tool, close } = await connect('Codex');
+  expect(JSON.stringify((await tool('events_since', { cursor: 0, limit: 500 })).data)).not.toContain('SECRET123');
+  expect(JSON.stringify((await tool('remind_list', { id })).data)).not.toContain('SECRET123');
+  expect(JSON.stringify((await tool('read_thread', { id })).data)).not.toContain('SECRET123');
+  expect(JSON.stringify(await (await call('GET', `threads/${id}`)).json())).not.toContain('SECRET123'); // the ⏰ line
+  await close();
+});
+test('a reminder cannot loop on the replies it causes: five replies fire at most once', async () => {
+  const { tool, close } = await connect('Codex');
+  const id = await start('Loop');
+  await tool('remind_add', { id, say: 'Is the checklist up to date?', after_replies: 2 });
+  expect((await tool('remind_add', { id, say: 'x', after_replies: 1 })).error).toBe(true);
+  await sleep(5);
+  for (let i = 0; i < 5; i++) await tool('reply', { id, text: `ack ${i}` });
+  expect((await events()).filter(e => e.kind === 'reminder' && e.id === id)).toHaveLength(1);
+  const other = await start('Other');
+  await cli('todo', other, 'add', 'agent', 'ship it');
+  for (let i = 0; i < 8; i++) await cli('reply', other, `r ${i}`);
+  expect((await events()).filter(e => e.kind === 'reminder' && e.id === other)).toHaveLength(1); // the built-in one too
+  await close();
+});
+test('the cooldown holds every kind for 15 minutes, and an every reminder ignores the agent\'s own replies', () => {
+  const fired = (kind: reminders.Kind, value: string | number) => stored([rem(kind, value, { last_fired_at: at(T0 + 10 * 60e3) })]);
+  const user = [msg(1, 'user', T0 + 11 * 60e3), msg(2, 'user', T0 + 12 * 60e3), msg(3, 'user', T0 + 13 * 60e3)];
+  expect(ids(fired('every', '1m'), state(user), T0 + 20 * 60e3)).toEqual([]);
+  expect(ids(fired('every', '1m'), state(user), T0 + 26 * 60e3)).toEqual(['r1']);
+  const waiting = state([msg(1, 'user', T0)], [], { waiting: 'agent' });
+  expect(ids(stored([rem('idle', '1m', { last_fired_at: at(T0 - 1) })]), waiting, T0 + 5 * 60e3)).toEqual([]);
+  const replies = [msg(1, 'user', T0), msg(2, 'agent', T0 + 1), msg(3, 'agent', T0 + 2), msg(4, 'agent', T0 + 3)];
+  expect(ids(stored([rem('after_agent_replies', 2, { last_fired_at: at(T0 - 1) })]), state(replies), T0 + 5 * 60e3)).toEqual([]);
+  expect(ids(stored([], { default_fired_at: at(T0 - 1) }), state(replies, [item('c1', 'agent', T0 - 5)]), T0 + 5 * 60e3)).toEqual([]);
+});
+test('a reminder event says who set it, and the setter is kept on the reminder', async () => {
+  const { tool, close } = await connect('Codex');
+  const id = await start('Who');
+  await tool('remind_add', { id, say: 'from codex', idle: '1m' });
+  await reminders.addReminder(dir, id, { kind: 'idle', value: '1m', say: 'from the user', by: 'user' });
+  expect((await reminders.listReminders(dir, id)).items.map(r => [r.created_by, r.agent_name])).toEqual([['agent', 'Codex'], ['user', undefined]]);
+  await reminders.fireThread(dir, id, { now: Date.now() + 5 * 60e3, armedAt: 0 });
+  const fired = (await events()).filter(e => e.kind === 'reminder');
+  expect(fired.map(e => [e.first_line, e.set_by, e.agent_name])).toEqual([['from codex', 'agent', 'Codex'], ['from the user', 'user', undefined]]);
+  expect((await reminders.listReminders(dir, id)).fired.map(f => f.set_by)).toEqual(['agent', 'user']);
+  await close();
 });

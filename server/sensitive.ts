@@ -6,6 +6,7 @@ import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile 
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as store from './store';
+import { readStored, serialise } from './reminders';
 import { Invalid, ID, MAX_HINT, type Author, type Message, type Redaction } from './store';
 
 const REDACTED = '[redacted]';
@@ -75,6 +76,50 @@ async function scrubEvents(dir: string, thread: string, firstLines: Set<string>,
   const handle = await open(file, 'r+');
   try { for (const p of patches) await handle.write(p.bytes, 0, p.bytes.length, p.at); } finally { await handle.close(); }
 }
+// A reminder repeats words the user may have written (a `say` that quotes a message), in the thread's reminders.json and as events in _events.jsonl.
+// Every line of the redacted text (4 characters or more) is blanked wherever it appears there, with stars of the same length, so event lines keep their byte length.
+const needlesOf = (text: string) => [...new Set(text.split('\n').map(l => l.trim()).filter(l => l.length >= 4))].sort((a, b) => b.length - a.length);
+function blankNeedles(text: string, needles: string[], truncated = false): string {
+  let out = text;
+  for (const n of needles) {
+    out = out.split(n).join('*'.repeat(n.length));
+    if (truncated) for (let k = Math.min(n.length - 1, out.length); k >= 4; k--) if (out.endsWith(n.slice(0, k))) { out = out.slice(0, out.length - k) + '*'.repeat(k); break; } // an event line cut the text short
+  }
+  return out;
+}
+async function scrubReminders(dir: string, path: string, thread: string, text: string): Promise<void> {
+  const needles = needlesOf(text);
+  if (!needles.length) return;
+  const stored = await readStored(path);
+  let changed = false;
+  for (const r of stored.items) { const say = blankNeedles(r.say, needles); if (say !== r.say) { r.say = say; changed = true; } }
+  for (const f of stored.fired) { const t = blankNeedles(f.text, needles); if (t !== f.text) { f.text = t; changed = true; } }
+  if (changed) await store.writeAtomic(join(path, 'reminders.json'), serialise(stored));
+  const file = join(dir, '_events.jsonl');
+  let raw: Buffer;
+  try { raw = await readFile(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  const patches: { at: number; bytes: Buffer }[] = [];
+  let offset = 0;
+  for (const line of raw.toString('utf8').split('\n')) {
+    const length = Buffer.byteLength(line);
+    try {
+      const e = JSON.parse(line) as Record<string, unknown>;
+      if (e.id === thread && e.kind === 'reminder' && typeof e.first_line === 'string') {
+        const blank = blankNeedles(e.first_line, needles, true);
+        if (blank !== e.first_line) {
+          let first = blank, next = JSON.stringify({ ...e, first_line: first });
+          while (Buffer.byteLength(next) < length) { first += ' '; next = JSON.stringify({ ...e, first_line: first }); }
+          while (Buffer.byteLength(next) > length && first.length) { first = first.slice(0, -1); next = JSON.stringify({ ...e, first_line: first }); }
+          if (Buffer.byteLength(next) === length) patches.push({ at: offset, bytes: Buffer.from(next) });
+        }
+      }
+    } catch { /* not a JSON line */ }
+    offset += length + 1;
+  }
+  if (!patches.length) return;
+  const handle = await open(file, 'r+');
+  try { for (const p of patches) await handle.write(p.bytes, 0, p.bytes.length, p.at); } finally { await handle.close(); }
+}
 // feedback.md for an item: a thread-mode item is its title and note; a capture is the capture summary.
 const feedbackFor = (item: Record<string, unknown>): string => (item.mode === 'thread' ? `${typeof item.title === 'string' ? item.title : ''}\n\n${String(item.note)}\n` : store.captureSummary(item));
 const firstLine = (text: string) => text.split('\n')[0]!.slice(0, 200) || '[image]';
@@ -115,6 +160,7 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
       lines.add(firstLine(`${m.answer.question_id}: ${[...labels, ...(m.answer.other_text ? [m.answer.other_text] : [])].join(', ')}`));
     }
     await scrubEvents(dir, id, lines, m.answer ? `${m.answer.question_id}: ` : undefined);
+    await scrubReminders(dir, path, id, m.text);
     return { done: true, original: m, oldTitle };
   });
 }
