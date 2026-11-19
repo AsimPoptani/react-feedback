@@ -7,6 +7,7 @@ import { run } from './cli';
 import { loadSecretTarget, loadVaultDir } from './config';
 import { validateVault } from './sensitive';
 import * as store from './store';
+import { packageVersion } from './version';
 import { secretUrl, secretStatusLine } from './inbox/secret.js';
 
 let dir: string, vault: string, base: string;
@@ -54,9 +55,10 @@ test('ask-secret refuses a bad name, a non-https help link, a read-only thread, 
 });
 
 test('/config tells the inbox the target and whether redaction is on; unset means off', async () => {
-  expect(await get('config')).toEqual({ secret_target: '/api/keys/{name}', redact: true });
+  const version = packageVersion();
+  expect(await get('config')).toEqual({ secret_target: '/api/keys/{name}', redact: true, version });
   const off = createHandler(dir, undefined, { secretTarget: null, vaultDir: null });
-  expect(await (await off(new Request('http://local/__feedback/api/config'))).json()).toEqual({ secret_target: null, redact: false });
+  expect(await (await off(new Request('http://local/__feedback/api/config'))).json()).toEqual({ secret_target: null, redact: false, version });
 });
 
 test('the target must be a relative path with {name}; absolute and protocol-relative ones are refused', () => {

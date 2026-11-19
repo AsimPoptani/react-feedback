@@ -6,6 +6,9 @@
 - **The version, and a nudge when a newer one is deployed.** The sidebar footer shows "react-feedback vX.Y.Z" next to Tracker and Metrics. On a phone the same line is the footer of the thread's ⋯ menu. `GET api/config` includes `version`, read from the package. The page that is open keeps the version it loaded. When that differs from the server (the server was redeployed), a small banner at the top says "A new version (vX.Y.Z) is ready. Reload to update", with Reload and a dismiss ×. Reload checks the service worker, tells a waiting one to take over, and loads the new shell. Dismiss stays quiet for that version only; the next one asks again. Checked when the page loads and on every poll.
 - `react-feedback --version` prints the version.
 
+### Changed
+- `zod` 4.6.6 (was 4.1.12) for this package and for the MCP SDK, which accepts `^4.0`. Earlier 4.x releases can exhaust memory while validating an oversized collection (GHSA-mrhx-c7xc-m3w5).
+
 ## 0.8.1
 
 ### Added
