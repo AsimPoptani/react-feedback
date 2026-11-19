@@ -77,10 +77,10 @@ h1 { font: 800 20px var(--f-display); margin: 0; }
 .text .md-h1 { font-size: 1.2em; } .text .md-h2 { font-size: 1.12em; } .text .md-h3 { font-size: 1.05em; } .text .md-h4 { font-size: 1em; color: var(--ink-2); }
 .text blockquote { margin: 0 0 6px; padding: 2px 10px; border-left: 4px solid var(--rule); color: var(--ink-2); }
 .text hr { border: 0; border-top: 1px solid var(--rule); margin: 8px 0; }
-.text pre { margin: 0 0 6px; padding: 8px 10px; border-radius: 8px; background: var(--panel); overflow-x: auto; max-width: 100%; white-space: pre; font-size: .9em; }
+.text pre { overscroll-behavior-x: contain; touch-action: pan-x pan-y; margin: 0 0 6px; padding: 8px 10px; border-radius: 8px; background: var(--panel); overflow-x: auto; max-width: 100%; white-space: pre; font-size: .9em; }
 .text pre code { background: none; padding: 0; overflow-wrap: normal; }
 .text del { color: var(--ink-2); }
-.md-table { display: block; max-width: 100%; overflow-x: auto; margin: 0 0 6px; -webkit-overflow-scrolling: touch; }
+.md-table { display: block; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; touch-action: pan-x pan-y; margin: 0 0 6px; -webkit-overflow-scrolling: touch; }
 .md-table table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: .95em; }
 .md-table th, .md-table td { border: 1px solid var(--rule); padding: 4px 8px; vertical-align: top; text-align: left; max-width: 22em; overflow-wrap: break-word; }
 .md-table th { background: var(--panel); font-weight: 800; }
@@ -92,6 +92,7 @@ h1 { font: 800 20px var(--f-display); margin: 0; }
 .imgs button { padding: 0; border-width: 1px; min-height: 0; border-radius: 8px; overflow: hidden; background: var(--white); line-height: 0; }
 .imgs img { max-width: 100%; max-height: 220px; width: auto; height: auto; display: block; }
 /* The page's feedback launcher sits in the bottom-right corner (data-position on its script tag), so the composer keeps a strip clear under Send. */
+.composer[hidden] { display: none; } /* a read-only thread has no composer on any layout */
 .composer { border-top: 2px solid var(--rule); padding: 10px 16px 64px; background: var(--paper); }
 .replybar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 6px 6px 6px 10px; border: 1px solid var(--rule); border-left: 4px solid var(--teal); border-radius: 8px; background: var(--panel); min-width: 0; }
 .replybar[hidden] { display: none; }
@@ -406,7 +407,7 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 .popmenu .note { padding: 8px 12px; margin: 0; color: var(--ink-2); font-size: 14px; }
 button.danger { background: var(--berry); border-color: var(--berry); color: #fff; }
 .cl-btn .cl-n:empty { display: none; }
-@media (hover: none) and (pointer: coarse) { kbd, #help { display: none; } }
+@media (hover: none) and (pointer: coarse) { kbd, #help { display: none; } [data-react-feedback-root] .fb-launchers { display: none; } .composer { padding-bottom: calc(8px + env(safe-area-inset-bottom)) !important; } } /* touch: no floating launcher (it sat over the text); Feedback on this page is in the header's ⋯ menu */
 /* Phone: one slim header, a one-line composer, and the page follows the visual viewport so an open keyboard leaves the list its height. */
 @media (max-width: 759px) {
   body { position: fixed; left: 0; right: 0; top: var(--vvt, 0px); height: var(--vvh, 100dvh); }

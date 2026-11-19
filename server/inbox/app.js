@@ -687,9 +687,17 @@ function startAside() {
 function cancelReply() { state.replyTo = null; drawReplyBar(); }
 // Swipe a message to the right to reply (touch). The Reply button stays for anyone who cannot swipe.
 const swipe = { node: null, x: 0, y: 0 };
+// A touch that starts inside something that scrolls sideways (a table, a code block) is that thing's pan, never a swipe to reply.
+function startsInScroller(target, within) {
+  for (let n = target; n && n !== within; n = n.parentElement) {
+    if (n.matches?.('.md-table, pre, table')) return true;
+    if (n.scrollWidth > n.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(n).overflowX)) return true;
+  }
+  return false;
+}
 function swipeStart(e) {
   const node = e.target.closest && e.target.closest('.msg[data-mid]');
-  if (!node || e.touches.length !== 1 || state.detail?.read_only) { swipe.node = null; return; }
+  if (!node || e.touches.length !== 1 || state.detail?.read_only || startsInScroller(e.target, node)) { swipe.node = null; return; }
   swipe.node = node; swipe.x = e.touches[0].clientX; swipe.y = e.touches[0].clientY;
 }
 function swipeMove(e) {
@@ -1144,6 +1152,7 @@ function openMore() {
   openMenu($('more'), [{ label: isPinned('thread', d.id) ? 'Unpin' : 'Pin', onclick: () => togglePin('thread', d.id) },
     ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
+    ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
     ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : [])]);
 }
 function openPlus() {

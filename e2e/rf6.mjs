@@ -60,7 +60,7 @@ try {
   check('phone: the document never scrolls, only the message list does (no pull-to-refresh)', scroll.doc && scroll.bodyOverflow === 'hidden');
   check('phone: overscroll-behavior is none on html and body, contain on the list', scroll.html === 'none' && scroll.body === 'none' && scroll.listOb === 'contain');
   await phone.locator('#more').tap();
-  check('phone: ⋯ holds Pin, Mark done', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Mark done');
+  check('phone: ⋯ holds Pin, Merge, Mark done and Feedback on this page', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Mark done|Feedback on this page');
   await shot(phone, 'phone-header-menu-390');
   await phone.keyboard.press('Escape');
   await phone.locator('#plus').tap();
@@ -80,6 +80,14 @@ try {
   await shot(phone, 'phone-after-390-keyboard');
   await phone.locator('#text').fill(''); await phone.locator('#text').blur(); await phone.setViewportSize({ width: 390, height: 844 });
 
+  check('phone: no floating Feedback launcher on a touch screen', await phone.evaluate(() => { const l = document.querySelector('.fb-launcher'); return !l || !l.offsetParent; }));
+  // a wide table: it pans sideways in place and a swipe on it does not start a reply
+  await store.appendMessage(DIR, id, { author: 'agent', text: '| ' + Array.from({ length: 10 }, (_, i) => `column number ${i}`).join(' | ') + ' |\n| ' + Array.from({ length: 10 }, () => '---').join(' | ') + ' |\n| ' + Array.from({ length: 10 }, (_, i) => `value ${i}`).join(' | ') + ' |' });
+  await phone.reload(); await phone.waitForSelector('.md-table');
+  const tb = await phone.evaluate(() => { const t = document.querySelector('.md-table'), c = getComputedStyle(t); return { wide: t.scrollWidth > t.clientWidth + 20, ox: c.overflowX, ob: c.overscrollBehaviorX, ta: c.touchAction, page: document.scrollingElement.scrollWidth <= innerWidth }; });
+  check('phone: a wide table scrolls sideways inside itself (overscroll contained, pan-x pan-y), the page does not', tb.wide && tb.ox === 'auto' && tb.ob === 'contain' && tb.ta === 'pan-x pan-y' && tb.page);
+  await phone.evaluate(() => { const c = document.querySelector('.md-table td'); const mk = (type, x) => { const t = new Touch({ identifier: 1, target: c, clientX: x, clientY: 300 }); c.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, touches: type === 'touchend' ? [] : [t], changedTouches: [t] })); }; mk('touchstart', 20); mk('touchmove', 140); mk('touchend', 140); });
+  check('phone: a swipe that starts in the table does not start a reply or move the message', await phone.locator('#replybar').isHidden() && await phone.locator('.msg.swiping').count() === 0);
   // ---- the key box
   const box = phone.locator('.secret input');
   await box.scrollIntoViewIfNeeded();
@@ -108,6 +116,12 @@ try {
     && (await readFile(join(root, 'vault', id, 'm5.json'), 'utf8')).includes(SENSITIVE));
   await phone.locator('.msg.redacted').scrollIntoViewIfNeeded(); await shot(phone, 'redacted-390');
 
+  // a read-only thread shows no composer, only its note
+  const ro = (await store.createThread(DIR, { title: 'Updates', text: 'status: all good', origin: 'agent', readOnly: true })).id;
+  await phone.goto(`${base}/__feedback/inbox/#/${ro}`); await phone.waitForSelector('#msgs .msg');
+  check('phone: a read-only thread has no composer, no ＋, no text box, only the Updates note', !(await phone.locator('#composer').isVisible()) && !(await phone.locator('#plus').isVisible()) && !(await phone.locator('#text').isVisible()) && (await phone.locator('#ro-note').innerText()).includes('Updates only'));
+  await shot(phone, 'readonly-390');
+  await phone.goto(url); await phone.waitForSelector('#msgs .msg');
   // ---- offline: the page opens from the service worker, writes queue, and go out in order
   await phone.evaluate(() => navigator.serviceWorker.ready); await phone.reload(); await phone.waitForSelector('#msgs .msg'); await phone.waitForTimeout(1500);
   check('offline: a service worker controls the inbox', await phone.evaluate(() => !!navigator.serviceWorker.controller));

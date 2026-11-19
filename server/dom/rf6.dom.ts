@@ -323,3 +323,27 @@ describe('offline sending', () => {
     expect(document.querySelector('.secret')).toBeNull();
   });
 });
+
+describe('phone fixes', () => {
+  beforeEach(() => { localStorage.clear(); });
+  const touch = (target: Element, type: string, x: number, y = 20) => { const t = { clientX: x, clientY: y }; target.dispatchEvent(Object.assign(new Event(type, { bubbles: true, cancelable: true }), { touches: type === 'touchend' ? [] : [t], changedTouches: [t] })); };
+  const table = '| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |';
+
+  it('a read-only thread has no composer at all, only the "Updates only" note', async () => {
+    await load(thread([m('m1', 'agent', 'Update one', 0)], { read_only: true }));
+    expect($('composer').hidden).toBe(true);
+    expect($('ro-note').hidden).toBe(false); expect($('ro-note').textContent).toContain('Updates only');
+    await load(thread([m('m1', 'agent', 'Hello', 0)]));
+    expect($('composer').hidden).toBe(false);
+  });
+
+  it('a swipe that starts in a table scrolls the table; it never starts a reply. A swipe on plain text still does', async () => {
+    await load(thread([m('m1', 'agent', 'plain words', 0), m('m2', 'agent', table, 1)]));
+    const cell = document.querySelector<HTMLElement>('#msgs td')!;
+    touch(cell, 'touchstart', 10); touch(cell, 'touchmove', 120); touch(cell, 'touchend', 120);
+    expect(document.querySelector('.msg.swiping')).toBeNull(); expect(($('replybar') as HTMLElement).hidden).toBe(true);
+    const words = document.querySelector<HTMLElement>('#msgs [data-mid="m1"] .text')!;
+    touch(words, 'touchstart', 10); touch(words, 'touchmove', 120); touch(words, 'touchend', 120);
+    expect(($('replybar') as HTMLElement).hidden).toBe(false);
+  });
+});

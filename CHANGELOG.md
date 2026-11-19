@@ -4,6 +4,9 @@
 
 ### Fixed
 - Inbox on a phone: scrolling up past the top of a thread no longer pulls the whole page and reloads it. The page itself never scrolls (`overflow: hidden`, `overscroll-behavior: none` on `html` and `body`), and each scroller inside it (message list, thread list, checklist, metrics) uses `overscroll-behavior-y: contain`. Only the inbox page changes; the widget on a host page is untouched.
+- Inbox on a phone: a read-only thread shows no composer at all (only the "Updates only" note); it used to show a typeable one that refused on send.
+- Inbox on a phone: a swipe that starts inside a wide table or code block pans it and no longer starts a reply. Tables and code blocks keep their sideways scroll to themselves (`overscroll-behavior-x: contain`, `touch-action: pan-x pan-y`).
+- Inbox on a touch screen: the Feedback launcher no longer floats over the messages. **Feedback on this page** is in the header's ⋯ menu instead. Desktop, and the widget on host pages, keep the floating launcher.
 
 ## 0.7.0
 
