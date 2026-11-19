@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as store from './store';
-import { agentName, onEnd, onPrompt, onStop, readSession, runClaudeCode, unseen, wait } from './claude-code';
+import { agentName, onEnd, onPrompt, onStop, ownsCapture, readSession, runClaudeCode, unseen, wait } from './claude-code';
+import { injectWidget } from './proxy';
 import { areaOf, parseAreas } from './inbox/areas.js';
 
 let dir: string;
@@ -31,7 +32,7 @@ test('a turn-end reply goes in as the folder agent and wants you; later prompts 
   expect(ms[1]!.agent_name).toBe('shop');
   expect(ms[1]!.flag).toBe('needs_you');
   expect(ms[2]!.client_id?.startsWith('cc-')).toBe(true);
-  expect(await unseen(dir, 'sess-1')).toBeNull(); // nothing you wrote in the inbox: the mirrored prompts never wake the session
+  expect(await unseen(dir, 'sess-1', await thread())).toBeNull(); // nothing you wrote in the inbox: the mirrored prompts never wake the session
 });
 
 test('a message you write in the inbox wakes the waiter once, with images and quotes', async () => {
@@ -44,14 +45,14 @@ test('a message you write in the inbox wakes the waiter once, with images and qu
   expect(await waiting).toBe(2);
   expect(woke).toContain('blue please');
   expect(woke).toContain('(quoting agent m2: Which colour?)');
-  expect(await unseen(dir, 'sess-1')).toBeNull();
+  expect(await unseen(dir, 'sess-1', await thread())).toBeNull();
 });
 
 test('a side question is answered as a side answer; the one-shot flag closes the thread', async () => {
   await onPrompt(dir, { ...S, prompt: 'first' });
   await onStop(dir, { ...S, last_assistant_message: 'working' });
   await store.appendMessage(dir, await thread(), { author: 'user', text: 'what port?', aside: true });
-  expect(await unseen(dir, 'sess-1')).toContain('Side question');
+  expect(await unseen(dir, 'sess-1', await thread())).toContain('Side question');
   await onStop(dir, { ...S, last_assistant_message: '8099' });
   let ms = await messages();
   expect(ms[ms.length - 1]).toMatchObject({ aside: true, reply_to: 'm3', text: '8099' });
@@ -85,4 +86,71 @@ test('hooks stay quiet when switched off or headless, and never throw', async ()
 test('the agent is named after the folder, never a reserved name', () => {
   expect(agentName('/a/hub-569-main')).toBe('hub-569-main');
   expect(agentName('/Users/you')).toBe('Claude');
+});
+
+// A capture as the widget's server makes it: item.json, the note as m1, and a `thread` event.
+async function capture(url: string, note: string): Promise<string> {
+  const { id, path, created_at } = await store.makeItemFolder(dir);
+  await Bun.write(join(path, 'item.json'), JSON.stringify({ id, created_at, note, mode: 'region', context: { url }, image: 'image.png' }));
+  await Bun.write(join(path, 'status.json'), JSON.stringify({ status: 'open' }));
+  await store.startCaptureThread(dir, id, note, created_at);
+  await store.logEvent(dir, { id, kind: 'thread', text: note });
+  return id;
+}
+const PROJECTS = { 'http://localhost:5185': '/Users/me/Repo/shop', 'http://localhost:5392': '/Users/me/Repo/hub' };
+
+test('a capture from a project page wakes a session in that folder, once, and the reply goes to the capture', async () => {
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  await onStop(dir, { ...S, last_assistant_message: 'ok' });
+  const H = { session_id: 'sess-2', cwd: '/Users/me/Repo/hub/apps/demo' };
+  await onPrompt(dir, { ...H, prompt: 'hub work' });
+  await onStop(dir, { ...H, last_assistant_message: 'ok' });
+  let shop = '', hub = '';
+  const waitingShop = wait(dir, S, { poll: 20, projects: PROJECTS, out: t => { shop = t; } });
+  const waitingHub = wait(dir, H, { poll: 20, projects: PROJECTS, out: t => { hub = t; } });
+  await Bun.sleep(60);
+  const cap = await capture('http://localhost:5392/dashboard', 'the chart overlaps the legend');
+  expect(await waitingHub).toBe(2);
+  expect(hub).toContain('Feedback capture from http://localhost:5392/dashboard');
+  expect(hub).toContain('the chart overlaps the legend');
+  expect(hub).toContain(join(dir, cap, 'image.png'));
+  expect(shop).toBe('');
+  await onStop(dir, { ...H, last_assistant_message: 'Fixed the legend.' });
+  const path = await store.itemDir(dir, cap);
+  const ms = await store.readMessages(path, await store.readItem(path));
+  expect(ms.map(m => [m.author, m.text])).toEqual([['user', 'the chart overlaps the legend'], ['agent', 'Fixed the legend.']]);
+  // your reply on the capture wakes the session that took it
+  let again = '';
+  const next = wait(dir, H, { poll: 20, projects: PROJECTS, out: t => { again = t; } });
+  await Bun.sleep(60);
+  await store.appendMessage(dir, cap, { author: 'user', text: 'still overlapping on mobile' });
+  expect(await next).toBe(2);
+  expect(again).toContain('still overlapping on mobile');
+  await onEnd(dir, S); await onEnd(dir, H);
+  expect(await waitingShop).toBe(0);
+});
+
+test('a capture that came in while nobody waited goes to the next session in the folder; a typed prompt sends the reply home', async () => {
+  const cap = await capture('http://localhost:5185/cart', 'button is grey');
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  let woke = '';
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: t => { woke = t; } })).toBe(2);
+  expect(woke).toContain('button is grey');
+  await onPrompt(dir, { ...S, prompt: 'actually do something else' });
+  await onStop(dir, { ...S, last_assistant_message: 'Doing the other thing.' });
+  const path = await store.itemDir(dir, cap);
+  expect((await store.readMessages(path, await store.readItem(path))).length).toBe(1);
+  expect((await messages()).at(-1)!.text).toBe('Doing the other thing.');
+});
+
+test('capture ownership is by page origin and folder', () => {
+  expect(ownsCapture(PROJECTS, '/Users/me/Repo/hub', 'http://localhost:5392/x')).toBe(true);
+  expect(ownsCapture(PROJECTS, '/Users/me/Repo/hubby', 'http://localhost:5392/x')).toBe(false);
+  expect(ownsCapture(PROJECTS, '/Users/me/Repo/hub', 'http://localhost:5185/x')).toBe(false);
+  expect(ownsCapture(PROJECTS, '/Users/me/Repo/hub', 'not a url')).toBe(false);
+});
+
+test('the proxy puts the widget before </body>', () => {
+  expect(injectWidget('<html><body><div id="root"></div></body></html>')).toBe('<html><body><div id="root"></div><script src="/__feedback/embed.js" data-endpoint="/__feedback"></script></body></html>');
+  expect(injectWidget('<p>x', 'bottom-right')).toContain('data-position="bottom-right"');
 });

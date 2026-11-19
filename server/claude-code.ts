@@ -1,9 +1,12 @@
 // Claude Code bridge: one inbox thread per Claude Code session.
 // Hooks mirror the session into its thread (your terminal prompts as you, Claude's turn-end replies as an agent named after the folder),
 // and `wait`, run as an asyncRewake Stop hook, wakes the session when you write in that thread from the inbox.
-import { appendFile, mkdir, rm, stat } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+// With FEEDBACK_PROJECTS (page origin → folder), a capture taken on a project's page goes to a session working in that folder:
+// the first waiting one claims it, is woken with it, and its reply goes to the capture's thread.
+import { appendFile, mkdir, open, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import * as store from './store';
 
 // client_id prefix of prompts mirrored from the terminal: the session already has them, so they never wake it
@@ -11,12 +14,17 @@ export const MIRROR = 'cc-';
 const SESSION = /^[A-Za-z0-9_-]{1,100}$/;
 const MAX_WAKE = 8000;
 
-export interface Session { session_id: string; thread: string; name: string; cwd: string; seen_at: string; next_flag?: store.Flag; aside?: string; ended?: boolean }
+// `seen`: per thread the session follows (its own and the captures it claimed), the newest message of yours it was woken with.
+// `reply`: where this turn's final message goes (a claimed capture, or a side question), set when the session is woken.
+export interface Session { session_id: string; thread: string; name: string; cwd: string; seen: Record<string, string>; next_flag?: store.Flag; reply?: { thread: string; aside?: string }; ended?: boolean }
 export interface HookInput { session_id?: unknown; cwd?: unknown; prompt?: unknown; last_assistant_message?: unknown; reason?: unknown }
+export type Projects = Record<string, string>;
 
-const sessionDir = (dir: string, id: string) => join(dir, '_claude', id);
+const claudeDir = (dir: string) => join(dir, '_claude');
+const sessionDir = (dir: string, id: string) => join(claudeDir(dir), id);
 const sessionFile = (dir: string, id: string) => join(sessionDir(dir, id), 'session.json');
 const pidFile = (dir: string, id: string) => join(sessionDir(dir, id), 'waiter.pid');
+const claimFile = (dir: string, thread: string) => join(claudeDir(dir), 'claims', thread);
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 export function checkSession(id: unknown): string {
@@ -36,6 +44,26 @@ async function updateSession<T>(dir: string, id: string, fn: (s: Session) => T):
     await store.writeAtomic(sessionFile(dir, id), JSON.stringify(s, null, 2));
     return out;
   });
+}
+
+// FEEDBACK_PROJECTS: a JSON file mapping a page origin to the folder whose sessions handle its captures.
+export function loadProjects(env: Record<string, string | undefined> = process.env): Projects {
+  const file = env.FEEDBACK_PROJECTS?.trim();
+  if (!file) return {};
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(raw).flatMap(([origin, folder]) => {
+      try { return typeof folder === 'string' ? [[new URL(origin).origin, resolve(folder)]] : []; } catch { return []; }
+    }));
+  } catch { return {}; }
+}
+// Whether a capture taken on `url` belongs to a session working in `cwd` (the project folder or anywhere inside it).
+export function ownsCapture(projects: Projects, cwd: string, url: unknown): boolean {
+  if (typeof url !== 'string') return false;
+  let origin: string;
+  try { origin = new URL(url).origin; } catch { return false; }
+  const folder = projects[origin];
+  return !!folder && (resolve(cwd) === folder || resolve(cwd).startsWith(`${folder}/`));
 }
 
 // The folder name names the agent; one that is reserved or too long falls back to "Claude".
@@ -76,43 +104,63 @@ async function ensure(dir: string, input: HookInput, first?: string): Promise<{ 
     ? await store.createThread(dir, { title: titleOf(first), text: first, origin: 'user' })
     : await store.createThread(dir, { title: `${name} session`, text: `Claude Code session in ${cwd}`, origin: 'agent', agent_name: name, flag: 'fyi' });
   await setContext(dir, thread, { url: `/claude/${slug(name)}`, cwd, session: id });
-  const session: Session = { session_id: id, thread, name, cwd, seen_at: new Date().toISOString() };
+  const session: Session = { session_id: id, thread, name, cwd, seen: { [thread]: new Date().toISOString() } };
   await mkdir(sessionDir(dir, id), { recursive: true });
   await store.writeAtomic(sessionFile(dir, id), JSON.stringify(session, null, 2));
   return { session, created: true };
 }
 
-// UserPromptSubmit: your terminal prompt goes in as you, and the thread counts as read (you are at the terminal).
+// UserPromptSubmit: your terminal prompt goes in as you, the thread counts as read (you are at the terminal),
+// and the turn's reply goes back to the session's own thread.
 export async function onPrompt(dir: string, input: HookInput): Promise<void> {
   const text = clip(input.prompt);
   if (!text) return;
   const { session, created } = await ensure(dir, input, text);
   if (!created) await store.appendMessage(dir, session.thread, { author: 'user', text, client_id: mirrorId() });
   await store.markRead(dir, session.thread);
+  if (session.reply) await updateSession(dir, session.session_id, s => { delete s.reply; });
 }
-// Stop: Claude's final message goes in as the agent. It wants you (needs_you) unless `flag` said otherwise for this turn,
-// and it answers a side question when that is all the turn was woken for.
+// Stop: Claude's final message goes in as the agent, to the thread the session was woken from (its own by default).
+// It wants you (needs_you) unless `flag` said otherwise for this turn; a woken side question gets a side answer.
 export async function onStop(dir: string, input: HookInput): Promise<void> {
   const text = clip(input.last_assistant_message);
   if (!text) return;
   const { session } = await ensure(dir, input);
-  const turn = await updateSession(dir, session.session_id, s => { const t = { flag: s.next_flag, aside: s.aside }; delete s.next_flag; delete s.aside; s.ended = false; return t; });
-  const aside = turn?.aside;
-  await store.appendMessage(dir, session.thread, aside
-    ? { author: 'agent', agent_name: session.name, text, aside: true, reply_to: aside }
+  const turn = await updateSession(dir, session.session_id, s => { const t = { flag: s.next_flag, reply: s.reply }; delete s.next_flag; delete s.reply; s.ended = false; return t; });
+  const target = turn?.reply && await threadExists(dir, turn.reply.thread) ? turn.reply : { thread: session.thread };
+  await store.appendMessage(dir, target.thread, target.aside
+    ? { author: 'agent', agent_name: session.name, text, aside: true, reply_to: target.aside }
     : { author: 'agent', agent_name: session.name, text, flag: turn?.flag ?? 'needs_you' });
-  await store.markAgentRead(dir, session.thread, session.name);
+  await store.markAgentRead(dir, target.thread, session.name);
 }
-// SessionEnd: stop the waiter and close the thread with a note on how to pick it up again.
+// SessionEnd: stop the waiter, hand its captures back for the next session in the folder, and close the thread with a resume note.
 export async function onEnd(dir: string, input: HookInput): Promise<void> {
   const id = checkSession(input.session_id);
   await stopWaiter(dir, id);
   const session = await readSession(dir, id);
   if (!session || !(await threadExists(dir, session.thread))) return;
+  for (const t of Object.keys(session.seen ?? {})) if (t !== session.thread && (await store.optional(claimFile(dir, t)))?.trim() === id) await rm(claimFile(dir, t), { force: true });
   const reason = typeof input.reason === 'string' && input.reason ? ` (${input.reason})` : '';
   await store.appendMessage(dir, session.thread, { author: 'agent', agent_name: session.name, flag: 'done',
     text: `Session ended${reason}. Nothing reads this thread until it is resumed:\n\n\`cd ${session.cwd} && claude --resume ${id}\`` });
-  await updateSession(dir, id, s => { s.ended = true; });
+  await updateSession(dir, id, s => { s.ended = true; s.seen = { [s.thread]: s.seen?.[s.thread] ?? new Date().toISOString() }; });
+}
+
+// ---- Captures
+// Claim a capture for a session: the first claim wins, so two sessions in one folder never both take it.
+async function claim(dir: string, thread: string, id: string): Promise<boolean> {
+  await mkdir(join(claudeDir(dir), 'claims'), { recursive: true });
+  try { await writeFile(claimFile(dir, thread), id, { flag: 'wx' }); } catch { return (await store.optional(claimFile(dir, thread)))?.trim() === id; }
+  await updateSession(dir, id, s => { s.seen[thread] ??= ''; });
+  return true;
+}
+// A capture thread (not a conversation) of this session's project, still waiting on the agent.
+async function claimable(dir: string, thread: string, session: Session, projects: Projects): Promise<boolean> {
+  if (session.seen[thread] !== undefined || (await store.optional(claimFile(dir, thread))) !== null) return false;
+  try {
+    const item = await store.readItem(await store.itemDir(dir, thread));
+    return item.mode !== 'thread' && ownsCapture(projects, session.cwd, (item.context as { url?: unknown } | undefined)?.url);
+  } catch { return false; }
 }
 
 // ---- The waiter
@@ -128,54 +176,89 @@ export async function stopWaiter(dir: string, id: string): Promise<void> {
 }
 async function stillMine(dir: string, id: string): Promise<boolean> { return Number(await store.optional(pidFile(dir, id))) === process.pid; }
 
-// Messages you wrote in the inbox since the waiter last delivered, as the text Claude is woken with (null: nothing new).
-export async function unseen(dir: string, id: string): Promise<string | null> {
+// Messages you wrote in one thread the session follows since it was last woken from it, as the text to wake Claude with (null: nothing new).
+// It also records where the reply goes. One thread per wake, so the reply has one place to go; another thread's news wakes the next waiter.
+export async function unseen(dir: string, id: string, thread: string): Promise<string | null> {
   const session = await readSession(dir, id);
-  if (!session || !(await threadExists(dir, session.thread))) return null;
-  const path = await store.itemDir(dir, session.thread);
-  const messages = await store.readMessages(path, await store.readItem(path));
-  const fresh = messages.filter(m => m.author === 'user' && m.created_at > session.seen_at && !m.divider && !m.moved_to && !m.redacted && !m.client_id?.startsWith(MIRROR));
+  if (!session || session.seen?.[thread] === undefined || !(await threadExists(dir, thread))) return null;
+  const path = await store.itemDir(dir, thread);
+  const item = await store.readItem(path);
+  const messages = await store.readMessages(path, item);
+  const since = session.seen[thread]!;
+  const fresh = messages.filter(m => m.author === 'user' && m.created_at > since && !m.divider && !m.moved_to && !m.redacted && !m.client_id?.startsWith(MIRROR));
   if (!fresh.length) return null;
+  const last = fresh[fresh.length - 1]!;
+  const own = thread === session.thread;
+  const aside = fresh.every(m => m.aside) ? last.id : undefined;
+  await updateSession(dir, id, s => { s.seen[thread] = last.created_at; if (own && !aside) delete s.reply; else s.reply = { thread, ...(aside ? { aside } : {}) }; });
   const byId = new Map(messages.map(m => [m.id, m]));
-  const asides = fresh.every(m => m.aside);
-  await updateSession(dir, id, s => { s.seen_at = fresh[fresh.length - 1]!.created_at; if (asides) s.aside = fresh[fresh.length - 1]!.id; else delete s.aside; });
+  const capture = item.mode !== 'thread';
+  const files = capture ? ['annotated', 'image', 'context_image'].map(k => item[k]).filter((f): f is string => typeof f === 'string').map(f => join(path, f)) : [];
   const parts = fresh.map(m => {
     const quoted = m.reply_to ? byId.get(m.reply_to) : undefined;
-    const lines = [
+    return [
       `${m.aside ? 'Side question (/btw)' : m.answer ? 'Answer' : 'Message'} ${m.id}, ${m.created_at.slice(11, 16)} UTC:`,
       ...(quoted ? [`(quoting ${quoted.author} ${quoted.id}: ${quoted.text.split('\n')[0]!.slice(0, 120)})`] : []),
       m.text,
       ...m.images.map(f => `[image: ${join(path, f)}]`),
-    ];
-    return lines.join('\n');
+    ].join('\n');
   });
-  const body = `📬 You wrote in the inbox (thread ${session.thread}). Treat it as your next message from the user; your final reply goes back to the thread by itself.\n\n${parts.join('\n\n---\n\n')}`;
-  return body.length > MAX_WAKE ? `${body.slice(0, MAX_WAKE)}\n…(cut: read the rest with \`react-feedback read ${session.thread}\`)` : body;
+  const url = (item.context as { url?: unknown } | undefined)?.url;
+  const head = !capture
+    ? `📬 You wrote in the inbox (thread ${thread}${own ? '' : `, "${String(item.title ?? '')}"`}). Treat it as your next message from the user; your final reply goes back to that thread by itself.`
+    : `📬 Feedback capture from ${String(url)} (thread ${thread}, ${String(item.mode)} capture). Treat it as your next message from the user: fix what it asks in this project. Your final reply goes to that thread by itself.\nNote, page context and target: ${join(path, 'feedback.md')}\nScreenshots: ${files.join(', ')}`;
+  const body = `${head}\n\n${parts.join('\n\n---\n\n')}`;
+  return body.length > MAX_WAKE ? `${body.slice(0, MAX_WAKE)}\n…(cut: read the rest with \`inbox read ${thread}\`)` : body;
 }
 
-export interface WaitOptions { poll?: number; out?: (text: string) => void; orphaned?: () => boolean }
-// Runs until you write in the session's thread (prints it, returns 2 so asyncRewake wakes Claude), a newer waiter takes over,
-// or Claude Code goes away (both return 0, which wakes nobody). One waiter per session: starting one stops the last.
+async function readFrom(file: string, offset: number): Promise<{ lines: string[]; end: number }> {
+  let size = 0;
+  try { size = (await stat(file)).size; } catch { return { lines: [], end: 0 }; }
+  if (size <= offset) return { lines: [], end: size < offset ? size : offset };
+  const fh = await open(file, 'r');
+  try {
+    const buf = Buffer.alloc(size - offset);
+    await fh.read(buf, 0, buf.length, offset);
+    const text = buf.toString('utf8');
+    const cut = text.lastIndexOf('\n') + 1; // a line still being written waits for the next look
+    return { lines: text.slice(0, cut).split('\n').filter(Boolean), end: offset + Buffer.byteLength(text.slice(0, cut)) };
+  } finally { await fh.close(); }
+}
+
+export interface WaitOptions { poll?: number; out?: (text: string) => void; orphaned?: () => boolean; projects?: Projects }
+// Runs until you write in a thread the session follows, or a capture for its project arrives (prints it, returns 2 so asyncRewake wakes
+// Claude), a newer waiter takes over, or Claude Code goes away (both return 0, which wakes nobody). One waiter per session.
 export async function wait(dir: string, input: HookInput, options: WaitOptions = {}): Promise<number> {
   const id = checkSession(input.session_id);
   const poll = options.poll ?? 1000, out = options.out ?? (t => process.stderr.write(`${t}\n`));
   const orphaned = options.orphaned ?? (() => process.ppid === 1);
+  const projects = options.projects ?? loadProjects();
   let session = await readSession(dir, id);
   for (let i = 0; i < 20 && !session; i++) { await sleep(250); session = await readSession(dir, id); } // the Stop mirror may still be making the thread
   if (!session) return 0;
   await stopWaiter(dir, id);
   await store.writeAtomic(pidFile(dir, id), String(process.pid));
-  let path: string;
-  try { path = join(await store.itemDir(dir, session.thread), 'thread.jsonl'); } catch { return 0; }
-  let size = -1;
+  const events = join(dir, '_events.jsonl');
+  let offset = (await readFrom(events, Number.MAX_SAFE_INTEGER)).end; // from now: what came before is caught by the scan below
+  const wake = async (thread: string) => { const text = await unseen(dir, id, thread); if (!text) return false; await rm(pidFile(dir, id), { force: true }); out(text); return true; };
+  // Anything that arrived while no waiter ran: news in followed threads, then open captures for this project nobody has taken.
+  for (const t of Object.keys(session.seen ?? {})) if (await wake(t)) return 2;
+  if (Object.keys(projects).length) {
+    for (const t of (await store.listThreads(dir)).filter(t => t.mode !== 'thread' && t.status === 'open' && t.waiting === 'agent' && ownsCapture(projects, session!.cwd, t.url)).reverse()) {
+      if (await claimable(dir, t.id, session, projects) && await claim(dir, t.id, id) && await wake(t.id)) return 2;
+    }
+  }
   for (;;) {
     if (!(await stillMine(dir, id)) || orphaned()) return 0;
-    let now = -1;
-    try { now = (await stat(path)).size; } catch { /* moved or merged away */ }
-    if (now !== size) {
-      size = now;
-      const text = await unseen(dir, id);
-      if (text) { await rm(pidFile(dir, id), { force: true }); out(text); return 2; }
+    const { lines, end } = await readFrom(events, offset);
+    offset = end;
+    for (const line of lines) {
+      let e: { id?: unknown; author?: unknown; kind?: unknown };
+      try { e = JSON.parse(line); } catch { continue; }
+      if (e.author !== 'user' || typeof e.id !== 'string') continue;
+      session = (await readSession(dir, id)) ?? session;
+      if (session.seen?.[e.id] !== undefined) { if (await wake(e.id)) return 2; continue; }
+      if (e.kind === 'thread' && await claimable(dir, e.id, session, projects) && await claim(dir, e.id, id) && await wake(e.id)) return 2;
     }
     await sleep(poll);
   }
@@ -193,11 +276,11 @@ export async function runClaudeCode(argv: string[], dir: string, env: Record<str
     let input: HookInput;
     try { input = JSON.parse(await stdin()) as HookInput; } catch { return 0; }
     try {
-      if (command === 'wait') return await wait(dir, input);
+      if (command === 'wait') return await wait(dir, input, { projects: loadProjects(env) });
       await hook[command](dir, input);
     } catch (error) {
-      await mkdir(join(dir, '_claude'), { recursive: true }).catch(() => {});
-      await appendFile(join(dir, '_claude', 'errors.log'), `${new Date().toISOString()} ${command}: ${(error as Error).message}\n`).catch(() => {});
+      await mkdir(claudeDir(dir), { recursive: true }).catch(() => {});
+      await appendFile(join(claudeDir(dir), 'errors.log'), `${new Date().toISOString()} ${command}: ${(error as Error).message}\n`).catch(() => {});
     }
     return 0;
   }
