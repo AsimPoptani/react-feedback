@@ -1146,3 +1146,36 @@ export async function listThreads(dir: string, query?: string): Promise<Summary[
   }
   return out.sort((a, b) => b.last_message_at.localeCompare(a.last_message_at) || b.id.localeCompare(a.id));
 }
+
+// ---- Presence: when the user last had the inbox open and when each agent last did something. Timestamps only (no address, no browser, no thread).
+// One small file per writer in <dir>/_presence/, so two writers never overwrite each other: `user.json` and `agent[-<name>-<hash>].json`.
+export const PRESENCE_USER_GAP_MS = 60e3;
+export const PRESENCE_AGENT_GAP_MS = 5e3;
+const MAX_PRESENCE_AGENTS = 20;
+export interface Presence { user: { at: string } | null; agents: { name: string | null; at: string }[] }
+const presenceFile = (who: { agent: string | undefined } | 'user') => (who === 'user' ? 'user.json' : agentReadFile(who.agent).replace(/^agent-read/, 'agent'));
+// Records activity; written at most once per gap (a minute for the user). It never throws: presence is never a reason for a request to fail.
+export async function touchPresence(dir: string, who: { agent: string | undefined } | 'user', now: number = Date.now()): Promise<void> {
+  try {
+    const folder = join(dir, '_presence'), file = join(folder, presenceFile(who));
+    const gap = who === 'user' ? PRESENCE_USER_GAP_MS : PRESENCE_AGENT_GAP_MS;
+    try { const v = JSON.parse(await optional(file) ?? 'null'); if (isObject(v) && typeof v.at === 'string' && now - Date.parse(v.at) < gap && Date.parse(v.at) <= now) return; } catch { /* rewrite it */ }
+    await mkdir(folder, { recursive: true });
+    await writeAtomic(file, JSON.stringify({ ...(who !== 'user' && who.agent ? { name: who.agent } : {}), at: new Date(now).toISOString() }));
+  } catch { /* best effort */ }
+}
+export async function readPresence(dir: string): Promise<Presence> {
+  const out: Presence = { user: null, agents: [] };
+  let names: string[] = [];
+  try { names = await readdir(join(dir, '_presence')); } catch { return out; }
+  for (const name of names.filter(n => /^(user|agent(-[a-z0-9-]+)?)\.json$/.test(n)).slice(0, MAX_PRESENCE_AGENTS + 1)) {
+    try {
+      const v = JSON.parse(await optional(join(dir, '_presence', name)) ?? 'null');
+      if (!isObject(v) || typeof v.at !== 'string' || Number.isNaN(Date.parse(v.at))) continue;
+      if (name === 'user.json') out.user = { at: v.at };
+      else out.agents.push({ name: typeof v.name === 'string' && v.name && v.name.length <= MAX_NAME ? v.name : null, at: v.at });
+    } catch { /* skip a bad file */ }
+  }
+  out.agents.sort((a, b) => b.at.localeCompare(a.at));
+  return out;
+}

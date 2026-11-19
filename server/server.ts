@@ -165,7 +165,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -251,13 +251,15 @@ async function pinsRoute(req: Request, dir: string, path: string, read: (req: Re
   const data = await read(req);
   return json(await store.setPin(dir, { kind: data.kind, id: data.id, pinned: data.pinned }));
 }
-export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null }
+export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number }
 async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, areas: AreasConfig, options: HandlerOptions): Promise<Response | null> {
   const base = `${PREFIX}/api/threads`;
   const vaultDir = options.vaultDir !== undefined ? options.vaultDir : loadVaultDir();
   const secretTarget = options.secretTarget !== undefined ? options.secretTarget : loadSecretTarget();
   // What the inbox needs to know about this server. The key box is only drawn when a target is set; the Redact action only when a vault is.
   if (path === `${PREFIX}/api/config` && req.method === 'GET') return json({ secret_target: secretTarget, redact: !!vaultDir });
+  // When the user was last here and when each agent last acted: timestamps only.
+  if (path === `${PREFIX}/api/presence` && req.method === 'GET') return json(await store.readPresence(dir));
   const sensitive = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/messages\/([^/]+)\/(redact|secret)$/);
   if (sensitive && req.method === 'POST') {
     const [, tid, mid, what] = sensitive;
@@ -314,6 +316,8 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
   return async (req: Request): Promise<Response> => {
     try {
       const path = new URL(req.url).pathname;
+      // The user is here when the inbox page loads, polls or sends: the widget's own captures (api/items) and the health check do not count.
+      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas)(\/|$)/.test(path)) await store.touchPresence(dir, 'user', options.now?.());
       if (req.method === 'GET' && path === `${PREFIX}/healthz`) return json({ status: 'ok' });
       if (path === `${PREFIX}/api/items` && req.method === 'POST') return await create(dir, await body(req));
       if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dir);

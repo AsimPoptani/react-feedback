@@ -284,7 +284,7 @@ None of them fires on a done thread, and none fires twice within 15 minutes (a c
 
 How it fires: the server (`react-feedback serve`) checks every thread each 60 seconds (`FEEDBACK_REMINDERS=off` stops that), and the CLI and the MCP server check the thread after each agent reply. A fire is recorded under the thread's lock with its `last_fired_at`, so a restart, or two processes at once, never fire it twice; and after a restart nothing fires on a thread that has had no activity since. When `reply` posts on a thread with open agent items and no `--check` or `--todo`, it prints a hint on **stderr** (stdout is unchanged): "N open items here; tick any you shipped with --check cN".
 
-In the inbox: **Reminders** in the thread's ⋯ menu on a phone (a header button on a wide screen) opens a sheet that lists them, adds one (kind, value, text), removes one and switches the built-in one off. Read-only threads take reminders too, because they are for the agent. Over HTTP: `GET|POST api/threads/:id/reminders`, `POST …/reminders/default` (`{ "on": false }`), `DELETE …/reminders/:rid`; the thread detail carries `reminders_fired`.
+In the inbox: **Reminders** in the thread's ⋯ menu on a phone (a header button on a wide screen) opens a sheet that lists them, adds one (kind, value, text), removes one and switches the built-in one off. The sheet also keeps a **Fired** list with times; a fired reminder is not drawn in the thread itself. Read-only threads take reminders too, because they are for the agent. Over HTTP: `GET|POST api/threads/:id/reminders`, `POST …/reminders/default` (`{ "on": false }`), `DELETE …/reminders/:rid`; the thread detail carries `reminders_fired`.
 
 ## Connect your agents (MCP)
 
@@ -340,6 +340,14 @@ Type `/btw your question` in the inbox composer (or press **B**, or use the **Si
 - **CLI:** `reply <id> "text" --aside --to <aside-id>`; `list --waiting` marks threads with a side question waiting; `read` prints each aside indented under "Side question".
 - A side answer takes no flag, and neither side can put a question or a quote in an aside. A merge keeps asides and their links.
 
+## Last seen
+
+The thread header shows a quiet line: each agent's last activity ("Agent · active 2 min ago") and the user's last visit ("You · last seen 10:42"). Under an hour it is relative; after that it is the time, in the viewer's local zone. With no data the line is hidden. It shows on read-only threads too.
+
+- **Agent:** its latest action through the CLI or the MCP server (any command or tool call: a reply, read, ack, tick, move, merge, a reminder change, a list), kept per agent name. Written at most every 5 seconds.
+- **User:** the latest inbox page activity (page load, poll or a message sent), written at most once a minute.
+- **Where:** one small file per writer in `<FEEDBACK_DIR>/_presence/`, timestamps and the agent name only (no address, browser or thread). `GET api/presence` returns `{ user: { at } | null, agents: [{ name, at }] }`. `react-feedback list` and `read` print the lines after their output, and the MCP `list_threads` and `read_thread` return `presence`.
+
 ## Checklist items on replies
 
 `reply <id> "text" --todo "item" [--todo "…"] [--for agent|user]` adds checklist items as part of the message (default: the agent's own list); `--check c3 [--check c4]` ticks items. The message stores `added_items` and `ticked_items`, and the inbox shows "Added to checklist" / "Ticked" lists inside the bubble, each item jumping to its row in the panel. Over HTTP a user message may carry `todo` (a list of texts) and `for`; `check` is refused with 403 because only the agent ticks. The whole message is checked first: nothing is written if an id or a text is wrong. Read-only threads still refuse the user's items.
@@ -393,7 +401,7 @@ At 760 px and narrower the thread view is one slim header (← title, the checkl
 
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config`; `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
+All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config`; `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
@@ -410,6 +418,7 @@ bun run test        # vitest (widget and the inbox page in happy-dom) and bun te
 bun run test:e2e    # optional browser smoke test (needs Playwright and a built dist/)
 bun e2e/rf6.mjs     # optional browser test: phone layout, key box, redaction, offline sending (same needs)
 bun e2e/rf7.mjs     # optional browser test: thread reminders and agent names (same needs)
+bun e2e/rf8.mjs     # optional browser test: reminders only in the sheet, last seen in the header (same needs)
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

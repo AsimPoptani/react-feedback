@@ -150,7 +150,7 @@ test('status is open or done, the inbox shows who is waiting, newest activity so
   expect(await run(['list', '--unread'], dir)).toBe(out); // old flag, same list
   expect(out).toContain(a.id); expect(out).toContain(b.id);
   await run(['reply', b.id, 'done here'], dir); await run(['status', a.id, 'done'], dir);
-  expect(await run(['list', '--waiting'], dir)).toBe('Nothing is waiting for the agent.');
+  expect((await run(['list', '--waiting'], dir)).split('\n')[0]).toBe('Nothing is waiting for the agent.');
   await run(['status', a.id, 'seen'], dir); // an alias for open
   expect((await store.listThreads(dir)).find(t => t.id === a.id)!.status).toBe('open');
   await writeFile(join(dir, a.id, 'status.json'), JSON.stringify({ status: 'seen' })); // old stored values migrate on read

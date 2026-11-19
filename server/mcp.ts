@@ -92,13 +92,13 @@ export function createMcpServer(options: McpOptions): McpServer {
   const dir = resolve(options.dir);
   const agent = store.checkAgentName(options.agentName);
   const areas = options.areas ?? loadAreas(env);
-  const server = new McpServer({ name: 'react-feedback', version: '0.8.0' }, { instructions: `The user's feedback inbox. ${NOTICE} You post as "${agent ?? 'the inbox agent'}".` });
+  const server = new McpServer({ name: 'react-feedback', version: '0.8.1' }, { instructions: `The user's feedback inbox. ${NOTICE} You post as "${agent ?? 'the inbox agent'}".` });
   const say = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify({ notice: NOTICE, ...(value as object) }) }], structuredContent: { notice: NOTICE, ...(value as object) } });
   const fail = (error: unknown) => ({ isError: true as const, content: [{ type: 'text' as const, text: error instanceof store.Invalid ? error.message : error instanceof Error && /Could not lock/.test(error.message) ? 'The thread is busy; try again' : 'Storage error' }] });
   // Registers one tool whose handler may throw: a store refusal is returned to the model as a tool error.
   const tool = <S extends z.ZodRawShape>(name: string, description: string, inputSchema: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<unknown>, readOnly = false) =>
     server.registerTool(name, { description: `${description} ${NOTICE}`, inputSchema, annotations: { readOnlyHint: readOnly, openWorldHint: false } },
-      (async (args: z.infer<z.ZodObject<S>>) => { try { return say(await handler(args)); } catch (error) { return fail(error); } }) as never);
+      (async (args: z.infer<z.ZodObject<S>>) => { try { await store.touchPresence(dir, { agent }); return say(await handler(args)); } catch (error) { return fail(error); } }) as never);
   const thread = z.string().describe('Thread id, like 20261118-163556-0dac');
   const text = z.string().min(1).max(store.MAX_TEXT);
   const flags = { fyi: z.boolean().optional(), needs_you: z.boolean().optional(), done: z.boolean().optional() };
@@ -107,12 +107,12 @@ export function createMcpServer(options: McpOptions): McpServer {
 
   tool('list_threads', 'List the inbox threads, newest first.', { waiting: z.boolean().optional().describe('Only threads waiting for the agent'), area: z.string().optional().describe('Only this area key (for example "conversations")'), q: z.string().optional().describe('Words in the title or any message') }, async a => {
     const rows = (await store.listThreads(dir, a.q)).filter(t => !a.waiting || t.waiting === 'agent' || t.waiting_aside).filter(t => !a.area || areaOf({ mode: t.mode, url: t.url }, areas).area === a.area);
-    return { threads: rows.map(shapeSummary) };
+    return { threads: rows.map(shapeSummary), presence: await store.readPresence(dir) };
   }, true);
   tool('read_thread', 'Read a thread and mark it read for you (this agent only).', { id: thread }, async a => {
     await store.markAgentRead(dir, a.id, agent);
     const { summary, messages, path } = await store.summarise(dir, a.id);
-    return { thread: shapeSummary(summary), messages: messages.map(shapeMessage), checklist: (await store.readChecklist(path)).map(shapeItem), acked_through: summary.acked_through };
+    return { thread: shapeSummary(summary), messages: messages.map(shapeMessage), checklist: (await store.readChecklist(path)).map(shapeItem), acked_through: summary.acked_through, presence: await store.readPresence(dir) };
   });
   tool('reply', 'Post a reply on a thread. Optionally quote a message (to), flag it (fyi, needs_you or done), add checklist items (todo, for "agent" by default) and tick items (check, like "c3"). aside: true answers a side question and needs to.', {
     id: thread, text, to: z.string().optional().describe('Id of a message in this thread to quote (or the side question to answer)'), ...flags,

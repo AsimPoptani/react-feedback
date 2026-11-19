@@ -36,6 +36,7 @@ import { loadAreas, loadVaultDir } from './config';
 import { redactMessage, unredactMessage } from './sensitive';
 import type { AreasConfig } from './inbox/areas.js';
 import * as reminders from './reminders';
+import { presenceLines } from './inbox/presence.js';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
@@ -186,16 +187,23 @@ export function transcript(messages: store.Message[], names: Record<store.Author
   }
   return out.join('\n');
 }
+// The presence lines for the agent: "Claude · active 2 min ago" for each agent and "You · last seen 2026-11-19 10:42 UTC" (UTC, since a terminal has no viewer zone).
+const utc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+export async function presenceText(dir: string, now = Date.now()): Promise<string> {
+  return presenceLines(await store.readPresence(dir), now, { agentName: (await store.readProfile(dir)).agent.name, clock: utc }).map(l => l.text).join('\n');
+}
 async function list(dir: string, waiting: boolean): Promise<string> {
   const rows = (await store.listThreads(dir)).filter(t => !waiting || t.waiting === 'agent' || t.waiting_aside);
-  if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
-  return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}${t.waiting_aside ? '  [side question waiting]' : ''}`).join('\n');
+  const seen = await presenceText(dir), tail = seen ? `\n\n${seen}` : ''; // after the rows, so a script reading the rows is not disturbed
+  if (!rows.length) return (waiting ? 'Nothing is waiting for the agent.' : 'No threads.') + tail;
+  return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}${t.waiting_aside ? '  [side question waiting]' : ''}`).join('\n') + tail;
 }
 // `notice` receives hints that are advice, not results: they go to stderr, so a wrapper that reads the command's output is not affected.
 export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig, env: Record<string, string | undefined> = process.env, notice: (line: string) => void = line => { process.stderr.write(`${line}\n`); }): Promise<string> {
   const [command, ...rest] = argv;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
   const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
+  await store.touchPresence(dir, { agent: undefined }); // any command is the agent being here
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
     const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
@@ -250,7 +258,8 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   if (command === 'read' && words.length === 1) {
     await store.markAgentRead(dir, words[0]!);
     const { messages, summary, path } = await store.summarise(dir, words[0]!);
-    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through })}` : ''}`;
+    const seen = await presenceText(dir);
+    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through })}` : ''}${seen ? `\n\n${seen}` : ''}`;
   }
   if (command === 'ask' && words.length === 2) {
     const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags), flag: flagOf(flags), reply_to: to ?? undefined });

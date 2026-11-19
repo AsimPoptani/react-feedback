@@ -33,7 +33,7 @@ try {
   const phone = await (await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })).newPage();
   const errors = []; phone.on('pageerror', e => errors.push(String(e)));
   await phone.goto(base + id); await phone.waitForSelector('#msgs .msg'); await phone.waitForTimeout(500);
-  check('phone: the fired reminder is a muted line in the thread', (await phone.locator('.sysline').innerText()).startsWith('⏰ Reminder to the agent: Is the checklist up to date?'));
+  check('phone: a fired reminder is not drawn in the thread', await phone.locator('.sysline, [data-reminder]').count() === 0 && !(await phone.locator('#msgs').innerText()).includes('Reminder to the agent'));
   const names = await phone.locator('.msg.agent .who strong').allInnerTexts();
   check('phone: agents show their own names', names.join('|').includes('Codex') && names.join('|').includes('Claude Desktop'));
   const colours = await phone.locator('.msg.agent .who .avatar').evaluateAll(a => a.map(x => getComputedStyle(x).backgroundColor));
@@ -44,6 +44,7 @@ try {
   await phone.locator('#popmenu button', { hasText: 'Reminders' }).tap();
   await phone.waitForSelector('#remind-dialog[open]');
   check('phone: the sheet lists the built-in reminder as on', await phone.locator('#remind-default').isChecked());
+  check('phone: the sheet lists the fired reminder with its time', (await phone.locator('#remind-fired').innerText()).includes('Is the checklist up to date?') && await phone.locator('#remind-fired time').count() === 1);
   await shot(phone, 'reminders-sheet-390');
   await phone.selectOption('#remind-kind', 'every');
   await phone.fill('#remind-value', '2h');

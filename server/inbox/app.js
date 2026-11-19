@@ -7,6 +7,7 @@ import { ageOf, filterRows, stateOf } from './tracker.js';
 import { firstPlainLine, inline, markdown, plainText } from './markdown.js';
 import { secretStatusLine, secretUrl } from './secret.js';
 import { createOutbox, newCid } from './outbox.js';
+import { presenceLines } from './presence.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const POLL_MS = 10000;
@@ -595,20 +596,16 @@ function asideNode(d, g) {
   return node;
 }
 // Main messages in thread order, with each side question (and its answers) at the place it was asked.
-// A reminder that fired: a small muted line for the user to see; it was sent to the agent only (never a notification, never unread).
-const reminderLine = f => el('div', { class: 'sysline', role: 'note', 'data-reminder': f.id }, el('span', { 'aria-hidden': 'true', text: '⏰ ' }), el('span', { text: 'Reminder to the agent: ' }), el('span', { class: 'say', text: f.text }), ' ', el('time', { datetime: f.at, text: when(f.at) }));
 function threadNodes(d) {
   const groups = asideGroups(d.messages, d.acked_through || null);
   const grouped = new Set(groups.flatMap(g => [g.root.id, ...g.answers.map(a => a.id)]));
-  const fired = [...(d.reminders_fired || [])].sort((a, b) => a.at.localeCompare(b.at));
-  const lines = at => { const out = []; while (fired.length && (at === null || fired[0].at <= at)) out.push(reminderLine(fired.shift())); return out; };
+  // A fired reminder was for the agent, so it is not drawn here: its history is in the Reminders sheet.
   return d.messages.flatMap(m => {
-    const before = lines(m.created_at);
     const g = groups.find(x => x.root.id === m.id);
-    if (g) return [...before, asideNode(d, g)];
-    if (isAside(m) && !grouped.has(m.id)) return before; // an answer whose question is gone
-    return [...before, messageNode(d, m)];
-  }).concat(lines(null), queuedNodes(d));
+    if (g) return [asideNode(d, g)];
+    if (isAside(m) && !grouped.has(m.id)) return []; // an answer whose question is gone
+    return [messageNode(d, m)];
+  }).concat(queuedNodes(d));
 }
 // Messages written offline (or still sending) show at the end of the thread, with a clock until the server has them.
 const clockIcon = () => svg('svg', { viewBox: '0 0 24 24', width: 14, height: 14, 'aria-hidden': 'true', class: 'clock' }, svg('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }), svg('path', { d: 'M12 7v5l3 2', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round' }));
@@ -634,7 +631,7 @@ function queuedNode(d, e) {
 function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, (d.reminders_fired || []).map(f => f.at + f.id), d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '')),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
@@ -890,8 +887,13 @@ async function drawReminders() {
   const v = await api(`threads/${remindFor}/reminders`);
   $('remind-default').checked = v.default.on; $('remind-default').disabled = v.default.global_off;
   $('remind-default-note').textContent = v.default.global_off ? 'Turned off for the whole server.' : 'When the agent has open items: after 3 replies with no tick, or every 6 hours of activity.';
+  drawFired(v);
   $('remind-list').replaceChildren(...(v.items.length ? v.items.map(r => el('li', {}, el('span', { class: 'what' }, el('strong', { text: kindText(r) }), el('small', { text: r.say })),
     el('button', { type: 'button', 'aria-label': `Remove the reminder: ${r.say}`, onclick: () => removeReminder(r.id) }, 'Remove'))) : [el('li', { class: 'hint', text: 'No reminders of your own on this thread.' })]));
+}
+function drawFired(v) {
+  const list = [...(v.fired || [])].sort((a, b) => b.at.localeCompare(a.at));
+  $('remind-fired').replaceChildren(...(list.length ? list.map(f => el('li', { 'data-fired': f.id }, el('span', { class: 'what' }, el('small', { text: f.text })), el('time', { datetime: f.at, text: when(f.at) }))) : [el('li', { class: 'hint', text: 'None yet.' })]));
 }
 async function openReminders() {
   const d = state.detail; if (!d) return;
@@ -1377,9 +1379,21 @@ $('avatar-file').addEventListener('change', async e => {
 });
 document.addEventListener('keydown', onKey);
 window.addEventListener('hashchange', route);
+// "Claude · active 2 min ago" and "You · last seen 10:42": quiet, and gone when there is no data. The time after an hour is in this browser's zone.
+const clockText = (iso, now) => { const d = new Date(iso), t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toDateString() === new Date(now).toDateString() ? t : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${t}`; };
+function drawPresence() {
+  const lines = presenceLines(state.presence, Date.now(), { agentName: state.profile.agent.name, clock: clockText });
+  const box = $('presence');
+  box.hidden = !lines.length;
+  box.replaceChildren(...lines.flatMap((l, i) => [...(i ? [el('span', { 'aria-hidden': 'true', text: ' · ' })] : []), el('span', { class: `pres ${l.who}`, 'data-who': l.who, text: l.text })]));
+}
+async function refreshPresence() {
+  try { state.presence = await api('presence'); } catch { /* keep the last one */ }
+  drawPresence();
+}
 async function poll() {
   if (document.visibilityState !== 'visible') return;
-  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig()]);
+  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig(), refreshPresence()]);
   if (state.openId) await loadThread(state.openId, { quiet: true });
   if (state.metricsOn) await loadMetrics();
   if (state.trackerOn) await loadTracker();
@@ -1389,4 +1403,4 @@ document.addEventListener('visibilitychange', poll);
 drawMe();
 refreshPins();
 fitViewport(); drawOffline(); outbox.start();
-Promise.all([refreshProfile(), refreshAreas(), refreshConfig()]).then(refreshList).then(route);
+Promise.all([refreshProfile(), refreshAreas(), refreshConfig()]).then(refreshList).then(route).then(refreshPresence);
