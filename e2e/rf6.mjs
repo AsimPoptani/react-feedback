@@ -79,9 +79,9 @@ try {
   // ---- the key box
   const box = phone.locator('.secret input');
   await box.scrollIntoViewIfNeeded();
-  check('key box: a password field with autocomplete off', await box.getAttribute('type') === 'password' && await box.getAttribute('autocomplete') === 'off');
+  check('key box: a password field with autocomplete off', await box.getAttribute('type') === 'password' && await box.getAttribute('autocomplete') === 'off' && (await phone.locator('.secret form').count()) === 0);
   await shot(phone, 'key-box-390');
-  await box.fill(SECRET); await phone.locator('.secret button[type=submit]').tap();
+  await box.fill(SECRET); await phone.locator('.secret button.primary').tap();
   await phone.waitForSelector('.secret-ok');
   check('key box: shows "Saved ✓ · ends …WXYZ"', (await phone.locator('.secret-ok').innerText()) === 'Saved ✓ · ends …WXYZ');
   check('key box: the app got the value, once', seen.length === 1 && seen[0] === SECRET);

@@ -46,7 +46,7 @@ export interface Message { id: string; author: Author; text: string; images: str
   kind?: 'secret_request'; secret?: SecretRequest; redacted?: Redaction;
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
   client_id?: string; written_at?: string }
-export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string }
+export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string; check?: 'works' | 'rejected' }
 export interface Redaction { at: string; by: Author; reason?: string; key: string }
 export const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
 export const SECRET_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -130,6 +130,22 @@ export function newId(now = new Date()): string {
   const stamp = now.toISOString().slice(0, 19).replace(/[-:T]/g, '').replace(/^(\d{8})(\d{6})$/, '$1-$2');
   return `${stamp}-${randomBytes(2).toString('hex')}`;
 }
+// feedback.md of a capture: the note first, then the mode, target and context. Rebuilt when a redaction blanks the note.
+export function captureSummary(item: ItemData): string {
+  const context = item.context as ItemData;
+  const target = item.target as ItemData | undefined;
+  const lines = [String(item.note), '', `Mode: ${item.mode}`];
+  if (target?.selector) lines.push(`Selector: \`${target.selector}\``, `Components: ${Array.isArray(target.components) ? target.components.join(' < ') : ''}`);
+  if (target?.rect) lines.push(`Rect: ${JSON.stringify(target.rect)}`);
+  if (item.mode === 'page' && target) lines.push(`Page size: ${target.width} × ${target.height}`);
+  lines.push(`URL: ${context.url ?? ''}`, `Viewport: ${JSON.stringify(context.viewport)}`, '');
+  const logs = context.console;
+  if (Array.isArray(logs) && logs.length) lines.push('Console:', ...logs.map(log => `- ${log.level}: ${log.message}`), '');
+  const fetches = context.failedFetches;
+  if (Array.isArray(fetches) && fetches.length) lines.push('Failed fetches:', ...fetches.map(request => `- ${request.method} ${request.url}: ${request.status ?? request.error}`), '');
+  for (const key of ['image', 'annotated', 'context_image']) if (item[key]) lines.push(`[${key}](${item[key]})`);
+  return `${lines.join('\n')}\n`;
+}
 export async function makeItemFolder(dir: string): Promise<{ id: string; path: string; created_at: string }> {
   await mkdir(dir, { recursive: true });
   const now = new Date();
@@ -201,7 +217,7 @@ function parseSecret(m: ItemData): SecretRequest | undefined {
   const s = m.secret;
   if (m.kind !== 'secret_request' || !isObject(s) || typeof s.name !== 'string' || !SECRET_NAME.test(s.name) || typeof s.label !== 'string') return undefined;
   return { name: s.name, label: s.label, ...(typeof s.help_url === 'string' && /^https:\/\//.test(s.help_url) ? { help_url: s.help_url } : {}),
-    ...(s.status === 'saved' ? { status: 'saved' as const, ...(typeof s.hint === 'string' && s.hint.length <= MAX_HINT ? { hint: s.hint } : {}), ...(typeof s.saved_at === 'string' ? { saved_at: s.saved_at } : {}) } : {}) };
+    ...(s.status === 'saved' ? { status: 'saved' as const, ...(typeof s.hint === 'string' && s.hint.length <= MAX_HINT ? { hint: s.hint } : {}), ...(typeof s.saved_at === 'string' ? { saved_at: s.saved_at } : {}), ...(s.check === 'works' || s.check === 'rejected' ? { check: s.check } : {}) } : {}) };
 }
 function parseRedaction(r: unknown): Redaction | undefined {
   if (!isObject(r) || typeof r.at !== 'string' || (r.by !== 'user' && r.by !== 'agent') || typeof r.key !== 'string') return undefined;

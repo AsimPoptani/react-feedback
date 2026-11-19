@@ -47,7 +47,7 @@ async function load(thr: Thread, cfg: unknown = { secret_target: '/api/keys/{nam
       const a = postAnswer(call);
       if (a === 'network') throw new TypeError('Failed to fetch');
       if (a.status < 300 && /\/messages$/.test(path)) { const b = JSON.parse(call.body); if (!t.messages.some((x: { client_id?: string }) => x.client_id === b.client_id)) t.messages.push(m(`m${t.messages.length + 1}`, 'user', b.text, 20 + t.messages.length, { client_id: b.client_id, images: [], ...(b.reply_to ? { reply_to: b.reply_to } : {}) })); }
-      if (a.status < 300 && /\/secret$/.test(path)) { const b = JSON.parse(call.body), k = (t.messages as { id: string; secret?: Record<string, unknown>; flag?: string }[]).find(x => x.secret); if (k) { k.secret = { ...k.secret, status: 'saved', hint: b.hint }; k.flag = 'fyi'; } }
+      if (a.status < 300 && /\/secret$/.test(path)) { const b = JSON.parse(call.body), k = (t.messages as { id: string; secret?: Record<string, unknown>; flag?: string }[]).find(x => x.secret); if (k) { k.secret = { ...k.secret, status: 'saved', hint: b.hint, ...(b.check ? { check: b.check } : {}) }; k.flag = 'fyi'; } }
       return json(a.status, a.body ?? {});
     }
     if (!online) throw new TypeError('Failed to fetch');
@@ -76,7 +76,7 @@ describe('the key box', () => {
     const input = document.querySelector<HTMLInputElement>('.secret input')!;
     expect(input.type).toBe('password'); expect(input.getAttribute('autocomplete')).toBe('off');
     expect(input.getAttribute('name')).toBeNull();
-    expect(document.querySelector('.secret button[type=submit]')!.textContent).toBe('Save');
+    expect(document.querySelector('.secret button.primary')!.textContent).toBe('Save');
     const a = document.querySelector<HTMLAnchorElement>('.secret a')!;
     expect(a.href).toBe('https://openrouter.ai/keys'); expect(a.rel).toContain('noopener');
   });
@@ -91,7 +91,7 @@ describe('the key box', () => {
     await load(thread(base()));
     const input = document.querySelector<HTMLInputElement>('.secret input')!;
     input.value = SECRET;
-    document.querySelector<HTMLFormElement>('.secret form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    document.querySelector<HTMLButtonElement>('.secret button.primary')!.click();
     await vi.waitFor(() => expect(document.querySelector('.secret-ok')?.textContent).toBe('Saved ✓ · ends …abcd'));
     const withValue = calls.filter(c => c.body.includes(SECRET) || c.url.includes(SECRET));
     expect(withValue.length).toBe(1);
@@ -109,7 +109,7 @@ describe('the key box', () => {
     await load(thread(base()));
     keyAnswer = () => ({ ok: false, status: 422, body: { detail: 'That does not look like an OpenRouter key.' } });
     const input = document.querySelector<HTMLInputElement>('.secret input')!;
-    input.value = 'not-a-key-value'; document.querySelector<HTMLFormElement>('.secret form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    input.value = 'not-a-key-value'; document.querySelector<HTMLButtonElement>('.secret button.primary')!.click();
     await vi.waitFor(() => expect(document.querySelector('.secret .error')?.textContent).toContain('does not look like'));
     expect(document.querySelector<HTMLInputElement>('.secret input')!.value).toBe('not-a-key-value');
     expect(calls.some(c => c.url.endsWith('/secret'))).toBe(false);
@@ -119,7 +119,7 @@ describe('the key box', () => {
     for (const bad of ['https://evil.example/{name}', '//evil.example/{name}']) {
       await load(thread(base()), { secret_target: bad, redact: false });
       const input = document.querySelector<HTMLInputElement>('.secret input')!;
-      input.value = SECRET; document.querySelector<HTMLFormElement>('.secret form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      input.value = SECRET; document.querySelector<HTMLButtonElement>('.secret button.primary')!.click();
       await vi.waitFor(() => expect(document.querySelector('.secret .error')?.textContent).toContain('set up correctly'));
       expect(calls.some(c => c.body.includes(SECRET))).toBe(false);
     }
@@ -130,10 +130,30 @@ describe('the key box', () => {
     setOnline(false); window.dispatchEvent(new Event('offline')); await flush();
     expect(document.querySelector('.secret')!.textContent).toContain('Connect to save this key');
     const input = document.querySelector<HTMLInputElement>('.secret input')!;
-    expect(input.disabled).toBe(true); expect(document.querySelector<HTMLButtonElement>('.secret button[type=submit]')!.disabled).toBe(true);
-    input.value = SECRET; document.querySelector<HTMLFormElement>('.secret form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); await flush();
+    expect(input.disabled).toBe(true); expect(document.querySelector<HTMLButtonElement>('.secret button.primary')!.disabled).toBe(true);
+    input.value = SECRET; document.querySelector<HTMLButtonElement>('.secret button.primary')!.click(); await flush();
     expect(calls.some(c => c.method === 'PUT' || c.body.includes(SECRET))).toBe(false);
     expect(document.querySelector('[data-queued]')).toBeNull();
+  });
+
+  it('shows which key slot it fills, has no form (so no "Save password?" offer), and Enter saves', async () => {
+    await load(thread(base()));
+    expect(document.querySelector('.secret form')).toBeNull();
+    expect(document.querySelector('.secret label')!.textContent).toBe('OpenRouter API key → openrouter');
+    const input = document.querySelector<HTMLInputElement>('.secret input')!;
+    expect(input.getAttribute('autocomplete')).toBe('off'); expect(input.type).toBe('password');
+    input.value = SECRET; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(document.querySelector('.secret-ok')?.textContent).toBe('Saved ✓ · ends …abcd'));
+  });
+
+  it('when the app says the provider rejected the key, it does not claim "Saved ✓"', async () => {
+    await load(thread(base()));
+    keyAnswer = () => ({ ok: true, status: 200, body: { hint: '…abcd', check: 'rejected' } });
+    const input = document.querySelector<HTMLInputElement>('.secret input')!; input.value = SECRET;
+    document.querySelector<HTMLButtonElement>('.secret button.primary')!.click();
+    await vi.waitFor(() => expect(document.querySelector('.secret-ok')?.textContent).toBe('Saved, but the provider rejected it · ends …abcd'));
+    expect(document.querySelector('.secret-ok')!.classList.contains('rejected')).toBe(true);
+    expect(JSON.parse(calls.find(c => c.url.endsWith('/messages/m2/secret'))!.body)).toEqual({ status: 'saved', hint: '…abcd', check: 'rejected' });
   });
 
   it('a half-typed key survives the thread being redrawn', async () => {
@@ -248,6 +268,20 @@ describe('offline sending', () => {
     await vi.waitFor(() => expect(sentPosts().length).toBeGreaterThanOrEqual(1));
     await flush(); await flush();
     expect(new Set(sentPosts().map(p => p.text))).toEqual(new Set(['one'])); // two has not been tried while one is waiting
+  });
+
+  it('after a server restart (no online event) the queue sends by itself once the server answers again', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    await load(thread(base()));
+    postAnswer = () => 'network'; // the server is down: the send fails on the network and the inbox goes offline-aware
+    await compose('sent during the restart');
+    await vi.waitFor(() => expect(document.querySelector('[data-queued]')).not.toBeNull());
+    expect($('offline-banner').textContent).toContain('Offline');
+    postAnswer = () => ({ status: 201, body: {} }); // the server is back; nothing fires 'online' (the tab never lost its network)
+    vi.advanceTimersByTime(10000); // the next poll succeeds
+    await vi.waitFor(() => expect(sentPosts().length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(document.querySelector('[data-queued]')).toBeNull());
+    expect($('offline-banner').hidden).toBe(true);
   });
 
   it('a queued message can be deleted before it sends', async () => {

@@ -44,7 +44,7 @@ const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Typ
 const fileUrl = (id, name) => `${API}items/${id}/${name}`;
 const noop = () => {};
 const isOffline = () => state.offline || navigator.onLine === false;
-function setOffline(value) { if (state.offline === value) return; state.offline = value; drawOffline(); if (state.detail) drawMessages(state.detail); }
+function setOffline(value) { if (state.offline === value) return; state.offline = value; drawOffline(); if (state.detail) drawMessages(state.detail); if (!value) outbox.flush(); } // back from offline: send what waited, even with no online event (a server restart)
 const COARSE = !!matchMedia?.('(hover: none) and (pointer: coarse)')?.matches;
 const isPhone = () => !!matchMedia?.('(max-width: 759px)')?.matches;
 const sentTitle = m => (m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60000 ? { title: `Written offline, sent ${when(m.created_at)}` } : {});
@@ -495,15 +495,18 @@ function paintSecret(s, d, m, key) {
   const help = sec.help_url && /^https:\/\//.test(sec.help_url) ? [el('a', { href: sec.help_url, target: '_blank', rel: 'noopener noreferrer', text: 'Where to get this' })] : [];
   const saved = sec.status === 'saved' && !state.replacing.has(key);
   if (saved) {
-    s.box.replaceChildren(el('div', { class: 'secret-meta' }, el('span', { class: 'secret-ok', role: 'status', text: secretStatusLine(sec) }),
+    s.box.replaceChildren(el('div', { class: 'secret-meta' }, el('span', { class: `secret-ok${sec.check === 'rejected' ? ' rejected' : ''}`, role: 'status', text: secretStatusLine(sec) }),
       el('button', { type: 'button', class: 'show', onclick: () => { state.replacing.add(key); state.shown = ''; drawMessages(state.detail); s.input.focus(); } }, 'Replace')));
     return;
   }
   if (state.config && !target) { s.box.replaceChildren(el('p', { class: 'secret-note', text: "Secure entry isn't set up on this server" })); return; }
   const off = isOffline();
   s.input.disabled = off || s.busy;
-  const save = el('button', { type: 'submit', class: 'primary', ...(off || s.busy ? { disabled: '' } : {}), text: s.busy ? 'Saving…' : 'Save' });
-  const form = el('form', { class: 'secret-form', autocomplete: 'off', onsubmit: e => { e.preventDefault(); void saveSecret(s, d, m, key); } },
+  // No <form>: a browser offers to save a password only for a form, so there is nothing to offer here. Enter in the box saves.
+  s.input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); void saveSecret(s, d, m, key); } };
+  const save = el('button', { type: 'button', class: 'primary', onclick: () => { void saveSecret(s, d, m, key); }, ...(off || s.busy ? { disabled: '' } : {}), text: s.busy ? 'Saving…' : 'Save' });
+  const form = el('div', { class: 'secret-form' },
+    el('label', { for: s.input.id, class: 'secret-label' }, sec.label, el('code', { class: 'secret-slot', text: ` → ${sec.name}` })),
     el('div', { class: 'secret-row' }, s.input, save),
     el('div', { class: 'secret-meta' }, ...help, el('span', { class: 'secret-note', style: 'margin:0', text: 'Goes straight to the app. Never saved in this thread.' })));
   const err = el('p', { class: 'error', role: 'alert', text: s.error }); err.hidden = !s.error;
@@ -524,9 +527,9 @@ async function saveSecret(s, d, m, key) {
   try { data = await response.json(); } catch { /* no body */ }
   if (!response.ok) { const why = [data.detail, data.error, data.message].find(x => typeof x === 'string' && x); return fail(why ? String(why).slice(0, 200) : `The app refused it (${response.status}).`); }
   s.input.value = ''; // the app has it: nothing keeps it here
-  const hint = typeof data.hint === 'string' ? data.hint.slice(0, 8) : '';
+  const hint = typeof data.hint === 'string' ? data.hint.slice(0, 8) : '', check = data.check === 'rejected' || data.check === 'works' ? data.check : '';
   s.busy = false; state.replacing.delete(key);
-  try { await post(`threads/${d.id}/messages/${m.id}/secret`, { status: 'saved', ...(hint ? { hint } : {}) }); }
+  try { await post(`threads/${d.id}/messages/${m.id}/secret`, { status: 'saved', ...(hint ? { hint } : {}), ...(check ? { check } : {}) }); }
   catch { s.error = 'Saved in the app, but the thread could not be told. It will show as saved once you reload.'; }
   state.shown = ''; if (state.detail) await loadThread(d.id, { quiet: true }); else paintSecret(s, d, m, key);
 }

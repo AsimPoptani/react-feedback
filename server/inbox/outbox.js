@@ -51,7 +51,7 @@ export function openStore() {
 // A 2xx removes the entry. A network error, 408, 429 or 5xx keeps it and backs off: nothing behind it goes first, so order holds.
 // Any other answer (the thread is read-only or gone, the message was refused) marks that one `failed` with a reason and the rest carry on.
 export function createOutbox({ store = openStore(), post, canSend = () => true, onChange = () => {}, onSent = () => {}, now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = t => clearTimeout(t) }) {
-  let entries = [], loaded = false, persistent = true, running = false, timer, last = 0;
+  let entries = [], loaded = false, persistent = true, running = false, timer, last = 0, idle = 0;
   const emit = () => onChange();
   const save = entry => { if (entries.includes(entry)) void store.put(snapshotOf(entry)).catch(() => {}); };
   const snapshotOf = ({ cid, seq, thread, text, images, reply_to, aside, written_at, state, reason }) => ({ cid, seq, thread, text, images, ...(reply_to ? { reply_to } : {}), ...(aside ? { aside: true } : {}), written_at, state, ...(reason ? { reason } : {}) });
@@ -70,7 +70,8 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
     try {
       for (;;) {
         const entry = entries.find(e => e.state === 'queued');
-        if (!entry || !canSend()) return; // offline: wait for flush() (the online event) instead of trying
+        if (!entry) return;
+        if (!canSend()) { clearTimer(timer); timer = setTimer(() => { void pump(); }, BACKOFF[Math.min(idle++, BACKOFF.length - 1)]); return; } // offline: look again later (flush() looks at once), so a missed 'online' never strands the queue
         const wait = entry.nextAt - now();
         if (wait > 0) { clearTimer(timer); timer = setTimer(() => { void pump(); }, wait); return; }
         entry.sending = true; emit();
@@ -79,7 +80,7 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
         entry.sending = false;
         const status = result.status ?? 0;
         if (!result.network && status >= 200 && status < 300) {
-          entries = entries.filter(e => e !== entry);
+          idle = 0; entries = entries.filter(e => e !== entry);
           await store.remove(entry.cid).catch(() => {});
           emit(); onSent(entry);
         } else if (result.network || status >= 500 || status === 408 || status === 429) {
@@ -113,7 +114,7 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
       emit(); return true;
     },
     // The network or the tab came back: skip the waiting and send now.
-    flush() { for (const e of entries) e.nextAt = 0; void pump(); },
+    flush() { idle = 0; for (const e of entries) e.nextAt = 0; void pump(); },
     retry(cid) { const e = entries.find(x => x.cid === cid && x.state === 'failed'); if (!e) return; e.state = 'queued'; e.reason = undefined; e.attempts = 0; e.nextAt = 0; save(e); emit(); void pump(); },
     start() { void pump(); },
     stop() { clearTimer(timer); },

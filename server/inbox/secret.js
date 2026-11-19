@@ -8,5 +8,5 @@ export function secretUrl(template, name, origin) {
   const path = template.replace('{name}', encodeURIComponent(name));
   try { return new URL(path, origin).origin === new URL(origin).origin && path.startsWith('/') && !path.startsWith('//') ? path : null; } catch { return null; }
 }
-// "Saved ✓ · ends …abcd" once a key is saved.
-export const secretStatusLine = secret => `Saved ✓${secret?.hint ? ` · ends ${secret.hint}` : ''}`;
+// "Saved ✓ · ends …abcd" once a key is saved; when the app tried it and the provider turned it down, say so instead of a tick.
+export const secretStatusLine = secret => `${secret?.check === 'rejected' ? 'Saved, but the provider rejected it' : 'Saved ✓'}${secret?.hint ? ` · ends ${secret.hint}` : ''}`;

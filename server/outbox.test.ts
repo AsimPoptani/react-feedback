@@ -57,3 +57,15 @@ test('client ids are valid for the server and unique', () => {
   expect(ids.size).toBe(200);
   for (const id of ids) expect(/^[A-Za-z0-9_-]{8,64}$/.test(id)).toBe(true);
 });
+
+test('a queue that found the network down looks again on its own (a server restart sends no online event)', async () => {
+  let offline = true, clock = 0; const timers: { fn: () => void; ms: number }[] = []; const sent: string[] = [];
+  const o = createOutbox({ store: store(), now: () => clock, canSend: () => !offline, setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimer: () => {},
+    post: async e => { sent.push(e.text); return { status: 201 }; } });
+  await o.add(entry('t', 'while down')); await new Promise(r => setTimeout(r, 5));
+  expect(sent).toEqual([]); expect(timers.length).toBe(1); expect(timers[0]!.ms).toBe(BACKOFF[0]); // it did not just return
+  timers.shift()!.fn(); await new Promise(r => setTimeout(r, 5));
+  expect(timers[0]!.ms).toBe(BACKOFF[1]); // still down: wait longer
+  offline = false; clock += 60000; timers.shift()!.fn(); await new Promise(r => setTimeout(r, 5));
+  expect(sent).toEqual(['while down']); expect(o.pending()).toBe(0);
+});

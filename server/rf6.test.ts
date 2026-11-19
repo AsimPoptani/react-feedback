@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHandler } from './server';
@@ -174,9 +174,9 @@ test('a vault inside the data folder (or the other way round) is refused, and no
   expect(() => validateVault(dir, vault)).not.toThrow();
   const { id, mid } = await withSensitive();
   const inside = createHandler(dir, undefined, { vaultDir: join(dir, 'vault') });
-  expect((await inside(new Request(`http://local/__feedback/api/threads/${id}/messages/${mid}/redact`, { method: 'POST' }))).status).toBe(409);
+  expect((await inside(new Request(`http://local/__feedback/api/threads/${id}/messages/${mid}/redact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }))).status).toBe(409);
   const none = createHandler(dir, undefined, { vaultDir: null });
-  expect((await none(new Request(`http://local/__feedback/api/threads/${id}/messages/${mid}/redact`, { method: 'POST' }))).status).toBe(409);
+  expect((await none(new Request(`http://local/__feedback/api/threads/${id}/messages/${mid}/redact`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }))).status).toBe(409);
   await expect(run(['redact', id, mid], dir, undefined, {})).rejects.toThrow(/FEEDBACK_VAULT_DIR/);
   expect(await textOfTree(dir)).toContain(TEXT); // nothing was lost or removed
 });
@@ -218,6 +218,98 @@ test('a redacted first message is also gone from item.json and feedback.md', asy
   expect((await get(`threads/${id}`)).title).toBe('Keys');
   await cli('unredact', id, 'm1');
   expect(await textOfTree(join(dir, id))).toContain('sk-live-ZZZ');
+});
+
+// A capture, as the widget writes it: its title is the first line of its note.
+async function capture(note: string): Promise<string> {
+  const { id, path, created_at } = await store.makeItemFolder(dir);
+  const item = { id, created_at, note, mode: 'region', target: { selector: 'main' }, context: { url: '/page', viewport: { w: 1, h: 1 } }, image: 'image.png' };
+  await writeFile(join(path, 'item.json'), JSON.stringify(item, null, 2)); await writeFile(join(path, 'status.json'), JSON.stringify({ status: 'open' }));
+  await writeFile(join(path, 'feedback.md'), store.captureSummary(item)); await store.startCaptureThread(dir, id, note, created_at);
+  return id;
+}
+const pause = () => new Promise(r => setTimeout(r, 1100)); // thread ids are per second
+
+test('chained merges: a copy two merges away is redacted too, from either end, and search finds nothing', async () => {
+  for (const redactIn of ['first', 'last'] as const) {
+    const a = await start('A', 'a'); await pause(); const b = await start('B', 'b'); await pause(); const c = await start('C', 'c');
+    const m = await store.appendMessage(dir, a, { author: 'user', text: `chain ${redactIn} ${TEXT}` });
+    await store.mergeThreads(dir, a, b, 'user'); await store.mergeThreads(dir, b, c, 'user');
+    const where = redactIn === 'first' ? { t: a, id: m.id } : { t: c, id: (await get(`threads/${c}`)).messages.find((x: { text: string }) => x.text.includes('chain last')).id };
+    await cli('redact', where.t, where.id);
+    expect(await textOfTree(dir)).not.toContain('4111');
+    expect((await get(`threads?q=chain%20${redactIn}`)).length).toBe(0);
+    await pause();
+  }
+}, 30000);
+
+test('a capture\'s title is its note\'s first line: redacting the note blanks it in dividers, stubs and the farewell too', async () => {
+  const SEC = 'secret-title-9931';
+  const a = await capture(`${SEC} first line\nmore`); await pause(); const b = await start('B', 'b'); await pause(); const c = await start('C', 'c');
+  await store.mergeThreads(dir, a, b, 'user');
+  await store.moveMessages(dir, b, ['m3'], c, 'agent'); // m3 is the copy of the capture's note, now carried to C with a "Moved from" divider
+  expect(await textOfTree(dir)).toContain(SEC);
+  await cli('redact', a, 'm1');
+  expect(await textOfTree(dir)).not.toContain(SEC);
+  expect((await get(`threads/${a}`)).title).toBe('[redacted]');
+  const dividers = [...(await get(`threads/${b}`)).messages, ...(await get(`threads/${c}`)).messages].filter((m: { divider?: boolean }) => m.divider).map((m: { text: string }) => m.text);
+  expect(dividers.some((t: string) => t.includes('[redacted]'))).toBe(true);
+}, 15000);
+
+test('a sweep that cannot reach a copy says so (and logs it); running redact again finishes the job', async () => {
+  const err = spyOn(console, 'error').mockImplementation(() => {});
+  const a = await start('A', 'a'); await pause(); const b = await start('B', 'b');
+  const m = await store.appendMessage(dir, a, { author: 'user', text: `needs retry ${TEXT}` });
+  await store.mergeThreads(dir, a, b, 'user');
+  await chmod(join(dir, b), 0o500); // the copy's thread cannot be written
+  const out = await cli('redact', a, m.id);
+  await chmod(join(dir, b), 0o700);
+  expect(out).toContain('WARNING'); expect(out).toContain(b); expect(err).toHaveBeenCalled();
+  expect(await textOfTree(join(dir, b))).toContain('4111');
+  expect(await cli('redact', a, m.id)).not.toContain('WARNING'); // already redacted here, the copy is retried
+  expect(await textOfTree(dir)).not.toContain('4111');
+  err.mockRestore();
+}, 15000);
+
+test('an answer\'s Other text is gone from _events.jsonl as well', async () => {
+  const t = (await store.createThread(dir, { title: 'Q', text: 'ask', origin: 'agent', question: { prompt: 'Which key?', options: [{ label: 'none' }], allow_other: true } })).id;
+  const ans = await store.appendMessage(dir, t, { author: 'user', text: undefined, answer: { question_id: 'q1', option_ids: [], other_text: 'here is sk-LIVE-77' } });
+  expect(await readFile(join(dir, '_events.jsonl'), 'utf8')).toContain('sk-LIVE-77');
+  await cli('redact', t, ans.id);
+  expect(await textOfTree(dir)).not.toContain('sk-LIVE-77');
+  const ev = (await readFile(join(dir, '_events.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l));
+  expect(ev.every(e => typeof e.ts === 'string')).toBe(true);
+});
+
+test('redacting a capture\'s note keeps feedback.md a proper summary, and unredact puts the original back', async () => {
+  const id = await capture('pin is 9876');
+  const before = await readFile(join(dir, id, 'feedback.md'), 'utf8');
+  expect(before).toContain('Mode: region');
+  await cli('redact', id, 'm1');
+  const during = await readFile(join(dir, id, 'feedback.md'), 'utf8');
+  expect(during).toContain('Mode: region'); expect(during).toContain('URL: /page'); expect(during).not.toContain('9876'); expect(during.startsWith('[redacted]')).toBe(true);
+  await cli('unredact', id, 'm1');
+  expect(await readFile(join(dir, id, 'feedback.md'), 'utf8')).toBe(before);
+});
+
+test('redact and secret need a JSON body, like every other write (a cross-site form cannot send one)', async () => {
+  const { id, mid } = await withSensitive();
+  for (const contentType of ['text/plain', 'application/x-www-form-urlencoded', undefined]) {
+    const r = await handle(new Request(`http://local/__feedback/api/threads/${id}/messages/${mid}/redact`, { method: 'POST', ...(contentType ? { headers: { 'Content-Type': contentType }, body: 'x=1' } : {}) }));
+    expect(r.status).toBe(415);
+  }
+  expect(await textOfTree(dir)).toContain(TEXT);
+});
+
+test('a recorded save can carry the app\'s check; "rejected" is kept and shown to the agent, anything else is refused', async () => {
+  const id = await start();
+  await cli('ask-secret', id, '--name', 'openrouter', '--label', 'OpenRouter API key');
+  const mid = (await get(`threads/${id}`)).messages.at(-1).id;
+  expect((await call('POST', `threads/${id}/messages/${mid}/secret`, { status: 'saved', check: 'maybe' })).status).toBe(400);
+  expect((await call('POST', `threads/${id}/messages/${mid}/secret`, { status: 'saved', hint: '…abcd', check: 'rejected' })).status).toBe(200);
+  expect((await get(`threads/${id}`)).messages.at(-1).secret.check).toBe('rejected');
+  expect(await cli('read', id)).toContain('the provider rejected it');
+  expect(secretStatusLine({ status: 'saved', hint: '…abcd', check: 'rejected' })).toBe('Saved, but the provider rejected it · ends …abcd');
 });
 
 test('a merge copies messages, so redacting one redacts the other copy as well', async () => {

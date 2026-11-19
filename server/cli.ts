@@ -145,7 +145,7 @@ export function transcript(messages: store.Message[], names: Record<store.Author
     const quote = m.reply_to && !m.aside ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
     const body = m.divider ? `--- ${m.text} ---` : m.redacted ? `  🔒 Redacted (sensitive) by ${m.redacted.by === 'user' ? names.user : names.agent}, ${m.redacted.at.slice(0, 16)}${m.redacted.reason ? `: ${m.redacted.reason}` : ''}`
       : (m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n');
-    const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}` : 'not saved yet'}]`] : [];
+    const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}${m.secret.check === 'rejected' ? ', but the provider rejected it' : ''}` : 'not saved yet'}]`] : [];
     const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
     const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[body, ...secret, ...attached].join('\n')}`;
     return pad ? text.split('\n').map(l => `${pad}${l}`).join('\n') : text;
@@ -187,7 +187,8 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   }
   if (command === 'redact' && words.length === 2) {
     const r = await redactMessage(dir, words[0]!, words[1]!, { by: 'agent', reason: named.reason, vault: loadVaultDir(env) });
-    return r.redacted ? `Redacted ${words[1]} on ${words[0]}: its text and images are in the vault` : `${words[1]} on ${words[0]} was already redacted`;
+    const warn = r.failed.length ? `\nWARNING: could not redact these copies (run the same command again): ${r.failed.join('; ')}` : '';
+    return (r.redacted ? `Redacted ${words[1]} on ${words[0]}: its text and images are in the vault` : `${words[1]} on ${words[0]} was already redacted`) + warn;
   }
   if (command === 'unredact' && words.length === 2) {
     const r = await unredactMessage(dir, words[0]!, words[1]!, loadVaultDir(env));

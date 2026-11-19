@@ -52,7 +52,7 @@ async function readVault(vault: string, key: string): Promise<{ message: Message
 }
 
 // The user's `_events.jsonl` lines hold a message's first line. Blank it in place and keep every line's byte length, so anything following the file by offset stays in step.
-async function scrubEvents(dir: string, thread: string, firstLines: Set<string>): Promise<void> {
+async function scrubEvents(dir: string, thread: string, firstLines: Set<string>, answerPrefix?: string): Promise<void> {
   const file = join(dir, '_events.jsonl');
   let raw: Buffer;
   try { raw = await readFile(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -62,7 +62,7 @@ async function scrubEvents(dir: string, thread: string, firstLines: Set<string>)
     const length = Buffer.byteLength(line);
     try {
       const e = JSON.parse(line) as Record<string, unknown>;
-      if (e.id === thread && typeof e.first_line === 'string' && firstLines.has(e.first_line) && e.first_line !== REDACTED) {
+      if (e.id === thread && typeof e.first_line === 'string' && (firstLines.has(e.first_line) || (answerPrefix !== undefined && e.kind === 'answer' && e.first_line.startsWith(answerPrefix))) && e.first_line !== REDACTED) {
         let blank = e.first_line.length < REDACTED.length ? '*'.repeat(e.first_line.length) : REDACTED;
         let next = JSON.stringify({ ...e, first_line: blank });
         while (Buffer.byteLength(next) < length) { blank += ' '; next = JSON.stringify({ ...e, first_line: blank }); }
@@ -75,9 +75,11 @@ async function scrubEvents(dir: string, thread: string, firstLines: Set<string>)
   const handle = await open(file, 'r+');
   try { for (const p of patches) await handle.write(p.bytes, 0, p.bytes.length, p.at); } finally { await handle.close(); }
 }
+// feedback.md for an item: a thread-mode item is its title and note; a capture is the capture summary.
+const feedbackFor = (item: Record<string, unknown>): string => (item.mode === 'thread' ? `${typeof item.title === 'string' ? item.title : ''}\n\n${String(item.note)}\n` : store.captureSummary(item));
 const firstLine = (text: string) => text.split('\n')[0]!.slice(0, 200) || '[image]';
 
-async function redactLocked(dir: string, id: string, msgId: string, vault: string, by: Author, reason: string | undefined): Promise<{ done: boolean; original?: Message }> {
+async function redactLocked(dir: string, id: string, msgId: string, vault: string, by: Author, reason: string | undefined): Promise<{ done: boolean; original?: Message; oldTitle?: string }> {
   const path = await store.itemDir(dir, id);
   return store.withLock(path, async () => {
     const item = await store.readItem(path);
@@ -85,7 +87,7 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
     const m = stored.find(x => x.id === msgId);
     if (!m) throw new Invalid(`No message ${msgId} in that thread`, 404);
     if (m.divider || m.moved_to) throw new Invalid(`${msgId} is a divider and cannot be redacted`);
-    if (m.redacted) return { done: false };
+    if (m.redacted) return { done: false, original: (await readVault(vault, m.redacted.key))?.message };
     if (by === 'user' && m.author !== 'user') throw new Invalid('You can only redact your own messages', 403);
     const key = `${id}/${msgId}`;
     const images: { name: string; data: string }[] = [];
@@ -99,44 +101,101 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
     delete blank.secret; delete blank.kind;
     await store.writeAtomic(join(path, 'thread.jsonl'), stored.map(x => `${JSON.stringify(x === m ? blank : x)}\n`).join(''));
     for (const name of m.images) await rm(join(path, name), { force: true });
-    if (note !== undefined) { // a thread that started with this message repeats it in item.json and feedback.md
-      await store.writeAtomic(join(path, 'item.json'), JSON.stringify({ ...item, note: REDACTED }, null, 2));
-      const title = typeof item.title === 'string' ? item.title : '';
-      await store.writeAtomic(join(path, 'feedback.md'), item.mode === 'thread' ? `${title}\n\n${REDACTED}\n` : `${REDACTED}\n`);
+    let oldTitle: string | undefined;
+    if (note !== undefined) { // a thread that started with this message repeats it in item.json, feedback.md and (for a capture) its title
+      const blanked = { ...item, note: REDACTED };
+      await store.writeAtomic(join(path, 'item.json'), JSON.stringify(blanked, null, 2));
+      await store.writeAtomic(join(path, 'feedback.md'), feedbackFor(blanked));
+      if (typeof item.title !== 'string' || !item.title) oldTitle = note.split('\n')[0] || undefined; // a capture's title is its note's first line
     }
     const lines = new Set([firstLine(m.text), firstLine(`${typeof item.title === 'string' ? item.title : ''}: ${m.text}`)]);
-    await scrubEvents(dir, id, lines);
-    return { done: true, original: m };
+    if (m.answer) { // an answer's event line is "q1: <labels>, <other text>"
+      const asked = stored.find(x => x.question?.id === m.answer!.question_id)?.question;
+      const labels = (m.answer.option_ids ?? []).flatMap(o => asked?.options.find(x => x.id === o)?.label ?? []);
+      lines.add(firstLine(`${m.answer.question_id}: ${[...labels, ...(m.answer.other_text ? [m.answer.other_text] : [])].join(', ')}`));
+    }
+    await scrubEvents(dir, id, lines, m.answer ? `${m.answer.question_id}: ` : undefined);
+    return { done: true, original: m, oldTitle };
   });
 }
 
-// A merge copies messages into the target and leaves the source readable: redact the other copy too (same author, time and text).
-async function sweepCopies(dir: string, id: string, original: Message, vault: string, by: Author, reason: string | undefined): Promise<void> {
-  const here = await store.itemDir(dir, id);
-  const targets = new Set<string>();
-  const merged = await store.optional(join(here, 'merged.json'));
-  try { const v = merged ? JSON.parse(merged) : null; if (v && typeof v.into === 'string' && ID.test(v.into)) targets.add(v.into); } catch { /* ignore */ }
-  for (const entry of await readdir(dir)) {
-    if (!ID.test(entry) || entry === id) continue;
-    try { const v = JSON.parse(await store.optional(join(dir, entry, 'merged.json')) ?? 'null'); if (v && v.into === id) targets.add(entry); } catch { /* ignore */ }
+// Which threads share copies of a message: a merge joins source and target (a later merge joins the target on, so chains form), and a move
+// leaves a stub in the source and a copy in the target. One pass over the folder builds the graph; edges go both ways.
+async function copyGraph(dir: string, entries: string[]): Promise<Map<string, Set<string>>> {
+  const edges = new Map<string, Set<string>>();
+  const link = (x: string, y: string) => { if (x === y || !ID.test(y)) return; for (const [p, q] of [[x, y], [y, x]] as const) { if (!edges.has(p)) edges.set(p, new Set()); edges.get(p)!.add(q); } };
+  for (const t of entries) {
+    try { const v = JSON.parse(await store.optional(join(dir, t, 'merged.json')) ?? 'null'); if (v && typeof v.into === 'string') link(t, v.into); } catch { /* not a merge note */ }
+    for (const line of (await store.optional(join(dir, t, 'thread.jsonl')) ?? '').split('\n')) {
+      if (!line.includes('moved_')) continue;
+      try { const m = JSON.parse(line); if (typeof m.moved_to === 'string') link(t, m.moved_to); if (typeof m.moved_from === 'string' && m.moved_from.includes('/')) link(t, m.moved_from.split('/')[0]); } catch { /* a torn line */ }
+    }
   }
-  for (const other of targets) {
+  return edges;
+}
+export interface Swept { failed: string[] }
+// A merge copies messages into the target and leaves the source readable, a later merge copies the copies on, and a move carries one away: walk every joined thread
+// (visited set, both directions) and redact the copy (same author, time and text). A thread that cannot be redacted is reported, never ignored.
+async function sweepCopies(dir: string, id: string, original: Message, vault: string, by: Author, reason: string | undefined, titles: string[]): Promise<Swept> {
+  const entries = (await readdir(dir)).filter(e => ID.test(e));
+  const graph = await copyGraph(dir, entries);
+  const seen = new Set([id]), queue = [id], failed: string[] = [];
+  while (queue.length) {
+    for (const other of graph.get(queue.shift()!) ?? []) {
+      if (seen.has(other)) continue;
+      seen.add(other); queue.push(other);
+      try {
+        const path = await store.itemDir(dir, other);
+        const copy = (await store.readMessages(path, await store.readItem(path))).find(m => !m.redacted && !m.divider && m.author === original.author && m.created_at === original.created_at && m.text === original.text);
+        if (copy) { const r = await redactLocked(dir, other, copy.id, vault, by, reason); if (r.oldTitle) titles.push(r.oldTitle); }
+      } catch (error) { failed.push(`${other}: ${error instanceof Error ? error.message : String(error)}`); console.error(`redact: could not redact the copy in ${other}`, error); }
+    }
+  }
+  return { failed };
+}
+// A capture's title is its note's first line; the dividers and stubs a merge or move wrote carry it. Blank it there (exact title only).
+async function scrubTitles(dir: string, titles: string[]): Promise<string[]> {
+  const failed: string[] = [];
+  const wanted = [...new Set(titles.filter(Boolean))];
+  if (!wanted.length) return failed;
+  for (const t of (await readdir(dir)).filter(e => ID.test(e))) {
     try {
-      const path = await store.itemDir(dir, other);
-      const copy = (await store.readMessages(path, await store.readItem(path))).find(m => !m.redacted && !m.divider && m.author === original.author && m.created_at === original.created_at && m.text === original.text);
-      if (copy) await redactLocked(dir, other, copy.id, vault, by, reason);
-    } catch { /* a broken or missing neighbour must not undo the redaction */ }
+      const path = join(dir, t);
+      if (!(await store.optional(join(path, 'thread.jsonl')))) continue;
+      await store.withLock(path, async () => {
+        const raw = await store.optional(join(path, 'thread.jsonl')) ?? '';
+        let changed = false;
+        const lines = raw.split('\n').map(line => {
+          if (!line.trim()) return line;
+          try {
+            const m = JSON.parse(line) as Record<string, unknown>;
+            if (typeof m.text !== 'string') return line;
+            let text = m.text;
+            for (const title of wanted) {
+              for (const prefix of ['Merged from: ', 'Moved from: ']) if (text === `${prefix}${title}`) text = `${prefix}${REDACTED}`;
+              text = text.split(`[${title}](#/`).join(`[${REDACTED}](#/`);
+            }
+            if (text === m.text) return line;
+            changed = true; return JSON.stringify({ ...m, text });
+          } catch { return line; }
+        });
+        if (changed) await store.writeAtomic(join(path, 'thread.jsonl'), lines.join('\n'));
+      });
+    } catch (error) { failed.push(`${t}: ${error instanceof Error ? error.message : String(error)}`); console.error(`redact: could not rewrite the divider titles in ${t}`, error); }
   }
+  return failed;
 }
 
-// Moves a message's text and images into the vault and leaves a marker. `by: 'user'` may only redact the user's own messages. Idempotent.
-export async function redactMessage(dir: string, id: string, msgId: string, opts: { by: Author; reason?: unknown; vault: string | null | undefined }): Promise<{ redacted: boolean }> {
+// Moves a message's text and images into the vault and leaves a marker. `by: 'user'` may only redact the user's own messages. Idempotent, and running it again retries the copies.
+// `failed` lists any other thread whose copy could not be redacted; it is empty when everything was.
+export async function redactMessage(dir: string, id: string, msgId: string, opts: { by: Author; reason?: unknown; vault: string | null | undefined }): Promise<{ redacted: boolean; failed: string[] }> {
   const vault = await checkVault(dir, opts.vault);
   if (opts.reason !== undefined && opts.reason !== null && (typeof opts.reason !== 'string' || opts.reason.length > 200)) throw new Invalid('A reason is up to 200 characters');
   const reason = typeof opts.reason === 'string' && opts.reason.trim() ? opts.reason.trim() : undefined;
   const result = await redactLocked(dir, id, msgId, vault, opts.by, reason);
-  if (result.done && result.original) await sweepCopies(dir, id, result.original, vault, opts.by, reason);
-  return { redacted: result.done };
+  const titles = result.oldTitle ? [result.oldTitle] : [];
+  const swept = result.original ? await sweepCopies(dir, id, result.original, vault, opts.by, reason, titles) : { failed: [] };
+  return { redacted: result.done, failed: [...swept.failed, ...await scrubTitles(dir, titles)] };
 }
 
 // CLI only: reads the original back from the vault. Images come back under new numbers.
@@ -160,8 +219,7 @@ export async function unredactMessage(dir: string, id: string, msgId: string, va
     await store.writeAtomic(join(path, 'thread.jsonl'), stored.map(x => `${JSON.stringify(x === m ? back : x)}\n`).join(''));
     if (saved.item_note !== undefined && item.note === REDACTED) {
       await store.writeAtomic(join(path, 'item.json'), JSON.stringify({ ...item, note: saved.item_note }, null, 2));
-      const title = typeof item.title === 'string' ? item.title : '';
-      await store.writeAtomic(join(path, 'feedback.md'), item.mode === 'thread' ? `${title}\n\n${saved.item_note}\n` : `${saved.item_note}\n`);
+      await store.writeAtomic(join(path, 'feedback.md'), feedbackFor({ ...item, note: saved.item_note }));
     }
     await rm(join(vault, `${m.redacted.key}.json`), { force: true });
     return { restored: true };
@@ -169,8 +227,10 @@ export async function unredactMessage(dir: string, id: string, msgId: string, va
 }
 
 // The inbox saved a key straight to the app and reports only that, plus the app's hint ("…abcd"). Anything else is refused, so a value cannot ride along.
-export async function recordSecretSaved(dir: string, id: string, msgId: string, data: Record<string, unknown>): Promise<{ status: 'saved'; hint?: string }> {
-  for (const k of Object.keys(data)) if (k !== 'status' && k !== 'hint') throw new Invalid('Only status and hint can be recorded');
+export async function recordSecretSaved(dir: string, id: string, msgId: string, data: Record<string, unknown>): Promise<{ status: 'saved'; hint?: string; check?: 'works' | 'rejected' }> {
+  for (const k of Object.keys(data)) if (k !== 'status' && k !== 'hint' && k !== 'check') throw new Invalid('Only status, hint and check can be recorded');
+  if (data.check !== undefined && data.check !== null && data.check !== 'works' && data.check !== 'rejected') throw new Invalid('check must be "works" or "rejected"');
+  const check: 'works' | 'rejected' | undefined = data.check === 'works' || data.check === 'rejected' ? data.check : undefined; // the app's own free test of the key, when it ran one
   if (data.status !== 'saved') throw new Invalid('status must be "saved"');
   let hint: string | undefined;
   if (data.hint !== undefined && data.hint !== null && data.hint !== '') {
@@ -182,12 +242,12 @@ export async function recordSecretSaved(dir: string, id: string, msgId: string, 
     const stored = await store.materialise(path, await store.readItem(path));
     const m = stored.find(x => x.id === msgId);
     if (!m || m.kind !== 'secret_request' || !m.secret) throw new Invalid('That message is not a key request', 404);
-    const saved = { ...m.secret, status: 'saved' as const, saved_at: new Date().toISOString(), ...(hint ? { hint } : {}) };
+    const saved = { ...m.secret, status: 'saved' as const, saved_at: new Date().toISOString(), ...(hint ? { hint } : {}), ...(check ? { check } : {}) };
     if (!hint) delete saved.hint;
     const next: Message = { ...m, secret: saved, ...(m.flag === 'needs_you' ? { flag: 'fyi' as const } : {}) }; // it no longer needs the user
     await store.writeAtomic(join(path, 'thread.jsonl'), stored.map(x => `${JSON.stringify(x === m ? next : x)}\n`).join(''));
     return m.secret.name;
   });
-  await store.logEvent(dir, { id, kind: 'secret', text: `${name} saved`, author: 'user' });
-  return { status: 'saved', ...(hint ? { hint } : {}) };
+  await store.logEvent(dir, { id, kind: 'secret', text: `${name} saved${check === 'rejected' ? ' (rejected by the provider)' : ''}`, author: 'user' });
+  return { status: 'saved', ...(hint ? { hint } : {}), ...(check ? { check } : {}) };
 }

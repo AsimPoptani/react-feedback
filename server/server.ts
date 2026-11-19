@@ -50,21 +50,6 @@ export async function body(req: Request): Promise<ObjectData> {
   try { return object(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
   catch { throw new Invalid('Invalid JSON object'); }
 }
-function summary(item: ObjectData): string {
-  const context = item.context as ObjectData;
-  const target = item.target as ObjectData | undefined;
-  const lines = [String(item.note), '', `Mode: ${item.mode}`];
-  if (target?.selector) lines.push(`Selector: \`${target.selector}\``, `Components: ${Array.isArray(target.components) ? target.components.join(' < ') : ''}`);
-  if (target?.rect) lines.push(`Rect: ${JSON.stringify(target.rect)}`);
-  if (item.mode === 'page' && target) lines.push(`Page size: ${target.width} × ${target.height}`);
-  lines.push(`URL: ${context.url ?? ''}`, `Viewport: ${JSON.stringify(context.viewport)}`, '');
-  const logs = context.console;
-  if (Array.isArray(logs) && logs.length) lines.push('Console:', ...logs.map(log => `- ${log.level}: ${log.message}`), '');
-  const fetches = context.failedFetches;
-  if (Array.isArray(fetches) && fetches.length) lines.push('Failed fetches:', ...fetches.map(request => `- ${request.method} ${request.url}: ${request.status ?? request.error}`), '');
-  for (const key of ['image', 'annotated', 'context_image']) if (item[key]) lines.push(`[${key}](${item[key]})`);
-  return `${lines.join('\n')}\n`;
-}
 const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
 function clientId(value: unknown): string | undefined {
   if (value === undefined) return undefined;
@@ -117,7 +102,7 @@ async function write(dir: string, valid: Valid): Promise<string> {
       ...(valid.context_image ? { context_image: await save('context.png', valid.context_image) } : {}) };
     await writeFile(join(path, 'item.json'), JSON.stringify(item, null, 2));
     await writeFile(join(path, 'status.json'), JSON.stringify({ status: 'open' }));
-    await writeFile(join(path, 'feedback.md'), summary(item));
+    await writeFile(join(path, 'feedback.md'), store.captureSummary(item));
     await store.startCaptureThread(dir, id, valid.note, created_at);
   } catch (error) { await rm(path, { recursive: true, force: true }); throw error; }
   await store.logEvent(dir, { id, kind: 'thread', text: valid.note }); // only a fresh write gets here, inside the coalesced job
@@ -260,7 +245,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (sensitive && req.method === 'POST') {
     const [, tid, mid, what] = sensitive;
     await itemDir(dir, tid!);
-    const data = req.headers.get('content-type') ? await read(req) : {};
+    const data = await read(req); // JSON only (a cross-site form cannot send it), like every other write
     // The key itself never comes here: only that it was saved, and the target's short hint. A request with anything else is refused.
     if (what === 'secret') return json(await recordSecretSaved(dir, tid!, mid!, data));
     return json(await redactMessage(dir, tid!, mid!, { by: 'user', vault: vaultDir }));
