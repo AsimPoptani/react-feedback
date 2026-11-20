@@ -874,12 +874,25 @@ export function setPin(dir: string, input: { kind: unknown; id: unknown; pinned?
 // ---- Merging: one thread folded into another. The source stays readable, marked done, with a link to the target.
 // `merged.json` on the source is written first as an intent (state "copying", with the target's length) and flipped to "done" last,
 // so an interrupted merge can be retried: every step checks whether it already happened.
-interface MergeNote { into: string; at: string; state: 'copying' | 'done'; base: number; await_agent: boolean }
+// `map` is the old→new id table for that copy (message ids, question ids, checklist ids). A later repair reads it back;
+// merges from before it was stored are recovered by lining the source up with the copy instead.
+interface MergeMap { messages: Record<string, string>; questions: Record<string, string>; items: Record<string, string> }
+interface MergeNote { into: string; at: string; state: 'copying' | 'done'; base: number; await_agent: boolean; map?: MergeMap }
+const idRecord = (value: unknown): Record<string, string> | null => {
+  if (!isObject(value)) return null;
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) if (typeof item === 'string' && item) out[key] = item;
+  return out;
+};
 async function readMerge(path: string): Promise<MergeNote | null> {
   try {
     const v = JSON.parse(await optional(join(path, 'merged.json')) ?? 'null');
     if (!isObject(v) || typeof v.into !== 'string' || typeof v.at !== 'string') return null;
-    return { into: v.into, at: v.at, state: v.state === 'copying' ? 'copying' : 'done', base: typeof v.base === 'number' ? v.base : 0, await_agent: v.await_agent === true };
+    const messages = isObject(v.map) ? idRecord(v.map.messages) : null;
+    const questions = isObject(v.map) ? idRecord(v.map.questions) : null;
+    const items = isObject(v.map) ? idRecord(v.map.items) : null;
+    const map = messages && questions && items ? { messages, questions, items } : undefined;
+    return { into: v.into, at: v.at, state: v.state === 'copying' ? 'copying' : 'done', base: typeof v.base === 'number' ? v.base : 0, await_agent: v.await_agent === true, ...(map ? { map } : {}) };
   } catch { return null; }
 }
 // On the target: a merge brought in something the agent has not answered. Only an agent message after `at` clears it.
@@ -890,28 +903,40 @@ const titleOf = (item: ItemData, id: string) => (typeof item.title === 'string' 
 async function readOrNull(path: string): Promise<Buffer | null> {
   try { return await readFile(path); } catch (error) { if (code(error) === 'ENOENT') return null; throw error; }
 }
-async function copyMessages(from: string, into: string, source: Message[], target: Message[], at: string, divider: string, itemIds: Map<string, string>): Promise<void> {
-  // Images are copied under new numbers (the target's msg-<n> names), then every reference is rewritten.
+// The divider takes the next id after the target, then each source message takes the one after that. Question ids follow the new message number.
+// Built in full before anything is written, so a reference is remapped even when it sits above the thing it names.
+function carryPlan(source: Message[], targetLength: number, items: Map<string, string>): { messages: Map<string, string>; questions: Map<string, string>; items: Map<string, string> } {
+  const messages = new Map<string, string>(), questions = new Map<string, string>();
+  source.forEach((m, i) => {
+    const n = targetLength + 2 + i;
+    messages.set(m.id, `m${n}`);
+    if (m.question) questions.set(m.question.id, `q${n}`);
+  });
+  return { messages, questions, items };
+}
+const asRecord = (map: Map<string, string>): Record<string, string> => Object.fromEntries(map);
+// Rewrites every id this copy carries: the quote, the checklist items it added or ticked, the question's own id, and the answer's question.
+// A quote of a message that was not copied is dropped. `reasked` is a flag, not an id; the re-asked copy is its own message and is remapped with the rest.
+function applyCarry(m: Message, copy: Message, messages: Map<string, string>, questions: Map<string, string>, items: Map<string, string>): void {
+  delete copy.reply_to; delete copy.added_items; delete copy.ticked_items;
+  if (m.reply_to && messages.has(m.reply_to)) copy.reply_to = messages.get(m.reply_to)!;
+  for (const key of ['added_items', 'ticked_items'] as const) {
+    const mapped = (m[key] ?? []).flatMap(id => (items.has(id) ? [items.get(id)!] : []));
+    if (mapped.length) copy[key] = mapped;
+  }
+  if (m.question) copy.question = { ...m.question, id: questions.get(m.question.id) ?? m.question.id };
+  if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
+}
+async function copyMessages(from: string, into: string, source: Message[], target: Message[], at: string, divider: string, carried: { messages: Map<string, string>; questions: Map<string, string>; items: Map<string, string> }): Promise<void> {
+  // Images are copied under new numbers (the target's msg-<n> names), then every reference is rewritten from the one map.
   const wanted = [...new Set(source.flatMap(m => m.images))];
   const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
   const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
   const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
-  let n = target.length;
-  const lines: Message[] = [{ id: `m${++n}`, author: 'agent', text: divider, images: [], created_at: at, divider: true }];
-  const questions = new Map<string, string>();
-  // Message ids are renumbered after the target's, so a quote must follow its original to the new id.
-  const moved = new Map(source.map((m, i) => [m.id, `m${target.length + 2 + i}`]));
+  const lines: Message[] = [{ id: `m${target.length + 1}`, author: 'agent', text: divider, images: [], created_at: at, divider: true }];
   for (const m of source) {
-    const id = `m${++n}`;
-    const copy: Message = { ...m, id, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])) };
-    delete copy.reply_to; delete copy.added_items; delete copy.ticked_items;
-    for (const key of ['added_items', 'ticked_items'] as const) {
-      const mapped = (m[key] ?? []).flatMap(c => (itemIds.has(c) ? [itemIds.get(c)!] : []));
-      if (mapped.length) copy[key] = mapped;
-    }
-    if (m.reply_to && moved.has(m.reply_to)) copy.reply_to = moved.get(m.reply_to)!;
-    if (m.question) { questions.set(m.question.id, `q${n}`); copy.question = { ...m.question, id: `q${n}` }; }
-    if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
+    const copy: Message = { ...m, id: carried.messages.get(m.id)!, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])) };
+    applyCarry(m, copy, carried.messages, carried.questions, carried.items);
     lines.push(copy);
   }
   await appendFile(join(into, 'thread.jsonl'), lines.map(m => `${JSON.stringify(m)}\n`).join(''));
@@ -966,9 +991,17 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
     await writeAtomic(join(from, 'merged.json'), JSON.stringify(note));
   }
   const divider = `Merged from: ${titleOf(fromItem, fromId)}`;
+  const farewellText = `Merged into [${titleOf(intoItem, intoId)}](#/${intoId})`;
   const copied = target[note.base]?.divider === true && target[note.base]!.text === divider;
   const plan = await planChecklistMove(from, into);
-  if (!copied) await copyMessages(from, into, source, target.slice(0, note.base), note.at, divider, plan.ids);
+  // The farewell is written after the copy, so a retry must not number it as one of the copied messages.
+  const copying = source.filter(m => !(m.author === 'agent' && m.text === farewellText));
+  const carried = carryPlan(copying, note.base, plan.ids);
+  if (!note.map) {
+    note = { ...note, map: { messages: asRecord(carried.messages), questions: asRecord(carried.questions), items: asRecord(carried.items) } };
+    await writeAtomic(join(from, 'merged.json'), JSON.stringify(note));
+  }
+  if (!copied) await copyMessages(from, into, copying, target.slice(0, note.base), note.at, divider, carried);
   await moveChecklist(from, into, plan);
   // What either side had already read in the source stays read in the target (ticks), but never past a message of the target they have not read.
   await carryRead(from, into, target.slice(0, note.base), 'agent-read.json', m => m.author === 'user');
@@ -977,7 +1010,6 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
     await writeAtomic(join(into, 'awaiting-agent.json'), JSON.stringify({ at: note.at, from: fromId }));
     await writeStatus(into, 'open');
   }
-  const farewellText = `Merged into [${titleOf(intoItem, intoId)}](#/${intoId})`;
   if (!source.some(m => m.author === 'agent' && m.text === farewellText)) {
     const farewell: Message = { id: `m${source.length + 1}`, author: 'agent', text: farewellText, images: [], created_at: new Date().toISOString(), flag: 'done' };
     await appendFile(join(from, 'thread.jsonl'), `${JSON.stringify(farewell)}\n`);
@@ -998,6 +1030,190 @@ export async function mergeThreads(dir: string, fromId: string, intoId: string, 
     if (by === 'user') await logEvent(dir, { id: intoId, kind: 'merge', text: `${fromId} into ${intoId}` });
   }
   return { merged, into: intoId };
+}
+
+// ---- Repairing a merge from before answers were remapped.
+// The source keeps its original ids. The copy renumbers them. A merge that only renumbered the question, not the answer, is repaired from that pair.
+// When the old→new table is not on the merge note, it is rebuilt by lining the source up after the divider (`base` messages, then the divider, then the copy).
+// If that cannot be checked, the thread is left untouched.
+const WORKAROUND_REASON = /^(?:Answered:|Settled:)/;
+export interface MergeRepair { into: string; from: string; status: 'repaired' | 'unchanged' | 'skipped'; detail: string }
+interface RepairSpan { from: string; into: string; pairs: { src: Message; copy: Message }[]; messages: Map<string, string>; questions: Map<string, string>; items: Map<string, string> }
+interface RepairEdit { answer?: string; replyTo?: string; added?: string[]; ticked?: string[]; unwithdraw?: string }
+const copiedBeforeFarewell = (messages: Message[], intoId: string): Message[] => {
+  const cut = messages.findIndex(m => m.author === 'agent' && m.text.startsWith('Merged into [') && m.text.includes(`(#/${intoId})`));
+  return cut === -1 ? messages : messages.slice(0, cut);
+};
+function pairsFromMap(source: Message[], target: Message[], map: MergeMap): { src: Message; copy: Message }[] | null {
+  const pairs: { src: Message; copy: Message }[] = [];
+  for (const [oldId, newId] of Object.entries(map.messages)) {
+    const src = source.find(m => m.id === oldId), copy = target.find(m => m.id === newId);
+    if (!src || !copy || src.author !== copy.author || src.created_at !== copy.created_at) return null;
+    pairs.push({ src, copy });
+  }
+  return pairs;
+}
+function pairsFromBase(source: Message[], target: Message[], base: number, intoId: string): { src: Message; copy: Message }[] | null {
+  if (!Number.isInteger(base) || base < 0 || base >= target.length) return null;
+  const divider = target[base];
+  if (!divider?.divider || !divider.text.startsWith('Merged from:')) return null;
+  const copying = copiedBeforeFarewell(source, intoId);
+  if (base + copying.length >= target.length) return null;
+  const pairs: { src: Message; copy: Message }[] = [];
+  for (let i = 0; i < copying.length; i++) {
+    const src = copying[i]!, copy = target[base + 1 + i]!;
+    if (src.author !== copy.author || src.created_at !== copy.created_at || src.text !== copy.text) return null;
+    pairs.push({ src, copy });
+  }
+  return pairs;
+}
+function spanOf(from: string, into: string, pairs: { src: Message; copy: Message }[], items: Record<string, string> | undefined): RepairSpan {
+  const messages = new Map<string, string>(), questions = new Map<string, string>();
+  for (const { src, copy } of pairs) {
+    messages.set(src.id, copy.id);
+    if (src.question && copy.question) questions.set(src.question.id, copy.question.id);
+  }
+  return { from, into, pairs, messages, questions, items: new Map(Object.entries(items ?? {})) };
+}
+// An answer may still name a question id from a thread that was merged into the source, and then into this one. Follow only that chain.
+function questionOn(spans: RepairSpan[], thread: string, qid: string, guard = new Set<string>()): string {
+  const mark = `${thread}\0${qid}`;
+  if (guard.has(mark)) return qid;
+  guard.add(mark);
+  for (const span of spans.filter(s => s.into === thread)) {
+    if (span.questions.has(qid)) return span.questions.get(qid)!;
+    const lifted = questionOn(spans, span.from, qid, guard);
+    if (lifted !== qid && span.questions.has(lifted)) return span.questions.get(lifted)!;
+  }
+  return qid;
+}
+function wantedQuestion(span: RepairSpan, src: Message, spans: RepairSpan[]): string | undefined {
+  const qid = src.answer?.question_id;
+  if (!qid) return undefined;
+  if (span.questions.has(qid)) return span.questions.get(qid);
+  const lifted = questionOn(spans, span.from, qid);
+  return lifted !== qid && span.questions.has(lifted) ? span.questions.get(lifted) : undefined;
+}
+function editsFor(span: RepairSpan, spans: RepairSpan[]): Map<string, RepairEdit> {
+  const edits = new Map<string, RepairEdit>();
+  const edit = (id: string): RepairEdit => edits.get(id) ?? edits.set(id, {}).get(id)!;
+  for (const { src, copy } of span.pairs) {
+    const wanted = copy.answer ? wantedQuestion(span, src, spans) : undefined;
+    if (wanted && copy.answer!.question_id !== wanted) edit(copy.id).answer = wanted;
+    if (src.reply_to && span.messages.has(src.reply_to)) {
+      const next = span.messages.get(src.reply_to)!;
+      if (copy.reply_to !== next) edit(copy.id).replyTo = next;
+    }
+    for (const key of ['added_items', 'ticked_items'] as const) {
+      const had = src[key] ?? [];
+      if (!had.length || !had.every(id => span.items.has(id))) continue;
+      const next = had.map(id => span.items.get(id)!);
+      const got = copy[key] ?? [];
+      if (next.join() !== got.join()) edit(copy.id)[key === 'added_items' ? 'added' : 'ticked'] = next;
+    }
+    const reason = copy.question?.withdrawn?.reason ?? '';
+    if (copy.question?.withdrawn && WORKAROUND_REASON.test(reason)) edit(copy.id).unwithdraw = reason;
+  }
+  for (const [id, change] of edits) if (!change.answer && !change.replyTo && !change.added && !change.ticked && !change.unwithdraw) edits.delete(id);
+  return edits;
+}
+function describeEdits(span: RepairSpan, edits: Map<string, RepairEdit>): string {
+  const parts: string[] = [];
+  for (const { copy } of span.pairs) {
+    const change = edits.get(copy.id);
+    if (!change) continue;
+    if (change.answer) parts.push(`answer ${copy.id} ${copy.answer!.question_id} -> ${change.answer}`);
+    if (change.replyTo) parts.push(`reply_to ${copy.id} ${copy.reply_to ?? '(none)'} -> ${change.replyTo}`);
+    if (change.added) parts.push(`added_items ${copy.id} ${(copy.added_items ?? []).join(',') || '(none)'} -> ${change.added.join(',')}`);
+    if (change.ticked) parts.push(`ticked_items ${copy.id} ${(copy.ticked_items ?? []).join(',') || '(none)'} -> ${change.ticked.join(',')}`);
+    if (change.unwithdraw) parts.push(`un-withdrew ${copy.question!.id} (${change.unwithdraw})`);
+  }
+  return parts.join('; ') || 'nothing to change';
+}
+async function patchThread(path: string, edits: Map<string, RepairEdit>): Promise<void> {
+  const file = join(path, 'thread.jsonl');
+  const raw = await optional(file);
+  if (raw === null || !edits.size) return;
+  let changed = false;
+  const lines = raw.split('\n').map(line => {
+    if (!line.trim()) return line;
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { return line; }
+    if (!isObject(parsed) || typeof parsed.id !== 'string') return line;
+    const change = edits.get(parsed.id);
+    if (!change) return line;
+    let touched = false;
+    if (change.answer && isObject(parsed.answer) && parsed.answer.question_id !== change.answer) { parsed.answer.question_id = change.answer; touched = true; }
+    if (change.replyTo && parsed.reply_to !== change.replyTo) { parsed.reply_to = change.replyTo; touched = true; }
+    if (change.added && isObject(parsed)) { parsed.added_items = change.added; touched = true; }
+    if (change.ticked) { parsed.ticked_items = change.ticked; touched = true; }
+    if (change.unwithdraw && isObject(parsed.question)) { delete parsed.question.withdrawn; touched = true; }
+    if (!touched) return line;
+    changed = true;
+    return JSON.stringify(parsed);
+  });
+  if (changed) await writeAtomic(file, `${lines.join('\n').replace(/\n*$/, '')}\n`);
+}
+// One line per merge. Idempotent: a second run finds the ids already pointing at the copy and the workaround withdrawals already gone.
+export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {}): Promise<MergeRepair[]> {
+  let entries: string[] = [];
+  try { entries = (await readdir(dir)).filter(e => ID.test(e)); } catch (error) { if (code(error) !== 'ENOENT') throw error; }
+  const notes: { from: string; note: MergeNote }[] = [];
+  for (const from of entries.sort()) {
+    const note = await readMerge(join(dir, from));
+    if (note) notes.push({ from, note });
+  }
+  const spans: RepairSpan[] = [];
+  const results: MergeRepair[] = [];
+  const pending: { from: string; note: MergeNote; source: Message[] }[] = [];
+  for (const { from, note } of notes) {
+    if (note.state !== 'done') { results.push({ into: note.into, from, status: 'skipped', detail: 'merge did not finish; nothing changed' }); continue; }
+    let source: Message[] | null = null, target: Message[] | null = null;
+    try {
+      source = await readMessages(join(dir, from), await readItem(join(dir, from)));
+      target = await readMessages(join(dir, note.into), await readItem(join(dir, note.into)));
+    } catch { /* the source or the target is gone */ }
+    const pairs = source && target ? (note.map ? pairsFromMap(source, target, note.map) : null) ?? pairsFromBase(source, target, note.base, note.into) : null;
+    if (!source || !target || !pairs) { results.push({ into: note.into, from, status: 'skipped', detail: 'mapping is not recoverable; nothing changed' }); continue; }
+    spans.push(spanOf(from, note.into, pairs, note.map?.items));
+    pending.push({ from, note, source });
+  }
+  const byInto = new Map<string, RepairSpan[]>();
+  for (const span of spans) {
+    const list = byInto.get(span.into) ?? [];
+    list.push(span);
+    byInto.set(span.into, list);
+  }
+  for (const [into, group] of byInto) {
+    const path = join(dir, into);
+    const described: { span: RepairSpan; edits: Map<string, RepairEdit> }[] = [];
+    const apply = async () => {
+      const fresh = await readMessages(path, await readItem(path));
+      const merged = new Map<string, RepairEdit>();
+      for (const span of group) {
+        const source = pending.find(p => p.from === span.from)?.source;
+        const pairs = source ? pairsFromIds(source, fresh, span) ?? span.pairs : span.pairs;
+        const live = { ...span, pairs };
+        const edits = editsFor(live, spans);
+        described.push({ span: live, edits });
+        for (const [id, change] of edits) merged.set(id, change);
+      }
+      if (!opts.dryRun) await patchThread(path, merged);
+    };
+    try { await withLock(path, apply); }
+    catch { results.push({ into, from: group[0]?.from ?? into, status: 'skipped', detail: 'mapping is not recoverable; nothing changed' }); continue; }
+    for (const { span, edits } of described) results.push({ into: span.into, from: span.from, status: edits.size ? 'repaired' : 'unchanged', detail: describeEdits(span, edits) });
+  }
+  return results.sort((a, b) => a.into.localeCompare(b.into) || a.from.localeCompare(b.from) || a.detail.localeCompare(b.detail));
+}
+function pairsFromIds(source: Message[], target: Message[], span: RepairSpan): { src: Message; copy: Message }[] | null {
+  const pairs: { src: Message; copy: Message }[] = [];
+  for (const [oldId, newId] of span.messages) {
+    const src = source.find(m => m.id === oldId), copy = target.find(m => m.id === newId);
+    if (!src || !copy) return null;
+    pairs.push({ src, copy });
+  }
+  return pairs;
 }
 
 // ---- Moving messages: the agent takes messages (the user's too) out of the wrong thread and into another.
@@ -1062,17 +1278,11 @@ async function moveLocked(from: string, into: string, fromId: string, toId: stri
     let n = target.length;
     const lines: Message[] = target.some(m => m.divider && m.moved_from === `${key}`) ? [] : [{ id: `m${++n}`, author: 'agent', text: divider, images: [], created_at: new Date().toISOString(), divider: true, moved_from: key }];
     for (const m of fresh) copied.set(m.id, `m${++n}`);
+    // The question table covers the whole move, including a question copied on an earlier attempt, before any answer is rewritten.
     const questions = new Map(moving.flatMap(m => (m.question ? [[m.question.id, `q${Number(copied.get(m.id)!.slice(1))}`] as const] : [])));
     for (const m of fresh) {
       const copy: Message = { ...m, id: copied.get(m.id)!, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])), moved_from: `${fromId}/${m.id}` };
-      delete copy.reply_to; delete copy.added_items; delete copy.ticked_items;
-      if (m.reply_to && copied.has(m.reply_to)) copy.reply_to = copied.get(m.reply_to)!; // a quote of a message that stayed behind is dropped
-      const addedNow = (m.added_items ?? []).flatMap(c => (plan.ids.has(c) ? [plan.ids.get(c)!] : []));
-      const tickedNow = (m.ticked_items ?? []).flatMap(c => (plan.ids.has(c) ? [plan.ids.get(c)!] : []));
-      if (addedNow.length) copy.added_items = addedNow;
-      if (tickedNow.length) copy.ticked_items = tickedNow;
-      if (m.question) copy.question = { ...m.question, id: questions.get(m.question.id)! };
-      if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
+      applyCarry(m, copy, copied, questions, plan.ids); // a quote of a message that stayed behind is dropped
       lines.push(copy);
     }
     await appendFile(join(into, 'thread.jsonl'), lines.map(m => `${JSON.stringify(m)}\n`).join(''));

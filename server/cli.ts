@@ -14,6 +14,7 @@
 //   react-feedback todo <id> list | done|check <item> | uncheck <item> | unclaim <item> "why" | edit <item> "text" | rm <item>
 //   react-feedback todos [--mine | --claimed]
 //   react-feedback merge <from-id> <into-id>
+//   react-feedback repair-merged [--dry-run]   (re-point answers left behind by a merge from before 0.9.1)
 //   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>   (move messages to another thread)
 //   react-feedback new "title" "text" --read-only     (a thread the user cannot reply to)
 //   react-feedback readonly <id> on|off
@@ -63,6 +64,7 @@ const USAGE = `Usage:
   react-feedback todo <id> list | done <item> (or check) | uncheck <item> | unclaim <item> "why" | edit <item> "text" | rm <item>
   react-feedback todos [--mine | --claimed]
   react-feedback merge <from-id> <into-id>
+  react-feedback repair-merged [--dry-run]   (re-point answers a merge from before 0.9.1 left on the old question id)
   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>
   react-feedback new "title" "text" --read-only
   react-feedback readonly <id> on|off
@@ -293,6 +295,12 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   if (command === 'merge' && words.length === 2) {
     const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
     return r.merged ? `Merged ${words[0]} into ${words[1]}` : `${words[0]} was already merged into ${words[1]}`;
+  }
+  if (command === 'repair-merged' && words.length === 0) {
+    const dry = flags.includes('--dry-run');
+    const rows = await store.repairMerged(dir, { dryRun: dry });
+    const body = rows.length ? rows.map(row => `${row.into}  from ${row.from}: ${row.detail}`).join('\n') : 'Nothing to repair.';
+    return dry ? `dry run\n${body}` : body;
   }
   if (command === 'move' && words.length >= 2) {
     if (!to) throw new store.Invalid('move needs --to <thread>');

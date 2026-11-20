@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.2
+
+### Fixed
+- **A merge keeps each answer on its question.** Copying a thread renumbers its messages and question ids. The same map, built before anything is written, now rewrites every id the copy carries: `answer.question_id`, `reply_to` (including a side question and its answers), the checklist items a message added or ticked, and the question's own id. An answered question stays answered in the target, so it does not come back in the "Waiting for your answer" bar, in `list --waiting`, or in the open count.
+
+### Added
+- **`react-feedback repair-merged [--dry-run]`.** For a thread merged before this fix, re-points answers that still name the source question id and removes a withdrawal that was only there because the question looked unanswered (the reason starts with "Answered:" or "Settled:"). Any other withdrawal is left as it is. It can do this only when the old-to-new map is still recoverable (the map stored with the merge, or the source lined up after the merge divider). Otherwise it says so and changes nothing. Running it again changes nothing.
+
+### Changed
+- The service worker cache is `fb-inbox-0.9.2`.
+
 ## 0.9.1
 
 ### Fixed
