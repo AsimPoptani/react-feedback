@@ -2395,7 +2395,7 @@ function confirmArtifactShot(shot) {
   $('cap-confirm-note').value = shot.note;
   const img = $('cap-confirm-img');
   if (shot.image) { img.src = shot.image; img.hidden = false; } else { img.removeAttribute('src'); img.hidden = true; }
-  if (!$('cap-confirm').open) $('cap-confirm').showModal();
+  if (!$('cap-confirm').open) { $('cap-confirm').showModal(); capShownAt = Date.now(); }
   $('cap-confirm-note').focus();
 }
 async function sendArtifactShot() {
@@ -2410,7 +2410,11 @@ async function sendArtifactShot() {
   try { await post(`threads/${pending.thread}/messages`, { text, images: pending.shot.image ? [pending.shot.image] : [] }); showToast('Sent to this artifact\u2019s thread'); void refreshList(); }
   catch (error) { showToast(`Could not send that: ${error.message}`); }
 }
-$('cap-confirm-send')?.addEventListener('click', () => { void sendArtifactShot(); });
+// A click in the first moments after the confirm opens is ignored: a page cannot time a click
+// it expected elsewhere so that it lands on Send as you.
+let capShownAt = 0;
+const CAP_CLICK_GUARD_MS = 700;
+$('cap-confirm-send')?.addEventListener('click', () => { if (Date.now() - capShownAt < CAP_CLICK_GUARD_MS) return; void sendArtifactShot(); });
 $('cap-confirm-cancel')?.addEventListener('click', () => { state.capPending = null; $('cap-confirm').close(); });
 $('cap-confirm')?.addEventListener('close', () => { state.capPending = null; });
 $('artifact-capture')?.addEventListener('click', () => {

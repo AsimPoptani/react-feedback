@@ -67,6 +67,8 @@ function fakeFrame(id: string) {
   return win;
 }
 const from = (source: unknown, data: unknown) => { const e = new Event('message') as Event & { source: unknown; data: unknown }; e.source = source; e.data = data; window.dispatchEvent(e); };
+// Send as you ignores clicks in its first 700 ms; step the clock past that before a click.
+const pastClickGuard = () => { const t = Date.now() + 1000; vi.spyOn(Date, 'now').mockReturnValue(t); };
 
 describe('0.12.0 inbox page', () => {
   const added: [EventTarget, string, EventListenerOrEventListenerObject][] = [];
@@ -158,7 +160,7 @@ describe('0.12.0 inbox page', () => {
       expect((document.getElementById('cap-confirm-img') as HTMLImageElement).getAttribute('src')).toBe(PNG);
       expect(document.getElementById('cap-confirm-where')!.textContent).toContain('Checkout page v1 \u00b7 Region');
       (document.getElementById('cap-confirm-note') as HTMLTextAreaElement).value = 'My own words instead';
-      document.getElementById('cap-confirm-send')!.click();
+      pastClickGuard(); document.getElementById('cap-confirm-send')!.click();
       await vi.waitFor(() => expect(messagePosts()).toHaveLength(1));
       const sent = messagePosts()[0]!;
       expect(sent.path).toBe('threads/20261118-100002-abcf/messages');
@@ -233,12 +235,24 @@ describe('0.12.0 inbox page', () => {
       expect(messagePosts()).toHaveLength(0);
     });
 
+    it('a click on Send as you in the moment the panel opens is ignored, so a page cannot time one onto it', async () => {
+      const win = await open();
+      from(win, { ...shot, nonce: arm(win) });
+      await vi.waitFor(() => expect(confirmOpen()).toBe(true));
+      document.getElementById('cap-confirm-send')!.click();
+      await new Promise(r => setTimeout(r, 20));
+      expect(messagePosts()).toHaveLength(0);
+      expect(confirmOpen()).toBe(true);
+      pastClickGuard(); document.getElementById('cap-confirm-send')!.click();
+      await vi.waitFor(() => expect(messagePosts()).toHaveLength(1));
+    });
+
     it('at most 6 captures a minute can be sent from here', async () => {
       const win = await open();
       for (let i = 0; i < 7; i++) {
         from(win, { ...shot, nonce: arm(win) });
         await vi.waitFor(() => expect(confirmOpen()).toBe(true));
-        document.getElementById('cap-confirm-send')!.click();
+        pastClickGuard(); document.getElementById('cap-confirm-send')!.click();
         await new Promise(r => setTimeout(r, 10));
         if (i === 6) expect(document.getElementById('toast')!.textContent).toContain('Too many captures');
       }

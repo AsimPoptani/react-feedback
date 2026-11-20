@@ -149,6 +149,7 @@ async function walk(width, tap) {
   check(`${tag}: the inbox shows the capture in its own panel and nothing is posted yet`, (await owner.locator('#cap-confirm-note').inputValue()).includes(`stand out (${tag})`) && await owner.locator('#cap-confirm-img').isVisible() && !(await get(`threads/${thread}`)).messages.some(m => m.author === 'user' && m.text.includes(`stand out (${tag})`)));
   await shot(owner, `owner-confirm-${tag}`);
   check(`${tag}: no sideways scroll with the confirm panel open`, await noSideways(owner));
+  await owner.waitForTimeout(800); // Send as you ignores clicks in its first 700 ms
   await owner.locator('#cap-confirm-send')[act]();
   const mine = await until(async () => (await get(`threads/${thread}`)).messages.find(m => m.author === 'user' && m.text.includes(`stand out (${tag})`)));
   check(`${tag}: the owner's capture is a message from you, with a picture, naming the artifact and the element`, !!mine && mine.images.length === 1 && mine.text.includes('Checkout page v1 · Element') && mine.text.includes('#go'));
