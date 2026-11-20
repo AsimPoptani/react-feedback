@@ -2,7 +2,7 @@ import { readdir, readFile, writeFile, lstat, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import * as store from './store';
 import { computeMetrics, checkWindow } from './metrics';
-import { loadAreas, loadSecretTarget, loadVaultDir } from './config';
+import { loadAreas, loadReplayDays, loadSecretTarget, loadVaultDir } from './config';
 import { packageVersion } from './version';
 import * as reminders from './reminders';
 import { redactMessage, recordSecretSaved, validateVault } from './sensitive';
@@ -13,6 +13,9 @@ import * as shares from './shares';
 import { loadProjects, projectById, type Project } from './projects';
 import { moveThreadToProject } from './move-project';
 import * as files from './files';
+import * as replay from './replay';
+import { shellPage } from './shell';
+import { Limiter, clientKey, type ServerLike } from './limits';
 
 const PREFIX = '/__feedback';
 const FILE = /^(image\.png|annotated\.png|context\.png|feedback\.md)$/;
@@ -171,7 +174,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'replays.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -179,6 +182,30 @@ async function embedRoute(req: Request, path: string): Promise<Response | null> 
   try {
     return new Response(await readFile(EMBED), { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' } });
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found', detail: 'dist/embed.js is not built' }, 404); throw error; }
+}
+// The replay assets (built to dist/): the recorder the inbox loads when its owner records their own sessions, and the player page the Replays tab frames.
+const REPLAY_ASSETS: Record<string, { file: string; type: string }> = {
+  'recorder.js': { file: '../dist/recorder.js', type: 'text/javascript; charset=utf-8' },
+  'player.js': { file: '../dist/player.js', type: 'text/javascript; charset=utf-8' },
+  'player.css': { file: '../dist/player.css', type: 'text/css; charset=utf-8' },
+};
+const PLAYER_PAGE = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Replay</title>
+<link rel="stylesheet" href="player.css"><style>html,body{margin:0;background:#fff;font:14px system-ui,sans-serif}#rf-player{display:flex;justify-content:center}</style></head>
+<body><div id="rf-player"></div><script src="player.js"></script></body></html>
+`;
+// The player page takes recorded events (which anyone with a recording link could have crafted) and draws them. It may run only its own script, make no requests,
+// and cannot be framed by or form-post anywhere; rrweb 2.2 rebuilds a recording only inside an iframe that runs no scripts.
+const PLAYER_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src about: blob: data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+async function replayAssetRoute(req: Request, path: string): Promise<Response | null> {
+  const match = path.match(/^\/__feedback\/replay\/([a-z.]+)$/);
+  if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) return null;
+  const headers = { 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
+  if (match[1] === 'player') return new Response(PLAYER_PAGE, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PLAYER_CSP } });
+  const asset = Object.hasOwn(REPLAY_ASSETS, match[1]!) ? REPLAY_ASSETS[match[1]!] : undefined;
+  if (!asset) return json({ kind: 'not_found' }, 404);
+  try { return new Response(await readFile(resolve(import.meta.dir, asset.file)), { headers: { ...headers, 'Content-Type': asset.type } }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found', detail: 'dist is not built' }, 404); throw error; }
 }
 // FEEDBACK_INBOX_WIDGET=0 (or off, false, no) leaves the capture widget off the inbox page itself.
 const WIDGET_TAG = /<script src="\.\.\/embed\.js"[^>]*><\/script>\n?/;
@@ -272,10 +299,41 @@ export interface HandlerOptions { secretTarget?: string | null; vaultDir?: strin
 // A chunk is at most 32 MiB; the server accepts that and a little more, and a JSON body is held to LIMIT by body() itself.
 const CHUNK_REQUEST = files.CHUNK_BYTES + 1024 * 1024;
 const SANDBOX = { 'Content-Security-Policy': 'sandbox allow-scripts allow-popups', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' };
-const SHARE_MISS = { ...SANDBOX, 'Content-Type': 'text/plain; charset=utf-8', 'X-Robots-Tag': 'noindex' };
+// The shell page is sandboxed (an opaque origin), so its two POSTs are cross-origin: these answers say any origin may read them. They carry no credentials and no secret.
+const CORS = { 'Access-Control-Allow-Origin': '*' };
+const SHARE_MISS = { ...SANDBOX, ...CORS, 'Content-Type': 'text/plain; charset=utf-8', 'X-Robots-Tag': 'noindex' };
 // Revoked, expired and unknown tokens are this one response: same status, same body, same headers.
 const shareMiss = () => new Response('Not found\n', { status: 404, headers: SHARE_MISS });
 const shareHit = (html: string) => new Response(html, { headers: { ...SANDBOX, 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex' } });
+const shareJson = (body: unknown, status = 200) => Response.json(body, { status, headers: { ...SANDBOX, ...CORS, 'X-Robots-Tag': 'noindex' } });
+const MAX_NOTE_BODY = 16 * 1024;
+const MAX_REPLAY_BODY = replay.REPLAY_MAX_BYTES + 1024 * 1024;
+// A small JSON body from a viewer. `text/plain` is accepted so the sandboxed shell can send it without a preflight (the token is the credential here, not a cookie).
+async function viewerBody(req: Request, limit: number): Promise<ObjectData> {
+  const type = req.headers.get('content-type')?.split(';')[0]?.trim();
+  if (type !== 'application/json' && type !== 'text/plain') throw new Invalid('JSON only', 415);
+  if (Number(req.headers.get('content-length')) > limit) throw new Invalid('Body is too large', 413);
+  const reader = req.body?.getReader();
+  if (!reader) throw new Invalid('Missing body');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) { await reader.cancel(); throw new Invalid('Body is too large', 413); }
+    chunks.push(value);
+  }
+  try { return object(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { throw new Invalid('Invalid JSON object'); }
+}
+// What the public share endpoints remember, in memory only: how often a link and a caller used them. Never written to disk.
+interface ShareLimits { feedbackLink: Limiter; feedbackCaller: Limiter; replayChunks: Limiter; replaySessions: Limiter }
+const newLimits = (): ShareLimits => ({
+  feedbackLink: new Limiter([{ windowMs: 60e3, max: 5 }, { windowMs: 864e5, max: 50 }]),
+  feedbackCaller: new Limiter([{ windowMs: 60e3, max: 5 }]),
+  replayChunks: new Limiter([{ windowMs: 60e3, max: 120 }]),
+  replaySessions: new Limiter([{ windowMs: 864e5, max: 50 }]),
+});
 function dataDirOf(req: Request, fallback: string, projects?: Project[]): string {
   if (!projects) return fallback; // single-project mode: ?project= is ignored and every URL is the one it has always been
   const id = new URL(req.url).searchParams.get('project');
@@ -349,11 +407,56 @@ async function artifactRoute(req: Request, dir: string, path: string, read: (req
     const data = await read(req);
     const expires = data.expires;
     if (expires !== '1d' && expires !== '7d' && expires !== '30d' && expires !== 'none') throw new Invalid('Expiry is 1 day, 7 days, 30 days or none');
-    const created = await shares.createShare(dir, { artifact: sharePost[1]!, expires, latest: data.latest === true, by: 'you', agent: false, confirm: data.confirm === true, now });
-    return json({ id: created.share.id, url: created.path, expires_at: created.share.expires_at, version: created.share.version, created_by: 'you' }, 201);
+    if (data.record !== undefined && typeof data.record !== 'boolean') throw new Invalid('record must be true or false');
+    const created = await shares.createShare(dir, { artifact: sharePost[1]!, expires, latest: data.latest === true, by: 'you', agent: false, confirm: data.confirm === true, now, record: data.record === true });
+    return json({ id: created.share.id, url: created.path, expires_at: created.share.expires_at, version: created.share.version, created_by: 'you', record: created.share.record === true }, 201);
   }
   const revoke = path.match(/^\/__feedback\/api\/shares\/(s[0-9a-f]{8})\/revoke$/);
   if (revoke && req.method === 'POST') { await read(req); return json(await shares.revokeShare(dir, revoke[1]!, { user: true }, now)); }
+  // The owner's recording switch for one link. Only the inbox has this: no CLI command or MCP tool reaches it.
+  const record = path.match(/^\/__feedback\/api\/shares\/(s[0-9a-f]{8})\/record$/);
+  if (record && req.method === 'POST') {
+    const data = await read(req);
+    if (typeof data.on !== 'boolean') throw new Invalid('on must be true or false');
+    return json(shares.publicShare(await shares.setRecording(dir, record[1]!, data.on, now), now));
+  }
+  return null;
+}
+// Session replays, for the owner. A link's recordings sit under its artifact; the owner's own inbox sessions have their own list and a setting that is off until switched on.
+async function replayRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, now: number): Promise<Response | null> {
+  const mine = path.match(/^\/__feedback\/api\/artifacts\/(a[0-9a-f]{12})\/(replays|heatmap)(?:\/([A-Za-z0-9_-]+))?$/);
+  if (mine) {
+    const [, id, what, session] = mine;
+    if (what === 'heatmap' && !session && req.method === 'GET') {
+      const v = new URL(req.url).searchParams.get('version');
+      const version = v === null || v === '' ? null : Number(v);
+      if (version !== null && (!Number.isInteger(version) || version < 1)) throw new Invalid('Invalid version');
+      return json(await replay.heatmap(dir, id!, version));
+    }
+    if (what !== 'replays') return null;
+    if (!session && req.method === 'GET') return json(await replay.listReplays(dir, id!));
+    if (session && req.method === 'GET') { const found = await replay.readReplay(dir, id!, session); return found ? json(found) : json({ kind: 'not_found' }, 404); }
+    if (session && req.method === 'DELETE') return await replay.deleteReplay(dir, id!, session) ? json({ deleted: true }) : json({ kind: 'not_found' }, 404);
+    return null;
+  }
+  if (path === `${PREFIX}/api/replay-settings`) {
+    if (req.method === 'GET') return json({ record_inbox: await replay.readInboxSetting(dir) });
+    if (req.method !== 'POST') return null;
+    const data = await read(req);
+    if (typeof data.record_inbox !== 'boolean') throw new Invalid('record_inbox must be true or false');
+    return json({ record_inbox: await replay.setInboxSetting(dir, data.record_inbox) });
+  }
+  const own = path.match(/^\/__feedback\/api\/replays(?:\/([A-Za-z0-9_-]+))?$/);
+  if (!own) return null;
+  const session = own[1];
+  if (!session && req.method === 'GET') return json(await replay.listReplays(dir, replay.INBOX_SCOPE));
+  if (!session && req.method === 'POST') {
+    if (!(await replay.readInboxSetting(dir))) return json({ kind: 'recording_off' }, 403);
+    const data = await read(req);
+    return json({ ok: true, ...(await replay.appendChunk(dir, { scope: replay.INBOX_SCOPE, link: null, version: null }, { session: data.session, seq: data.seq, events: data.events }, now)) });
+  }
+  if (session && req.method === 'GET') { const found = await replay.readReplay(dir, replay.INBOX_SCOPE, session); return found ? json(found) : json({ kind: 'not_found' }, 404); }
+  if (session && req.method === 'DELETE') return await replay.deleteReplay(dir, replay.INBOX_SCOPE, session) ? json({ deleted: true }) : json({ kind: 'not_found' }, 404);
   return null;
 }
 async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, areas: AreasConfig, options: HandlerOptions): Promise<Response | null> {
@@ -428,9 +531,54 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   }
   return null;
 }
+// A share link by its token, looked for in every project. Null is the one miss.
+async function findShare(folders: string[], token: string, now: number) {
+  for (const folder of folders) {
+    const share = await shares.activeShare(folder, token, now);
+    if (share) return { folder, share };
+  }
+  return null;
+}
+async function viewerFeedback(req: Request, found: { folder: string; share: shares.Share }, caller: string, limits: ShareLimits, now: number): Promise<Response> {
+  const { folder, share } = found;
+  if (!limits.feedbackCaller.take(caller, now) || !limits.feedbackLink.take(share.id, now)) return shareJson({ kind: 'rate_limited', detail: 'Too many notes just now. Try again in a minute.' }, 429);
+  try {
+    const data = await viewerBody(req, MAX_NOTE_BODY);
+    const text = typeof data.note === 'string' ? data.note.trim() : '';
+    if (!text || text.length > store.MAX_VIEWER_NOTE) throw new Invalid(`Note must be 1–${store.MAX_VIEWER_NOTE} characters`);
+    const meta = await artifacts.readArtifact(folder, share.artifact);
+    if (!meta) return shareMiss();
+    const quote = data.quote === undefined ? undefined : store.parseQuote(data.quote);
+    await store.appendViewerFeedback(folder, meta.thread, { text, shareId: share.id, artifactId: meta.id, label: shares.shareLabel(share, meta.title), ...(quote ? { quote } : {}) });
+    await shares.countFeedback(folder, share.id);
+    return shareJson({ ok: true }, 201);
+  } catch (error) {
+    if (error instanceof Invalid) return error.status === 404 ? shareMiss() : shareJson({ kind: 'invalid_request', detail: error.message }, error.status);
+    throw error;
+  }
+}
+async function viewerReplay(req: Request, found: { folder: string; share: shares.Share }, caller: string, limits: ShareLimits, now: number): Promise<Response> {
+  const { folder, share } = found;
+  // Recording is the owner's switch. A link that does not record takes nothing.
+  if (share.record !== true) return shareJson({ kind: 'recording_off' }, 403);
+  if (!limits.replayChunks.take(`${share.id}|${caller}`, now)) return shareJson({ kind: 'rate_limited' }, 429);
+  try {
+    const data = await viewerBody(req, MAX_REPLAY_BODY);
+    if (data.seq === 0 && !limits.replaySessions.take(share.id, now)) return shareJson({ kind: 'rate_limited' }, 429);
+    const meta = await artifacts.readArtifact(folder, share.artifact);
+    if (!meta) return shareMiss();
+    const version = share.version === 'latest' ? meta.latest : share.version;
+    const done = await replay.appendChunk(folder, { scope: meta.id, link: share.id, version }, { session: data.session, seq: data.seq, events: data.events }, now);
+    return shareJson({ ok: true, seq: done.seq }, 200);
+  } catch (error) {
+    if (error instanceof Invalid) return error.status === 404 ? shareMiss() : shareJson({ kind: 'invalid_request', detail: error.message }, error.status);
+    throw error;
+  }
+}
 export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AREAS, options: HandlerOptions = {}) {
   const dir = resolve(directory);
-  return async (req: Request): Promise<Response> => {
+  const limits = newLimits();
+  return async (req: Request, server?: ServerLike): Promise<Response> => {
     try {
       const path = new URL(req.url).pathname;
       const now = options.now?.() ?? Date.now();
@@ -441,10 +589,21 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
         try { token = decodeURIComponent(token); } catch { return shareMiss(); }
         const folders = options.projects?.length ? options.projects.map(project => project.dir) : [dir];
         for (const folder of folders) {
-          const html = await shares.openShare(folder, token, now);
-          if (html !== null) return shareHit(html);
+          const opened = await shares.openShareDetail(folder, token, now);
+          if (opened !== null) return shareHit(await shellPage({ html: opened.html, title: opened.title, record: opened.share.record === true }));
         }
         return shareMiss();
+      }
+      // The two things a viewer can send: a note, and (only when the owner switched it on) the recording. POST only; there is no read path.
+      const sharedSend = path.match(/^\/__feedback\/s\/([^/]+)\/(feedback|replay)$/);
+      if (sharedSend) {
+        let token = sharedSend[1]!;
+        try { token = decodeURIComponent(token); } catch { return shareMiss(); }
+        if (req.method !== 'POST') return shareMiss();
+        const found = await findShare(options.projects?.length ? options.projects.map(project => project.dir) : [dir], token, now);
+        if (!found) return shareMiss();
+        const caller = clientKey(req, server);
+        return sharedSend[2] === 'feedback' ? await viewerFeedback(req, found, caller, limits, now) : await viewerReplay(req, found, caller, limits, now);
       }
       if (path === `${PREFIX}/api/projects` && req.method === 'GET') {
         await store.touchPresence(options.projects?.[0]?.dir ?? dir, 'user', now);
@@ -469,8 +628,12 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
       if (threads) return threads;
       const published = await artifactRoute(req, dataDir, path, body, now);
       if (published) return published;
+      const replays = await replayRoute(req, dataDir, path, body, now);
+      if (replays) return replays;
       const embed = await embedRoute(req, path);
       if (embed) return embed;
+      const replayAsset = await replayAssetRoute(req, path);
+      if (replayAsset) return replayAsset;
       const inbox = await inboxRoute(req, path);
       if (inbox) return inbox;
       return json({ kind: 'not_found' }, 404);
@@ -486,6 +649,7 @@ export const handle = createHandler(process.env.FEEDBACK_DIR ?? resolve(process.
 export function serverOptions(env: Record<string, string | undefined> = process.env) {
   const areas = loadAreas(env);
   const secretTarget = loadSecretTarget(env), vaultDir = loadVaultDir(env);
+  loadReplayDays(env); // a bad FEEDBACK_REPLAY_DAYS stops the server at startup, like the other settings
   const configured = env.FEEDBACK_PROJECTS?.trim() ? loadProjects(env) : null;
   const feedbackDir = configured?.[0]?.dir ?? env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);

@@ -30,3 +30,11 @@ export function loadSecretTarget(env: Record<string, string | undefined> = proce
 }
 // FEEDBACK_VAULT_DIR: where redacted messages are kept. Unset means redaction is off. Whether it sits outside FEEDBACK_DIR is checked by validateVault.
 export const loadVaultDir = (env: Record<string, string | undefined> = process.env): string | null => env.FEEDBACK_VAULT_DIR?.trim() || null;
+// FEEDBACK_REPLAY_DAYS: how long a session replay is kept (default 30). A daily pass removes older ones.
+export function loadReplayDays(env: Record<string, string | undefined> = process.env): number {
+  const value = env.FEEDBACK_REPLAY_DAYS?.trim();
+  if (!value) return 30;
+  const days = Number(value);
+  if (!/^\d+$/.test(value) || days < 1 || days > 3650) throw new Invalid('FEEDBACK_REPLAY_DAYS must be a whole number of days from 1 to 3650');
+  return days;
+}

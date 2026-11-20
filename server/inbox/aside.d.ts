@@ -1,4 +1,4 @@
-interface AsideMessage { id: string; author: 'user' | 'agent'; created_at: string; aside?: boolean; divider?: boolean; reply_to?: string }
+interface AsideMessage { id: string; author: 'user' | 'agent' | 'viewer'; created_at: string; aside?: boolean; divider?: boolean; reply_to?: string }
 export interface AsideGroup<M extends AsideMessage> { root: M; answers: M[]; answered: boolean }
 export const isAside: (m: AsideMessage | undefined) => boolean;
 export const isAsideRoot: (m: AsideMessage) => boolean;

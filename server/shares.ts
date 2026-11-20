@@ -15,6 +15,8 @@ export const SHARE_ID = /^s[0-9a-f]{8}$/;
 export interface Share {
   id: string; artifact: string; version: number | 'latest'; token_hash: string; expires_at: string | null;
   created_at: string; created_by: string; views: number; last_viewed_at: string | null; revoked_at?: string;
+  // `record`: the owner switched interaction recording on for this link (only the inbox can). `feedback`: how many notes viewers sent through it.
+  record?: true; feedback?: number;
 }
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -43,7 +45,8 @@ function parseShare(value: unknown): Share | null {
   return { id: s.id, artifact: s.artifact, version: s.version as number | 'latest', token_hash: s.token_hash,
     expires_at: typeof s.expires_at === 'string' ? s.expires_at : null, created_at: s.created_at, created_by: s.created_by,
     views: s.views, last_viewed_at: typeof s.last_viewed_at === 'string' ? s.last_viewed_at : null,
-    ...(typeof s.revoked_at === 'string' ? { revoked_at: s.revoked_at } : {}) };
+    ...(typeof s.revoked_at === 'string' ? { revoked_at: s.revoked_at } : {}), ...(s.record === true ? { record: true as const } : {}),
+    ...(typeof s.feedback === 'number' && Number.isInteger(s.feedback) && s.feedback > 0 ? { feedback: s.feedback } : {}) };
 }
 
 export async function readShares(dir: string): Promise<Share[]> {
@@ -75,10 +78,10 @@ export function statsFor(shares: Share[], artifactId: string, now = Date.now()):
 // What the inbox may see. The token and its hash stay on disk.
 export function publicShare(share: Share, now = Date.now()) {
   return { id: share.id, artifact: share.artifact, version: share.version, expires_at: share.expires_at, created_at: share.created_at,
-    created_by: share.created_by, views: share.views, last_viewed_at: share.last_viewed_at, active: isActive(share, now) };
+    created_by: share.created_by, views: share.views, last_viewed_at: share.last_viewed_at, active: isActive(share, now), record: share.record === true, feedback: share.feedback ?? 0 };
 }
 
-export interface NewShare { artifact: string; expires?: Expiry; latest?: boolean; by: string; agent: boolean; confirm?: boolean; now?: number }
+export interface NewShare { artifact: string; expires?: Expiry; latest?: boolean; by: string; agent: boolean; confirm?: boolean; now?: number; record?: boolean }
 function expiryOf(input: NewShare, now: number): string | null {
   const expires = input.expires ?? (input.agent ? '7d' : '7d');
   if (input.agent) {
@@ -102,9 +105,11 @@ export async function createShare(dir: string, input: NewShare): Promise<{ share
   const hit = scanForSecrets(source);
   if (hit && input.agent) throw new Invalid(`This artifact looks like it contains ${hit}. It was not shared. The person can still share it from the inbox after a warning.`);
   if (hit && !input.confirm) throw new Invalid(`This artifact looks like it contains ${hit}. Share it only if you mean to.`, 409);
+  // Recording is the owner's choice. An agent's link never records, whatever the input says.
+  const record = input.record === true && !input.agent;
   const token = randomBytes(32).toString('base64url');
   const share: Share = { id: `s${randomBytes(4).toString('hex')}`, artifact: meta.id, version, token_hash: hashToken(token), expires_at: expiresAt,
-    created_at: new Date(now).toISOString(), created_by: input.by, views: 0, last_viewed_at: null };
+    created_at: new Date(now).toISOString(), created_by: input.by, views: 0, last_viewed_at: null, ...(record ? { record: true as const } : {}) };
   await updateShares(dir, shares => { shares.push(share); });
   try {
     if (input.agent) await appendShareNotice(dir, meta.thread, `${input.by} shared '${meta.title}' · expires ${whenText(expiresAt)} · Revoke`, share.id, meta.id);
@@ -142,26 +147,56 @@ export async function transferShares(fromDir: string, toDir: string, moving: Sha
   });
 }
 
-// The HTML to serve, or null when the token is unknown, revoked or expired. Those three are not distinguished. Views count only a page we serve.
-// Nothing about the caller (no address, no user agent) is stored.
-export async function openShare(dir: string, token: string, now = Date.now()): Promise<string | null> {
+// What a share link serves: the artifact's HTML and the link itself (for the shell page), or null when the token is unknown, revoked or expired.
+// Those three are not distinguished. Views count only a page we serve. Nothing about the caller (no address, no user agent) is stored.
+export async function openShareDetail(dir: string, token: string, now = Date.now()): Promise<{ html: string; share: Share; title: string } | null> {
   if (!token || token.length > 128) return null;
   const hash = hashToken(token);
   // A miss reads the file and stops. It does not take the lock, and it does not create the data directory or _shares.json.
   const known = (await readShares(dir)).find(share => sameHash(share.token_hash, hash));
   if (!known || !isActive(known, now)) return null;
   let html: string;
-  try { html = await artifactHtml(dir, known.artifact, known.version); } catch { return null; }
-  let served = false;
+  let title = '';
+  try { html = await artifactHtml(dir, known.artifact, known.version); title = (await readArtifact(dir, known.artifact))?.title ?? ''; } catch { return null; }
+  let served: Share | null = null;
   try {
     await updateShares(dir, shares => {
       const share = shares.find(item => sameHash(item.token_hash, hash));
       if (!share || !isActive(share, now)) return;
       share.views += 1;
       share.last_viewed_at = new Date(now).toISOString();
-      served = true;
+      served = { ...share };
     });
   } catch { return null; }
-  return served ? html : null;
+  return served ? { html, share: served, title } : null;
+}
+export async function openShare(dir: string, token: string, now = Date.now()): Promise<string | null> {
+  return (await openShareDetail(dir, token, now))?.html ?? null;
 }
 
+// A link seen by its token alone, with no side effect: what the feedback and replay endpoints check. Null is the one miss.
+export async function activeShare(dir: string, token: string, now = Date.now()): Promise<Share | null> {
+  if (!token || token.length > 128) return null;
+  const hash = hashToken(token);
+  const known = (await readShares(dir)).find(share => sameHash(share.token_hash, hash));
+  return known && isActive(known, now) ? known : null;
+}
+
+// Counts one viewer note on the link. Quiet when the link has gone.
+export async function countFeedback(dir: string, id: string): Promise<void> {
+  await updateShares(dir, shares => { const share = shares.find(item => item.id === id); if (share) share.feedback = (share.feedback ?? 0) + 1; });
+}
+
+// The owner's switch. Only the inbox calls this: there is no CLI or MCP path to it.
+export async function setRecording(dir: string, id: string, on: boolean, now = Date.now()): Promise<Share> {
+  if (!SHARE_ID.test(id)) throw new Invalid('No such share', 404);
+  return updateShares(dir, shares => {
+    const share = shares.find(item => item.id === id);
+    if (!share || !isActive(share, now)) throw new Invalid('No such share', 404);
+    if (on) share.record = true; else delete share.record;
+    return { ...share };
+  });
+}
+
+// The link's name in a thread: "Viewer feedback · <label>".
+export const shareLabel = (share: Share, title: string) => `${title ? `${title.slice(0, 80)} · ` : ''}link ${share.id}`;

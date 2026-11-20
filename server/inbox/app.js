@@ -10,6 +10,7 @@ import { createOutbox, newCid } from './outbox.js';
 import { UploadError, cancelRemote, uploadFile } from './uploader.js';
 import { presenceLines } from './presence.js';
 import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
+import { durationText, heatPositions, newSessionId, replaySummary } from './replays.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const PROJECT_KEY = 'fb-inbox-project';
@@ -37,7 +38,7 @@ const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfi
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], files: [], newFiles: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, qopen: new Set(), keptShown: new Set(), folds: loadFolds(),
-  projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
+  artTab: 'page', heat: false, replays: [], mysessions: null, recordInbox: false, recorder: null, projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
 function loadClPref() { try { const v = JSON.parse(localStorage.getItem(CL_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -163,7 +164,10 @@ function openMenu(anchor, items, { up = false } = {}) {
 }
 // An agent with its own name (an MCP client) gets a colour made from the name, so two agents are never mistaken for each other.
 const hueOf = name => { let h = 0; for (const c of name) h = (h * 31 + c.codePointAt(0)) % 360; return h; };
+// A viewer (someone with a share link) has no profile: a plain "Viewer" with a V.
+const personOf = who => (who === 'viewer' ? { name: 'Viewer' } : state.profile[who]);
 function avatar(who, big = false, name = '') {
+  if (who === 'viewer') return el('span', { class: 'avatar viewer', 'aria-hidden': 'true', text: 'V' });
   if (who === 'agent' && name) {
     const node = el('span', { class: 'avatar agent named', 'aria-hidden': 'true', text: ([...name][0] || '?').toUpperCase() });
     node.style.background = `hsl(${hueOf(name)} 52% 36%)`;
@@ -213,7 +217,9 @@ function cropSquare(file) {
 }
 function openProfile() {
   profile.pending = undefined; showError($('profile-error'), '');
-  $('profile-name').value = state.profile.user.name; paintAvatarPreview(); $('profile-dialog').showModal(); $('profile-name').select();
+  $('profile-name').value = state.profile.user.name; paintAvatarPreview();
+  if ($('profile-record')) $('profile-record').checked = state.recordInbox;
+  $('profile-dialog').showModal(); $('profile-name').select();
 }
 async function saveProfile(event) {
   event.preventDefault(); showError($('profile-error'), '');
@@ -221,6 +227,8 @@ async function saveProfile(event) {
     const body = { name: $('profile-name').value };
     if (profile.pending !== undefined) body.avatar = profile.pending;
     state.profile = await post('profile', body); drawMe(); state.shown = ''; if (state.detail) drawThread();
+    const record = !!$('profile-record')?.checked;
+    if (record !== state.recordInbox) { await post('replay-settings', { record_inbox: record }); state.recordInbox = record; if (record) void startRecording(); else stopRecording(); }
     $('profile-dialog').close();
   } catch (error) { showError($('profile-error'), error.message); }
 }
@@ -755,10 +763,10 @@ function messageNode(d, m) {
   if (m.divider && m.moved_to) return el('div', { class: 'divider', role: 'separator', 'data-mid': m.id }, el('span', {}, 'Moved to ', el('a', { href: `#/${m.moved_to}`, text: (/^Moved to \[(.*)\]\(#\//.exec(m.text) || [])[1] || 'another thread' })));
   if (m.divider && m.kind === 'share_notice') return el('div', { class: 'divider share-notice', role: 'status' }, el('span', { text: m.text.replace(/ · Revoke$/, '') }), ...(m.share_id ? [el('button', { type: 'button', onclick: () => { void revokeShare(m.share_id); } }, 'Revoke')] : []));
   if (m.divider) return el('div', { class: 'divider', role: 'separator' }, el('span', { text: m.text }));
-  const who = m.agent_name ? { ...state.profile.agent, name: m.agent_name } : state.profile[m.author];
+  const who = m.kind === 'viewer_feedback' ? { name: m.label ? `Viewer feedback · ${m.label}` : 'Viewer feedback' } : m.agent_name ? { ...state.profile.agent, name: m.agent_name } : personOf(m.author);
   const farewell = d.merged_into && m === d.messages[d.messages.length - 1]; // the link to the merged thread stays visible
   const folded = quiet(d, m) && !farewell && !state.expanded.has(expandKey(d, m));
-  const badge = m.author === 'agent' ? flagBadge(m.flag) : null;
+  const badge = m.author === 'agent' || m.author === 'viewer' ? flagBadge(m.flag) : null;
   if (folded) {
     const first = (m.redacted ? '🔒 Redacted' : firstPlainLine(m.text) || (m.images.length ? '[image]' : m.attachments?.length ? '[file]' : '')).slice(0, 160);
     return el('article', { class: 'msg agent collapsed', 'data-mid': m.id, 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
@@ -778,6 +786,7 @@ function messageNode(d, m) {
     const asked = (d.messages || []).find(item => item.question?.id === m.answer.question_id)?.question;
     node.append(el('button', { type: 'button', class: 'qchip', onclick: () => jumpToQuestion(m.answer.question_id) }, `↩ ${m.answer.question_id} · ${clip(asked?.prompt || 'Question', 42)}`));
   }
+  if (m.kind === 'viewer_feedback' && m.quote) node.append(el('blockquote', { class: 'viewer-quote' }, el('span', { class: 'hint', text: 'Pointing at' }), ...(m.quote.text ? [el('span', { text: ` \u201c${m.quote.text}\u201d` })] : []), ...(m.quote.path ? [el('code', { text: m.quote.path })] : [])));
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
   if (m.kind === 'secret_request' && m.secret) node.append(secretNode(d, m));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
@@ -955,7 +964,7 @@ function quoteNode(d, m) {
   const q = resolveQuote(d.messages, m);
   if (!q) return null;
   if (!q.found) return el('span', { class: 'quote missing', role: 'note', text: q.snippet });
-  const name = state.profile[q.original.author].name;
+  const name = personOf(q.original.author).name;
   return el('button', { type: 'button', class: `quote ${q.original.author}`, 'aria-label': `In reply to ${name}: ${q.snippet || 'message'}. Go to the original.`, onclick: () => jumpTo(q.original.id) },
     el('strong', { text: name }), el('span', { class: 'snip', text: q.snippet }));
 }
@@ -985,7 +994,7 @@ function drawReplyBar() {
   if (state.replyTo && !m && d) state.replyTo = null; // the original is gone
   $('replybar').hidden = !m;
   if (!m) return;
-  $('replybar-text').replaceChildren(el('strong', { text: state.profile[m.author].name }), snippetOf(m));
+  $('replybar-text').replaceChildren(el('strong', { text: personOf(m.author).name }), snippetOf(m));
 }
 function startReply(id) {
   const d = state.detail; if (!d || d.read_only || !d.messages.some(m => m.id === id && !m.divider)) return;
@@ -1326,7 +1335,7 @@ async function loadThread(id, { quiet = false } = {}) {
     const d = await api(`threads/${id}`);
     if (id !== state.openId) return;
     state.detail = d; drawThread(); if (state.focusItem) focusItemNow();
-    const shareUnread = (d.messages || []).some(m => m.kind === 'share_notice' && (!d.user_read_at || m.created_at > d.user_read_at));
+    const shareUnread = (d.messages || []).some(m => (m.kind === 'share_notice' || m.kind === 'viewer_feedback') && (!d.user_read_at || m.created_at > d.user_read_at));
     if ((d.last_author === 'agent' && (!d.user_read_at || d.user_read_at < d.last_message_at)) || shareUnread) { // ticks need the read marker even for FYIs; a share notice counts as unread too
       // Stamp what we actually showed, so a message that arrived since is not marked read unseen.
       await post(`threads/${id}/read`, { seen: d.last_message_at });
@@ -1504,12 +1513,16 @@ function drawMetrics() {
       el('div', { class: 'card' }, el('h4', { text: 'You reply' }), el('p', { class: 'sub', text: `from ${agent}'s message to yours, ${m.response.user.count} samples` }), statTiles(m.response.user))),
     el('h3', { text: 'By area' }),
     el('div', { class: 'tablewrap' }, areaTable(m, agent)),
+    el('h3', { text: 'My sessions' }),
+    el('p', { class: 'sub', text: 'Your own inbox recordings, only if you switched on "Record my inbox sessions" in your profile.' }),
+    el('div', { id: 'my-sessions' }),
     el('p', { class: 'sub', style: 'margin-top:14px', text: `Days and hours are UTC. A thread counts as closed when its status last changed to done. Merged-away threads and ${agent}'s acknowledgements are not counted. Your actions: ${m.events.count} in ${wlabel}${m.events.count ? ` (${Object.entries(m.events.by_kind).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ')})` : ''}.` }),
   ];
   const key = JSON.stringify([m.window, m.generated_at.slice(0, 16), state.profile, innerWidth]);
   if (key === state.mdrawn) return;
   state.mdrawn = key;
   body.replaceChildren(...sections);
+  drawMySessions();
 }
 function areaTable(m, agent) {
   const head = ['Area', 'Open / all', `Waiting for ${agent}`, 'Waiting on you', `Msgs you / ${agent}`, 'Median reply'];
@@ -1522,7 +1535,7 @@ async function loadMetrics() {
     const want = state.mwindow;
     const data = await api(`metrics?window=${want}`);
     if (!state.metricsOn || want !== state.mwindow) return;
-    state.mdata = data; drawMetrics();
+    state.mdata = data; drawMetrics(); void loadMySessions();
   } catch (error) { if (!state.mdata) { $('metrics-body').replaceChildren(el('p', { class: 'error', text: `Could not load the metrics: ${error.message}` })); state.mdrawn = ''; } }
 }
 
@@ -1942,11 +1955,12 @@ function chooseProject(id) {
   $('project-menu').hidden = true;
   $('project-button')?.setAttribute('aria-expanded', 'false');
   if (id === state.project) return;
+  stopRecording(); // what it recorded goes to the project it was recording
   state.project = id;
   try { localStorage.setItem(PROJECT_KEY, id); } catch { /* storage may be blocked */ }
   state.threads = []; state.detail = null; state.openId = 'switching';
   if (location.hash !== '#/') location.hash = '#/';
-  refreshList().then(() => { state.openId = 'switching'; route(); });
+  refreshList().then(() => { state.openId = 'switching'; route(); void refreshReplaySetting(); });
 }
 async function refreshProjects() {
   let data = null;
@@ -1968,6 +1982,7 @@ function openShare(id) {
   $('share-copy').hidden = true; $('share-create').hidden = false;
   const picked = document.querySelector('input[name="share-exp"][value="7d"]'); if (picked) picked.checked = true;
   if ($('share-latest')) $('share-latest').checked = false;
+  if ($('share-record')) $('share-record').checked = false; // recording is off until the owner switches it on
   $('share-dialog').showModal();
 }
 function showShareLink(path) {
@@ -1980,8 +1995,9 @@ async function createUserShare(confirm) {
   const id = state.shareFor; if (!id) return;
   const expires = document.querySelector('input[name="share-exp"]:checked')?.value || '7d';
   const latest = !!$('share-latest')?.checked;
+  const record = !!$('share-record')?.checked;
   try {
-    const created = await post(`artifacts/${id}/share`, { expires, latest, ...(confirm ? { confirm: true } : {}) });
+    const created = await post(`artifacts/${id}/share`, { expires, latest, ...(record ? { record: true } : {}), ...(confirm ? { confirm: true } : {}) });
     showShareLink(created.url);
     if (state.openId) await loadThread(state.openId, { quiet: true });
     if (state.artifactOn) await loadArtifact();
@@ -2007,11 +2023,22 @@ function linkRow(link, title) {
       el('p', { text: `Created ${when(link.created_at)}` }),
       el('p', { text: link.expires_at ? `Expires ${link.expires_at.slice(0, 10)}` : 'No expiry' }),
       el('p', { text: `Version ${version}` }),
-      el('p', { text: viewed })),
+      el('p', { text: viewed }),
+      el('p', { text: `Feedback from viewers: ${link.feedback || 0}` }),
+      el('label', { class: 'rec-switch' }, el('input', { type: 'checkbox', 'data-record': link.id, ...(link.record ? { checked: '' } : {}), onchange: e => { void setRecording(link, e.currentTarget); } }), 'Record interactions')),
     el('button', { type: 'button', onclick: () => { void revokeShare(link.id); } }, 'Revoke'));
 }
 function drawManage(links) {
   $('manage-list').replaceChildren(...(links.length ? links.map(link => linkRow(link)) : [el('p', { text: 'No active links.' })]));
+}
+// The owner's switch for one link. A failure puts the box back.
+async function setRecording(link, box) {
+  const on = box.checked;
+  try {
+    await post(`shares/${link.id}/record`, { on });
+    link.record = on;
+    if (state.artifactOn) await loadArtifact();
+  } catch (error) { box.checked = !on; box.setCustomValidity?.(error.message); box.title = error.message; }
 }
 async function openManage(id) {
   state.manageFor = id;
@@ -2033,7 +2060,7 @@ function removeArtifactFrame() {
   frame.remove();
 }
 function artifactFrame(src) {
-  const host = $('artifact');
+  const host = $('artifact-stage') || $('artifact');
   if (!host) return;
   let frame = $('artifact-frame');
   if (!frame) {
@@ -2069,6 +2096,7 @@ function drawArtifact(meta, version) {
   if (meta.links) { pill.textContent = pillText(meta); pill.onclick = () => { void openManage(meta.id); }; pill.hidden = false; }
   else pill.hidden = true;
   $('artifact-share').onclick = () => openShare(meta.id);
+  drawArtifactTabs(meta, version);
 }
 async function loadArtifact() {
   const id = state.artifactId; if (!id) return;
@@ -2087,6 +2115,157 @@ async function loadArtifactsPage() {
     $('shared-list').replaceChildren(...(shared.length ? shared.map(link => linkRow(link, link.title || link.artifact)) : [el('p', { class: 'hint', text: 'No active links.' })]));
   } catch (error) { $('artifacts-list')?.replaceChildren(el('p', { class: 'error', text: error.message })); }
 }
+// ---- Replays. A shared page's recordings sit under its artifact (a Replays tab, and a Heatmap over the page); your own inbox sessions sit under Metrics.
+// The player is a page of the feedback server's own, with a strict CSP; the recording is rebuilt only inside an iframe that runs no scripts.
+const BASE = API.replace(/api\/$/, '');
+function drawArtifactTabs(meta, version) {
+  const replays = state.artTab === 'replays';
+  $('tab-page').setAttribute('aria-pressed', String(!replays)); $('tab-replays').setAttribute('aria-pressed', String(replays));
+  $('artifact-stage').hidden = replays; $('replays-panel').hidden = !replays;
+  $('artifact-heat').hidden = replays; $('artifact-heat').setAttribute('aria-pressed', String(state.heat));
+  if (replays) void loadReplays(meta);
+  void drawHeat(meta, version);
+}
+async function loadReplays(meta) {
+  try {
+    const rows = await api(`artifacts/${meta.id}/replays`);
+    if (state.artifactId !== meta.id || state.artTab !== 'replays') return;
+    state.replays = rows; drawReplays(meta);
+  } catch (error) { $('replays-list').replaceChildren(el('p', { class: 'error', text: `Could not load the replays: ${error.message}` })); state.replaysDrawn = ''; }
+}
+function sessionRow(r, { artifact, onDelete, linkText }) {
+  const path = artifact ? `artifacts/${artifact}/replays/${r.session}` : `replays/${r.session}`;
+  const confirming = state.replayDel === r.session;
+  return el('article', { class: 'replay-row', 'data-session': r.session },
+    el('div', { class: 'info' }, el('strong', { text: when(r.started_at) }), el('span', { text: `${replaySummary(r)}${linkText ? ` · ${linkText}` : ''}` })),
+    el('button', { type: 'button', class: 'primary', 'aria-label': `Play the recording from ${when(r.started_at)}`, onclick: () => { void playReplay(path, `${when(r.started_at)} · ${replaySummary(r)}`); } }, 'Play'),
+    el('button', { type: 'button', 'aria-label': `${confirming ? 'Confirm: delete' : 'Delete'} the recording from ${when(r.started_at)}`, onclick: () => {
+      if (!confirming) { state.replayDel = r.session; onDelete(); setTimeout(() => { if (state.replayDel === r.session) { state.replayDel = null; onDelete(); } }, 4000); return; }
+      state.replayDel = null;
+      void api(path, { method: 'DELETE' }).then(onDelete.reload, error => { showError($('error'), error.message); onDelete(); });
+    } }, confirming ? 'Confirm delete' : 'Delete'));
+}
+function drawReplays(meta) {
+  const rows = state.replays;
+  const key = JSON.stringify([rows.map(r => [r.session, r.duration_ms, r.clicks]), state.replayDel]);
+  if (key === state.replaysDrawn) return;
+  state.replaysDrawn = key;
+  $('replays-sub').textContent = rows.length ? `${rows.length} ${rows.length === 1 ? 'recording' : 'recordings'}. Viewers were told the page records clicks and mouse movement, and could opt out. Kept for the retention period, then deleted.` : 'No recordings yet. Switch on Record interactions for a shared link, and viewers are told and can opt out.';
+  const redraw = () => { state.replaysDrawn = ''; drawReplays(meta); };
+  redraw.reload = () => loadReplays(meta);
+  $('replays-list').replaceChildren(...rows.map(r => sessionRow(r, { artifact: meta.id, onDelete: redraw, linkText: r.link ? `link ${r.link}` : '' })));
+}
+async function drawHeat(meta, version) {
+  const on = state.heat && state.artTab === 'page';
+  $('artifact-heat').setAttribute('aria-pressed', String(state.heat));
+  $('heatmap').hidden = !on; $('heatmap-note').hidden = !on;
+  if (!on) return;
+  try {
+    const data = await api(`artifacts/${meta.id}/heatmap?version=${version}`);
+    if (state.artifactId !== meta.id || !state.heat) return;
+    state.heatData = { ...data, version }; paintHeat();
+  } catch (error) { $('heatmap-note').textContent = `Could not load the heatmap: ${error.message}`; }
+}
+function paintHeat() {
+  const d = state.heatData, stage = $('artifact-stage');
+  if (!d || !stage || $('heatmap').hidden) return;
+  const spots = heatPositions(d.clicks, stage.clientWidth, stage.clientHeight);
+  $('heatmap').replaceChildren(...spots.map(p => el('div', { class: 'dot', style: `left:${p.left}px;top:${p.top}px` })));
+  $('heatmap-note').textContent = d.sessions ? `${d.clicks.length} ${d.clicks.length === 1 ? 'click' : 'clicks'} from ${d.sessions} ${d.sessions === 1 ? 'recording' : 'recordings'} of v${d.version}` : `No recordings of v${d.version} yet`;
+}
+let replayListener = null;
+async function playReplay(path, label) {
+  const dialog = $('replay-dialog'), frame = $('replay-frame');
+  let data;
+  try { data = await api(path); } catch (error) { showError($('error'), error.message); return; }
+  $('replay-meta').textContent = label;
+  dialog.showModal();
+  const width = Math.max(240, Math.min(1000, frame.clientWidth || 600));
+  const height = Math.max(160, Math.round(Math.min(frame.clientHeight || 400, width * 0.62) - 90));
+  if (replayListener) window.removeEventListener('message', replayListener);
+  replayListener = event => {
+    if (event.source !== frame.contentWindow || !event.data) return;
+    if (event.data.rf === 'player-ready') frame.contentWindow.postMessage({ rf: 'play', events: data.events, width, height }, '*');
+    else if (event.data.rf === 'player-error') $('replay-meta').textContent = `${label} · could not play: ${String(event.data.message).slice(0, 120)}`;
+  };
+  window.addEventListener('message', replayListener);
+  frame.setAttribute('src', `${BASE}replay/player`);
+}
+function closeReplay() {
+  if (replayListener) { window.removeEventListener('message', replayListener); replayListener = null; }
+  $('replay-frame').removeAttribute('src');
+  if ($('replay-dialog').open) $('replay-dialog').close();
+}
+// Your own inbox sessions (Metrics, My sessions).
+async function loadMySessions() {
+  try { state.mysessions = await api('replays'); } catch { if (!state.mysessions) state.mysessions = []; }
+  drawMySessions();
+}
+function drawMySessions() {
+  const host = $('my-sessions'); if (!host) return;
+  const rows = state.mysessions || [];
+  if (!rows.length) { host.replaceChildren(el('p', { class: 'sub', text: state.recordInbox ? 'Nothing recorded yet.' : 'Nothing recorded. Switch on "Record my inbox sessions" in your profile.' })); return; }
+  const redraw = () => drawMySessions();
+  redraw.reload = () => loadMySessions();
+  host.replaceChildren(...rows.map(r => sessionRow(r, { artifact: null, onDelete: redraw })));
+}
+// Recording the inbox itself: off until switched on in the profile. Inputs are masked, and the page shows "Recording" while it runs.
+function loadRecorder() {
+  return new Promise((resolve, reject) => {
+    if (window.RFRecorder) { resolve(window.RFRecorder); return; }
+    const script = document.createElement('script');
+    script.src = `${BASE}replay/recorder.js`;
+    script.onload = () => (window.RFRecorder ? resolve(window.RFRecorder) : reject(new Error('The recorder did not load.')));
+    script.onerror = () => reject(new Error('The recorder did not load.'));
+    document.head.append(script);
+  });
+}
+async function flushRecording(r) {
+  if (r.sending || r.stopped || !r.buf.length) return;
+  const events = r.buf; r.buf = []; r.sending = true;
+  try {
+    const body = JSON.stringify({ session: r.session, seq: r.seq, events });
+    const response = await fetch(`${API}replays${r.query ? `?${r.query}` : ''}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: body.length < 60000 });
+    if (response.ok) r.seq++;
+    else if (response.status === 429 || response.status >= 500) r.buf = events.concat(r.buf);
+    else { if (response.status === 403) state.recordInbox = false; stopRecording(); } // switched off elsewhere, or the recording is full
+  } catch { r.buf = events.concat(r.buf); }
+  r.sending = false;
+}
+async function startRecording() {
+  if (state.recorder) return;
+  let recorder;
+  try { recorder = await loadRecorder(); } catch { return; }
+  if (state.recorder || !state.recordInbox) return;
+  const r = { session: newSessionId(), seq: 0, buf: [], sending: false, stopped: false, stop: null, timer: null, query: projectQuery() };
+  r.stop = recorder.start({ emit: event => { r.buf.push(event); if (r.buf.length >= 400) void flushRecording(r); } });
+  r.timer = setInterval(() => { void flushRecording(r); }, 5000);
+  state.recorder = r;
+  $('rec-dot').hidden = false;
+}
+function stopRecording() {
+  const r = state.recorder;
+  $('rec-dot').hidden = true;
+  if (!r) return;
+  state.recorder = null;
+  try { r.stop?.(); } catch { /* already stopped */ }
+  clearInterval(r.timer);
+  if (state.recordInbox) void flushRecording(r).then(() => { r.stopped = true; }); else r.stopped = true; // what is left goes out once
+}
+async function refreshReplaySetting() {
+  try {
+    const setting = await api('replay-settings');
+    state.recordInbox = setting.record_inbox === true;
+  } catch { return; }
+  if (state.recordInbox) void startRecording(); else stopRecording();
+}
+addEventListener('pagehide', () => { if (state.recorder) void flushRecording(state.recorder); });
+$('tab-page')?.addEventListener('click', () => { state.artTab = 'page'; if (state.artifact) drawArtifactTabs(state.artifact, state.artifactVer || state.artifact.latest); });
+$('tab-replays')?.addEventListener('click', () => { state.artTab = 'replays'; state.replaysDrawn = ''; if (state.artifact) drawArtifactTabs(state.artifact, state.artifactVer || state.artifact.latest); });
+$('artifact-heat')?.addEventListener('click', () => { state.heat = !state.heat; if (state.artifact) drawArtifactTabs(state.artifact, state.artifactVer || state.artifact.latest); });
+$('replay-close')?.addEventListener('click', closeReplay);
+$('replay-dialog')?.addEventListener('close', () => { $('replay-frame').removeAttribute('src'); });
+window.addEventListener('resize', () => { if (state.heat) paintHeat(); });
 $('project-button')?.addEventListener('click', () => {
   const menu = $('project-menu'); if (!menu) return;
   menu.hidden = !menu.hidden;
@@ -2113,4 +2292,4 @@ document.addEventListener('visibilitychange', poll);
 drawMe();
 refreshPins();
 fitViewport(); drawOffline(); outbox.start();
-Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(route).then(refreshPresence);
+Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(route).then(refreshPresence).then(refreshReplaySetting);

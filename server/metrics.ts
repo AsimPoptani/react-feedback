@@ -59,7 +59,7 @@ function daysBetween(from: string, to: string): string[] {
 
 // When a waiting thread started waiting: the first message of the user's last streak, or the first message that asked for the user.
 function waitingSince(messages: store.Message[], waiting: 'agent' | 'you', fallback: string): string {
-  const real = messages.filter(m => !m.divider);
+  const real = messages.filter((m): m is store.Message & { author: store.Author } => !m.divider && m.author !== 'viewer'); // a viewer's note is neither side of the conversation
   if (waiting === 'agent') {
     if (real[real.length - 1]?.author !== 'user') return fallback; // waiting on a claim or a merge, not on a message
     let i = real.length - 1;
@@ -76,7 +76,7 @@ async function readEvents(dir: string): Promise<{ ts: string; kind: string }[]> 
   const out: { ts: string; kind: string }[] = [];
   for (const line of (raw ?? '').split('\n')) {
     if (!line.trim()) continue;
-    try { const e = JSON.parse(line); if (e && e.author !== 'agent' && e.author !== 'system' && typeof e.ts === 'string' && typeof e.kind === 'string') out.push({ ts: e.ts, kind: e.kind }); } catch { /* a torn line */ }
+    try { const e = JSON.parse(line); if (e && e.author !== 'agent' && e.author !== 'system' && e.author !== 'viewer' && typeof e.ts === 'string' && typeof e.kind === 'string') out.push({ ts: e.ts, kind: e.kind }); } catch { /* a torn line */ }
   }
   return out;
 }
@@ -111,7 +111,7 @@ export async function computeMetrics(dir: string, window: Window = '7d', now = n
     const { summary, messages, path } = s;
     if (summary.merged_into) continue; // its messages live on in the thread it was merged into
     const area = areaRow(areaOf({ mode: summary.mode, url: summary.url }, areas).area);
-    const real = messages.filter(m => !m.divider);
+    const real = messages.filter((m): m is store.Message & { author: store.Author } => !m.divider && m.author !== 'viewer'); // a viewer's note is neither side of the conversation
     const mainFlow = real.filter(m => !m.aside); // side questions do not time the main conversation
     if (summary.created_at < firstSeen) firstSeen = summary.created_at;
 

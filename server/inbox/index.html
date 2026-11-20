@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="rf-version" content="0.9.4">
+<meta name="rf-version" content="0.10.0">
 <title>Feedback inbox</title>
 <style>
 :root {
@@ -544,13 +544,35 @@ button.share-pill:hover { background: var(--paper); }
 #share-form fieldset { border: 1px solid var(--rule); border-radius: 10px; display: flex; flex-wrap: wrap; gap: 8px 14px; }
 #share-url { overflow-wrap: anywhere; font-family: var(--f-mono); font-size: 13px; }
 #manage-dialog { max-height: min(90dvh, 640px); overflow: auto; }
+#artifact-stage { position: relative; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+#artifact-stage[hidden], #replays-panel[hidden] { display: none; }
+#heatmap { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+#heatmap[hidden] { display: none; }
+#heatmap .dot { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; background: radial-gradient(circle, rgba(232, 89, 12, .55) 0%, rgba(232, 89, 12, .25) 45%, rgba(232, 89, 12, 0) 70%); }
+#heatmap-note { position: absolute; left: 8px; top: 8px; z-index: 2; background: var(--ink); color: #fff; border-radius: 8px; padding: 4px 10px; font-size: 13px; pointer-events: none; }
+.tabs { display: flex; gap: 6px; }
+.tabs button[aria-pressed="true"], button.toggle[aria-pressed="true"] { background: var(--teal-tint); border-color: var(--teal); }
+#replays-panel { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 14px 16px 72px; }
+.replay-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; margin: 8px 0; background: var(--white); min-width: 0; }
+.replay-row .info { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.replay-row .info strong { display: block; }
+.replay-row .info span { font-size: 13px; color: var(--ink-2); }
+dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto; }
+#replay-frame { width: 100%; height: min(70dvh, 620px); border: 0; background: #fff; display: block; }
+.rec { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-weight: 700; color: var(--berry); font-size: 13px; }
+.rec[hidden] { display: none; }
+.msg.viewer { align-self: flex-start; background: var(--ochre-tint); border-bottom-left-radius: 4px; border-color: var(--ochre); }
+.msg .viewer-quote { margin: 4px 0 6px; padding: 4px 8px; border-left: 4px solid var(--teal); background: var(--panel); border-radius: 6px; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+.msg .viewer-quote code { display: block; font-size: 12px; }
+.share-card .rec-switch { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 14px; }
 @media (max-width: 759px) {
   #artifact > .artifact-head { flex-wrap: wrap; row-gap: 8px; }
   #artifact > .artifact-head h2 { flex: 1 1 auto; order: 0; }
   #artifact > .artifact-head .artifact-tools { flex: 1 1 100%; order: 1; }
   #artifact-back { min-width: 44px; justify-content: center; padding: 0; border-color: transparent; background: transparent; }
   #artifact-back .back-text { display: none; }
-  #artifact .share-pill { flex: 1 1 auto; min-width: 0; }
+  .artifact-tools { flex-wrap: wrap; row-gap: 8px; }
+  #artifact .share-pill { flex: 1 1 auto; min-width: 0; white-space: nowrap; }
 }
 </style>
 </head>
@@ -584,7 +606,7 @@ button.share-pill:hover { background: var(--paper); }
     </div>
     <div id="groups"></div>
     <p class="empty" id="list-empty" hidden>No threads here.</p>
-    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.9.4</span></div><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
+    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.10.0</span></div><p class="rec" id="rec-dot" role="status" hidden><span aria-hidden="true">●</span> Recording</p><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
   </nav>
   <main class="thread" id="thread" aria-label="Thread">
     <p class="placeholder" id="placeholder">Select a thread, or start a new one.</p>
@@ -619,7 +641,14 @@ button.share-pill:hover { background: var(--paper); }
           <label class="ver-pick"><select id="artifact-version" aria-label="Version"></select></label>
           <button type="button" class="primary" id="artifact-share">Share</button>
           <button type="button" class="share-pill" id="artifact-pill" hidden>Shared</button>
+          <span class="tabs" role="group" aria-label="View"><button type="button" id="tab-page" aria-pressed="true">Page</button><button type="button" id="tab-replays" aria-pressed="false">Replays</button></span>
+          <button type="button" class="toggle" id="artifact-heat" aria-pressed="false">Heatmap</button>
         </div>
+      </div>
+      <div id="artifact-stage"><p id="heatmap-note" hidden></p><div id="heatmap" aria-hidden="true" hidden></div></div>
+      <div id="replays-panel" hidden>
+        <p class="sub" id="replays-sub"></p>
+        <div id="replays-list"></div>
       </div>
     </div>
     <div id="artifacts" class="metrics" hidden style="display:none">
@@ -715,6 +744,8 @@ button.share-pill:hover { background: var(--paper); }
       <label><input type="radio" name="share-exp" value="none"> No expiry</label>
     </fieldset>
     <label><input type="checkbox" id="share-latest"> Always the latest version</label>
+    <label><input type="checkbox" id="share-record"> Record interactions</label>
+    <p class="hint" style="margin:0">Off by default. When on, anyone with the link is told the page records clicks and mouse movement, and can choose not to be recorded. Inputs are masked.</p>
     <p class="error" id="share-error" role="alert" hidden></p>
     <p id="share-url" hidden></p>
     <div class="bar"><button type="button" id="share-cancel">Close</button><button type="submit" class="primary" id="share-create">Create link</button><button type="button" id="share-copy" hidden>Copy</button></div>
@@ -766,9 +797,17 @@ button.share-pill:hover { background: var(--paper); }
         <p class="hint" style="margin:6px 0 0">Cropped to a square from the centre. Up to 2 MB.</p>
       </div>
     </div>
+    <label class="check" for="profile-record"><input type="checkbox" id="profile-record"> Record my inbox sessions</label>
+    <p class="hint" style="margin:0">Off by default. When on, this inbox records your clicks and mouse movement (inputs masked) so you can replay them under Metrics, My sessions. Only you can see them. They are deleted after the retention period.</p>
     <p class="error" id="profile-error" role="alert" hidden></p>
     <div class="bar"><span class="grow"></span><button type="button" id="profile-cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
   </form>
+</dialog>
+<dialog id="replay-dialog" class="replay" aria-labelledby="replay-h">
+  <h2 id="replay-h">Replay</h2>
+  <p class="hint" id="replay-meta"></p>
+  <iframe id="replay-frame" title="Session replay" referrerpolicy="no-referrer"></iframe>
+  <div class="bar"><span class="grow"></span><button type="button" id="replay-close">Close<kbd data-keys="Esc">Esc</kbd></button></div>
 </dialog>
 <dialog id="remind-dialog" class="remind" aria-labelledby="remind-h">
   <h2 id="remind-h">Reminders</h2>

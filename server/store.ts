@@ -15,6 +15,8 @@ export const STATUSES = ['open', 'done'] as const;
 const LEGACY_OPEN = ['new', 'seen'];
 export type Status = (typeof STATUSES)[number];
 export type Author = 'user' | 'agent';
+// A person who opened a shared link. Their note is stored in the thread but is neither the user's nor the agent's.
+export type MessageAuthor = Author | 'viewer';
 export const MAX_TEXT = 10000;
 export const MAX_TITLE = 200;
 export const MAX_IMAGES = 5;
@@ -39,20 +41,23 @@ export const checkFlag = (value: unknown): Flag => {
   return value as Flag;
 };
 // `reply_to` is the id of an earlier message in the same thread that this one quotes. It is only metadata: it changes nothing about who is waiting or what is unread.
-export interface Message { id: string; author: Author; text: string; images: string[]; attachments?: Attachment[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string;
+export interface Message { id: string; author: MessageAuthor; text: string; images: string[]; attachments?: Attachment[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string;
   // A side question (`/btw`): `aside` marks it and its answers; an answer's `reply_to` is the aside's id. `added_items` and `ticked_items` are the checklist items this message added or ticked.
   aside?: true; added_items?: string[]; ticked_items?: string[];
   // `moved_to` (a thread id) marks the stub left where a message was moved away; `moved_from` (`<thread>/<message>`) marks a copy that arrived by a move, so an interrupted move can tell what it already did.
   moved_to?: string; moved_from?: string;
   // `kind: 'secret_request'` is the agent asking for a key: `secret` holds what to ask for and, once the user has saved it (straight to the app, never here), a non-secret `status` and `hint`.
   // `redacted` replaces a sensitive message's text and images, which live in the vault; `key` says which vault file.
-  kind?: 'secret_request' | 'share_notice' | 'project_move'; secret?: SecretRequest; redacted?: Redaction; share_id?: string; artifact_id?: string;
+  kind?: 'secret_request' | 'share_notice' | 'project_move' | 'viewer_feedback'; secret?: SecretRequest; redacted?: Redaction; share_id?: string; artifact_id?: string;
+  // `kind: 'viewer_feedback'` (author `viewer`): a note from someone with a share link. `label` names the link; `quote` is what they pointed at (a text snippet, a CSS path, a viewport-relative box).
+  label?: string; quote?: ViewerQuote;
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
   client_id?: string; written_at?: string;
   // `agent_name`: which agent wrote an agent message, when it is not the default one (an MCP client's FEEDBACK_AGENT_NAME). Absent means the inbox's agent profile.
   agent_name?: string;
   // Set only on the object handed back when a post to a merged-away thread was written on the target instead. It is not stored.
   forwarded_to?: string }
+export interface ViewerQuote { text: string; path: string; box: [number, number, number, number] | null }
 export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string; check?: 'works' | 'rejected' }
 export interface Redaction { at: string; by: Author; reason?: string; key: string }
 export const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -238,6 +243,13 @@ function parseSecret(m: ItemData): SecretRequest | undefined {
   return { name: s.name, label: s.label, ...(typeof s.help_url === 'string' && /^https:\/\//.test(s.help_url) ? { help_url: s.help_url } : {}),
     ...(s.status === 'saved' ? { status: 'saved' as const, ...(typeof s.hint === 'string' && s.hint.length <= MAX_HINT ? { hint: s.hint } : {}), ...(typeof s.saved_at === 'string' ? { saved_at: s.saved_at } : {}), ...(s.check === 'works' || s.check === 'rejected' ? { check: s.check } : {}) } : {}) };
 }
+export function parseQuote(q: unknown): ViewerQuote | undefined {
+  if (!isObject(q)) return undefined;
+  const text = typeof q.text === 'string' ? q.text.slice(0, 300) : '';
+  const path = typeof q.path === 'string' ? q.path.slice(0, 300) : '';
+  const box = Array.isArray(q.box) && q.box.length === 4 && q.box.every(n => typeof n === 'number' && Number.isFinite(n)) ? (q.box as number[]).map(n => Math.round(n * 1000) / 1000) as [number, number, number, number] : null;
+  return text || path || box ? { text, path, box } : undefined;
+}
 function parseRedaction(r: unknown): Redaction | undefined {
   if (!isObject(r) || typeof r.at !== 'string' || (r.by !== 'user' && r.by !== 'agent') || typeof r.key !== 'string') return undefined;
   return { at: r.at, by: r.by, key: r.key, ...(typeof r.reason === 'string' && r.reason ? { reason: r.reason.slice(0, 200) } : {}) };
@@ -249,11 +261,11 @@ function parseMessages(raw: string | null): Message[] {
     if (!line.trim()) continue;
     try {
       const m = JSON.parse(line);
-      if (isObject(m) && typeof m.id === 'string' && (m.author === 'user' || m.author === 'agent') && typeof m.text === 'string'
+      if (isObject(m) && typeof m.id === 'string' && (m.author === 'user' || m.author === 'agent' || (m.author === 'viewer' && m.kind === 'viewer_feedback')) && typeof m.text === 'string'
         && typeof m.created_at === 'string' && Array.isArray(m.images)) {
         const question = m.author === 'agent' ? parseQuestion(m.question) : undefined;
         const answer = m.author === 'user' ? parseAnswer(m.answer) : undefined;
-        const flag: Flag | undefined = m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
+        const flag: Flag | undefined = m.author === 'viewer' ? 'needs_you' : m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
         out.push({ id: m.id, author: m.author, text: m.text, images: m.images.filter((f): f is string => typeof f === 'string' && MESSAGE_IMAGE.test(f)), created_at: m.created_at,
           ...(parseAttachments(m.attachments).length ? { attachments: parseAttachments(m.attachments) } : {}),
           ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}),
@@ -265,6 +277,7 @@ function parseMessages(raw: string | null): Message[] {
           ...(parseSecret(m) ? { kind: 'secret_request' as const, secret: parseSecret(m)! } : {}),
           ...(m.kind === 'share_notice' && typeof m.share_id === 'string' ? { kind: 'share_notice' as const, share_id: m.share_id, ...(typeof m.artifact_id === 'string' ? { artifact_id: m.artifact_id } : {}) } : {}),
           ...(m.kind === 'project_move' && m.divider === true ? { kind: 'project_move' as const } : {}),
+          ...(m.author === 'viewer' && typeof m.share_id === 'string' ? { kind: 'viewer_feedback' as const, share_id: m.share_id, ...(typeof m.artifact_id === 'string' ? { artifact_id: m.artifact_id } : {}), ...(typeof m.label === 'string' ? { label: m.label.slice(0, 200) } : {}), ...(parseQuote(m.quote) ? { quote: parseQuote(m.quote)! } : {}) } : {}),
           ...(parseRedaction(m.redacted) ? { redacted: parseRedaction(m.redacted)! } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
@@ -341,7 +354,7 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: Author | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.set_by ? { set_by: event.set_by } : {}), ...(event.agent_name ? { agent_name: event.agent_name } : {}), ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -523,7 +536,7 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
   } catch (error) { await taken?.undo(); for (const name of imageNames) await rm(join(path, name), { force: true }); throw error; }
   await taken?.commit(); // the upload folders go only once the message is written
-  if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
+  if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent' || (input.author === 'user' && stored[stored.length - 1]?.author === 'viewer')) await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
   if (flag === 'done') await closeForDone(path);
   if (input.author === 'user') await writeStatus(path, 'open');
   return { message: created, eventKind, eventText, addedItems: added };
@@ -707,6 +720,37 @@ export async function appendShareNotice(dir: string, id: string, text: string, s
     const message: Message = { id: `m${stored.length + 1}`, author: 'agent', text, images: [], created_at: new Date().toISOString(), divider: true, kind: 'share_notice', share_id: shareId, artifact_id: artifactId };
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(message)}\n`);
   });
+}
+
+export const MAX_VIEWER_NOTE = 4000;
+// A note from someone with a share link. It is flagged for the user, and it is data (never an instruction) for any agent that reads the thread.
+export async function appendViewerFeedback(dir: string, id: string, input: { text: string; shareId: string; artifactId: string; label: string; quote?: ViewerQuote }): Promise<Message> {
+  // A note aimed at a thread that has been merged away is written on the thread it ended up in (a chain of merges is followed), with the line a forwarded post keeps.
+  let at = id, sentIn: string | undefined;
+  for (let hops = 0; hops < 16; hops++) {
+    const here = await itemDir(dir, at);
+    const note = await readMerge(here);
+    if (note?.state !== 'done') break;
+    sentIn ??= titleOf(await readItem(here), at);
+    at = note.into;
+  }
+  for (;;) {
+    const path = await itemDir(dir, at);
+    const written = await withLock(path, async () => {
+      // A merge can finish while this note waits for the lock. Write it on the target, not beside the farewell.
+      const note = await readMerge(path);
+      if (note?.state === 'done') return note.into;
+      const stored = await materialise(path, await readItem(path));
+      const text = sentIn ? quoteSent(sentIn, input.text) : input.text;
+      const created: Message = { id: `m${stored.length + 1}`, author: 'viewer', text, images: [], created_at: new Date().toISOString(), flag: 'needs_you', kind: 'viewer_feedback',
+        share_id: input.shareId, artifact_id: input.artifactId, label: input.label, ...(input.quote ? { quote: input.quote } : {}) };
+      await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
+      return created;
+    });
+    if (typeof written === 'string') { sentIn ??= titleOf(await readItem(path), at); at = written; continue; }
+    await logEvent(dir, { id: at, kind: 'message', text: `Viewer feedback · ${input.label}: ${input.text}`, author: 'viewer' });
+    return { ...written, ...(at !== id ? { forwarded_to: at } : {}) };
+  }
 }
 
 // `seen` is the last_message_at the client actually displayed; it is clamped to the newest message so it cannot pre-read later ones.
@@ -1626,7 +1670,7 @@ export interface Summary {
   last_flag: Flag | null; waiting_aside?: true; checklist: ChecklistCounts; open_for_you: number; merged_into: string | null; read_only: boolean; acked_through: string | null;
 }
 // A thread is unread for the user only when a message that needs them (a `needs_you` flag or an unanswered question) arrived after they last read.
-const needsUser = (m: Message, answered: Set<string>) => m.author === 'agent' && !m.question?.withdrawn && !m.question?.reasked && (m.flag === 'needs_you' || (questionLive(m.question) && !answered.has(m.question.id)));
+const needsUser = (m: Message, answered: Set<string>) => (m.author === 'viewer' && m.flag === 'needs_you') || m.author === 'agent' && !m.question?.withdrawn && !m.question?.reasked && (m.flag === 'needs_you' || (questionLive(m.question) && !answered.has(m.question.id)));
 // Waiting on you: a `needs_you` message or unanswered question since you last spoke, or (when you have not just spoken) an open, unclaimed item of yours.
 // Waiting for the agent: you spoke last (and the agent has not acknowledged it), you claimed something it has not checked, or a merge left something unanswered (`awaitAgent`) and no agent message has come since.
 function waitingOn(status: Status, messages: Message[], items: ChecklistItem[], awaitAgent: string | null, readOnly: boolean, ackedThrough: string | null): Summary['waiting'] {
@@ -1647,9 +1691,9 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const item = await readItem(path);
   const messages = await readMessages(path, item);
   const main = mainMessages(messages).filter(m => !m.moved_to && m.kind !== 'share_notice' && m.kind !== 'project_move'); // asides, move stubs, share notices and project-move lines never decide who spoke last
-  const last = [...main].reverse().find(m => !m.divider); // a system divider (a project move) is not someone speaking
+  const last = [...main].reverse().find(m => !m.divider && m.author !== 'viewer'); // a system divider (a project move) and a viewer's note are not the user or the agent speaking
   const created_at = item.created_at as string;
-  const last_author: Author = last?.author ?? 'user';
+  const last_author: Author = last?.author === 'agent' ? 'agent' : 'user';
   const last_message_at = lastAt(messages, item);
   const read = await readAt(path, 'read.json');
   const items = await readChecklist(path);

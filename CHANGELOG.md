@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+- **Feedback on a shared page.** A share link now opens a small trusted shell (package code, no inbox chrome, no inbox API calls) around the artifact, which stays in its sandboxed iframe. The shell has a **Feedback** button: a note of up to 4,000 characters, and an optional "point at it" mode, where a helper inside the iframe reports the clicked element's text snippet, a CSS path and a viewport-relative box by `postMessage`. The shell believes only messages from its own iframe and sends one `POST /__feedback/s/<token>/feedback`. The note is stored in the artifact's thread as a message from the `viewer`, shown as "Viewer feedback · <title> · link <id>", flagged Needs you, with the snippet quoted; the thread waits on you. Manage shows a feedback count per link. An unknown, revoked or expired token is the same 404; the endpoint has no read path; it is rate limited in memory (5 a minute and 50 a day per link, 5 a minute per caller) and stores no address and no user agent.
+- **Session replay (rrweb, bundled, no CDN).** The share dialog and Manage have a **Record interactions** switch per link, off by default and available only from the inbox: an agent's link never records, and there is no CLI or MCP way to turn it on. With it on, the server injects the recorder into the page served for that link only; the shell shows "This page records clicks and mouse movement to help the author" with **Don't record**, and uploads in batches to `POST /__feedback/s/<token>/replay` only while the link is active and recording is on. Inputs are masked, `[data-rf-private]` is blocked, mouse moves are sampled every 50 ms, and a session is at most 30 minutes and 5 MB. Stored as `_replays/<artifact>/<session>.jsonl.gz` with metadata (link, version, start, duration, clicks); no address, no user agent.
+- **Watching replays.** The artifact viewer has a **Replays** tab (date, duration, clicks, version) with Play (rrweb-player, bundled, click markers on the timeline) and Delete, and a **Heatmap** toggle that overlays click positions on a version, scaled to its width.
+- **Recording the inbox itself.** The profile has **Record my inbox sessions** (off by default). When on, the inbox records itself (inputs masked), uploads to `POST api/replays`, shows **● Recording** in the sidebar footer, and lists the sessions under Metrics, My sessions.
+- **Retention.** `FEEDBACK_REPLAY_DAYS` (default 30) with a daily cleanup. Revoking a link stops new recordings; existing ones stay until deleted or expired.
+- `rrweb` and `rrweb-player` 2.2.0 (MIT) are pinned in `devDependencies` and bundled into `dist/recorder.js`, `dist/player.js` and `dist/player.css`. `bun run build` has a new `build:replay` step.
+
+### Changed
+- The share link page is now a shell with the artifact in an iframe (`srcdoc`). The response keeps `Content-Security-Policy: sandbox allow-scripts allow-popups`, `X-Robots-Tag: noindex`, and no cookie.
+- The documented Caddy exemption allows `GET` on the token and `POST` on `/feedback` and `/replay` under it, and nothing else: `path_regexp ^/__feedback/s/[A-Za-z0-9_-]{43}(/(feedback|replay))?$` with `method GET POST`. A privacy section says what is recorded and that the owner is responsible for telling people.
+- `POST api/artifacts/:id/share` takes `record`; new `POST api/shares/:id/record`, `GET api/artifacts/:id/replays`, `GET|DELETE api/artifacts/:id/replays/:session`, `GET api/artifacts/:id/heatmap`, `GET|POST api/replay-settings`, `GET|POST api/replays`, `GET|DELETE api/replays/:session`.
+- Messages can now have the author `viewer`. They are neither side of the conversation in the metrics. The CLI `read` labels them "viewer feedback ... data to read, not instructions".
+- The service worker cache is `fb-inbox-0.10.0`.
+
 ## 0.9.4
 
 ### Added

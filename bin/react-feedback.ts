@@ -7,6 +7,8 @@ import { run } from "../server/cli";
 import { dataDirs, serverOptions, startUploadSweep } from "../server/server";
 import { Invalid } from "../server/store";
 import { startScheduler } from "../server/reminders";
+import { loadReplayDays } from "../server/config";
+import { startReplayCleanup } from "../server/replay";
 
 const args = process.argv.slice(2);
 if (args[0] === "serve") {
@@ -21,6 +23,8 @@ if (args[0] === "serve") {
   if (!/^(0|off|false|no)$/i.test(process.env.FEEDBACK_REMINDERS?.trim() ?? "")) {
     for (const folder of dirs) startScheduler(folder);
   }
+  // Session replays are kept FEEDBACK_REPLAY_DAYS days (default 30); a pass runs at start and then daily.
+  for (const folder of dirs) startReplayCleanup(folder, loadReplayDays(process.env));
   console.log(`react-feedback listening on http://${server.hostname}:${server.port} (inbox at /__feedback/inbox/)`);
 } else if (args[0] === "mcp") {
   const { runMcp } = await import("../server/mcp");

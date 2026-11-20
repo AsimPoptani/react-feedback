@@ -106,6 +106,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_MIN_FREE_BYTES` | `21474836480` (20 GiB) | an upload (or a chunk of one) is refused when it would leave less than this much free on the data volume, or less than 10% of the volume, whichever is larger |
 | `FEEDBACK_FILE_DIR` | none | the folder(s) (a `:`-separated list) an MCP agent may attach files from; unset: MCP files are off (see [Connect your agents](#connect-your-agents-mcp)) |
 | `FEEDBACK_PROJECTS` | none | a JSON list of `{id, name, dir}` when one server hosts several projects (see [Projects](#projects)). Unset: one project, `FEEDBACK_DIR`, and `?project=` is ignored |
+| `FEEDBACK_REPLAY_DAYS` | `30` | how many days a session replay is kept (a whole number from 1 to 3650). A pass at start and then once a day removes older ones (see [Session replay](#session-replay)) |
 | `FEEDBACK_PROJECT` | the first project | which project the CLI and `react-feedback mcp` use. `--project <id>` overrides it |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
@@ -369,7 +370,7 @@ The page is served from the same host as the inbox, but it runs in an **opaque s
 
 ## Share links
 
-**Share** on the viewer asks for an expiry (1 day, 7 days, 30 days, or none) and creates `/__feedback/s/<token>`. The token is 32 random bytes, 43 base64url characters; the server stores only its sha256. The link serves the version from when it was created, or whatever is latest if that box was ticked, with the same sandbox and `X-Robots-Tag: noindex`. It has no inbox chrome and no API. A revoked link, an expired link and an unknown token all answer with the same 404. Each view increments a counter and a last-viewed time. The address and the user agent are not stored. The token is in the URL, so it shows up in proxy and tunnel access logs; treat those logs as sensitive.
+**Share** on the viewer asks for an expiry (1 day, 7 days, 30 days, or none) and creates `/__feedback/s/<token>`. The token is 32 random bytes, 43 base64url characters; the server stores only its sha256. The link serves the version from when it was created, or whatever is latest if that box was ticked, with the same sandbox and `X-Robots-Tag: noindex`. It is a small page of its own (see [Feedback on a shared page](#feedback-on-a-shared-page)) with no inbox chrome and no inbox API: the only calls it can make are the two described there. A revoked link, an expired link and an unknown token all answer with the same 404. Each view increments a counter and a last-viewed time. The address and the user agent are not stored. The token is in the URL, so it shows up in proxy and tunnel access logs; treat those logs as sensitive.
 
 The card and the viewer show **Shared · 2 links · viewed 5×**. Manage lists each link as a card: who created it, when, the expiry, the version, the views and the last view, with Revoke on the right. The Artifacts page lists every active link, with Revoke.
 
@@ -379,12 +380,12 @@ A latest link keeps serving new versions. Publishing the next version runs that 
 
 The server treats HTTP callers as the person and CLI or MCP callers as agents, and loopback has no authentication. The guardrails apply to a cooperative agent using the CLI or MCP. An agent with shell access can call the HTTP API or edit the files itself; for a stronger split, run agents as a different OS user.
 
-If the site in front of the server asks people to log in, let the share link through and keep the inbox, the API and `/__feedback/a/` behind the login. The link is unguessable; the rest of the server is not. Bun normalises dot segments, so a proxy that matches the raw prefix `/__feedback/s/` also passes `/__feedback/s/%2e%2e/api/threads` through to the API. Match the token itself with an anchored pattern, and keep every other path behind the login:
+If the site in front of the server asks people to log in, let the share link through and keep the inbox, the API and `/__feedback/a/` behind the login. The link is unguessable; the rest of the server is not. A shared page makes exactly two more requests to the same address: `POST /__feedback/s/<token>/feedback` (a note) and `POST /__feedback/s/<token>/replay` (a recording, only when the owner switched it on). Allow `GET` on the token and `POST` on those two paths, and nothing else. Bun normalises dot segments, so a proxy that matches the raw prefix `/__feedback/s/` also passes `/__feedback/s/%2e%2e/api/threads` through to the API. Match the token itself with an anchored pattern, and keep every other path behind the login:
 
 ```caddyfile
 @shared {
-	method GET
-	path_regexp ^/__feedback/s/[A-Za-z0-9_-]{43}$
+	method GET POST
+	path_regexp ^/__feedback/s/[A-Za-z0-9_-]{43}(/(feedback|replay))?$
 }
 handle @shared {
 	reverse_proxy 127.0.0.1:8099
@@ -397,7 +398,45 @@ handle {
 }
 ```
 
-Check the exemption: `curl -i https://<host>/__feedback/s/%2e%2e/api/threads` must return **401**. A real token is 43 characters; `{43}` is that length.
+Check the exemption: `curl -i https://<host>/__feedback/s/%2e%2e/api/threads` must return **401**, and so must `curl -i -X POST https://<host>/__feedback/api/replays`. A real token is 43 characters; `{43}` is that length. The shared page sends its two POSTs as `text/plain` JSON, so the browser needs no preflight (`OPTIONS`) request.
+
+## Feedback on a shared page
+
+A share link opens a small **shell** page that the package serves (package code only, no inbox chrome, no inbox API calls). It holds the artifact in the same sandboxed iframe as before (`sandbox="allow-scripts allow-popups"`, no `allow-same-origin`) and a **Feedback** button. The shell itself is sandboxed by its response header too (`Content-Security-Policy: sandbox allow-scripts allow-popups`), so neither it nor the artifact can read the inbox's storage, cookies or API.
+
+A viewer can send a note of up to 4,000 characters, and can **point at** part of the page: a small helper inside the iframe reports the clicked element's text snippet (never from inside `[data-rf-private]`), a CSS path and a box relative to the viewport, by `postMessage`. The shell believes only messages whose `event.source` is its own iframe, and sends one `POST /__feedback/s/<token>/feedback`.
+
+The note is stored in the artifact's thread as a message from the **viewer**, shown as "Viewer feedback · <title> · link <id>", flagged **Needs you**, with the pointed-at snippet quoted. It makes the thread wait on you and counts as unread. Manage shows a feedback count per link. An agent that reads the thread sees `viewer` as the author and the text as data to read, not instructions. Only the inbox's person answers it; the viewer sees nothing back.
+
+The endpoint answers only for an active link (a bad, revoked or expired token is the same 404 as before), and it has no read path. It is rate limited in memory, per link (5 a minute, 50 a day) and per caller address (5 a minute); the limits are forgotten when the server restarts, and the address is used for that and never stored. No address and no user agent are written to disk.
+
+## Session replay
+
+Recording is **off for every link** until the owner switches it on, and it is built on [rrweb](https://github.com/rrweb-io/rrweb) (MIT), bundled into the package at a pinned version, with no CDN.
+
+**On a shared page.** The share dialog and Manage each have a **Record interactions** switch per link (off by default). Only the inbox has it: there is no CLI command or MCP tool that turns it on, and an agent's link never records. With it on, the server adds the recorder to the page it serves for that link (and only that link: never the inbox viewer's `/__feedback/a/` copy). The recorder does nothing until the shell tells it to start, and the shell shows a visible notice first:
+
+> This page records clicks and mouse movement to help the author. **Don't record**
+
+**Don't record** stops the recorder and discards what is waiting; nothing more is sent. The choice is kept for that link in the address of that tab (the shell has no storage of its own because it is sandboxed), so a reload stays declined; a fresh visit shows the notice again. Events go to the shell by `postMessage`, and the shell uploads them in batches to `POST /__feedback/s/<token>/replay`, with a session id it makes up. The server takes them only while the link is active and the switch is on (otherwise 403, or the usual 404).
+
+**In the inbox itself.** The profile has **Record my inbox sessions** (off by default). When on, the inbox records itself (inputs masked) and uploads to `POST api/replays`, and the sidebar footer shows **● Recording**. These are yours alone: they are listed under **Metrics, My sessions**.
+
+**What is recorded.** The page's structure and what changes on it, clicks, mouse movement sampled every 50 ms, scrolling, and the window size. Every input is masked (`maskAllInputs`), and anything inside an element marked `data-rf-private` is blocked. A session is at most 30 minutes and 5 MB; when it reaches either, the server refuses more and the page stops sending. It is stored as `_replays/<artifact>/<session>.jsonl.gz` (gzip, appended chunk by chunk) with a small `<session>.json` of metadata: link id, version, start, duration, click count and click positions. No address and no user agent are stored. Inbox sessions live in `_replays/_inbox/`.
+
+**Watching them.** The artifact viewer has a **Replays** tab (date, duration, clicks, version, link) with **Play** and **Delete**, and a **Heatmap** toggle that draws every click on that version of the page, scaled to its width. **Play** opens rrweb-player, bundled and served by the package, with orange markers on the timeline at each click. The player page has a strict Content-Security-Policy (its own script only, no requests), and rrweb rebuilds a recording only inside an iframe that runs no scripts, because anyone with a recording link can send crafted events.
+
+**Retention.** 30 days by default (`FEEDBACK_REPLAY_DAYS`). A pass at start and then daily removes sessions that have not been written to for that long. **Revoking a link** stops new recordings at once; recordings that exist stay until you delete them or they expire.
+
+### Privacy
+
+Recording clicks and mouse movement of people looking at a page is processing of their behaviour, and in many places (including UK and EU data protection law) people must be told. This feature mirrors that transparency duty: the notice is always shown, cannot be turned off by the page, and the viewer can opt out. **You, the owner, are responsible for telling people** who use your links, for having a reason to record, and for how long you keep recordings. This is not legal advice.
+
+- Off by default, per link, and only the owner can switch it on.
+- The notice is shown before anything is recorded, and **Don't record** sends nothing.
+- Inputs are masked; `data-rf-private` content is not recorded.
+- No IP address and no user agent are stored. The server sees the caller's address while it handles a request, uses it only for in-memory rate limits, and writes it nowhere.
+- Recordings are deleted after the retention period, and you can delete any of them sooner.
 
 ## Projects
 
@@ -500,13 +539,13 @@ At 760 px and narrower the thread view is one slim header (← title, the checkl
 
 ## HTTP API
 
-All under `/__feedback/`. With `FEEDBACK_PROJECTS` set, add `?project=<id>` (omit it for the first project). `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id` (includes `artifacts`), `POST api/threads/:id/messages|status|read|answer|merge|move-project` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400; `move-project` takes `{project}` and answers `{moved, id, project, from}`, and needs more than one project); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`; `GET api/projects` (`[{id, name, unread}]`, never a directory); `GET api/artifacts` and `GET api/artifacts/:id`; `POST api/artifacts/:id/share` (`{expires: "1d"|"7d"|"30d"|"none", latest?, confirm?}`); `GET api/shares`; `POST api/shares/:id/revoke`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only). `GET /__feedback/a/:id/v:n` is the sandboxed page. `GET /__feedback/s/:token` is a share link. `POST api/threads/:id/read` requires `Content-Type: application/json`, the same as the other writes. Files: `POST api/uploads` (`{name, size}`, answers `{id, offset, chunk}`), `PUT api/uploads/:id?offset=N` (a chunk of at most 32 MiB as `application/octet-stream`; `offset` must be what the server has, else 409), `GET api/uploads/:id` (`{offset, size, state}`, for a resume), `POST api/uploads/:id/finalise` (`{sha256}`), `DELETE api/uploads/:id`; a message or a new thread names finished uploads in `attachments: [id, ...]`; `GET api/threads/:id/attachments/:attachment` downloads one (`?inline=1` for a PDF preview).
+All under `/__feedback/`. With `FEEDBACK_PROJECTS` set, add `?project=<id>` (omit it for the first project). `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id` (includes `artifacts`), `POST api/threads/:id/messages|status|read|answer|merge|move-project` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400; `move-project` takes `{project}` and answers `{moved, id, project, from}`, and needs more than one project); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`; `GET api/projects` (`[{id, name, unread}]`, never a directory); `GET api/artifacts` and `GET api/artifacts/:id`; `POST api/artifacts/:id/share` (`{expires: "1d"|"7d"|"30d"|"none", latest?, confirm?, record?}`); `GET api/shares`; `POST api/shares/:id/revoke`, `POST api/shares/:id/record` (`{on}`, the owner's recording switch), `GET api/artifacts/:id/replays`, `GET|DELETE api/artifacts/:id/replays/:session`, `GET api/artifacts/:id/heatmap?version=n`, `GET|POST api/replay-settings` (`{record_inbox}`), `GET|POST api/replays`, `GET|DELETE api/replays/:session` (the owner's own inbox sessions). A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only). `GET /__feedback/a/:id/v:n` is the sandboxed page. `GET /__feedback/s/:token` is a share link (the shell page). `POST /__feedback/s/:token/feedback` and `POST /__feedback/s/:token/replay` are the two things a viewer can send, both `text/plain` or `application/json`. `GET /__feedback/replay/recorder.js`, `player.js`, `player.css` and `player` are the replay assets. `POST api/threads/:id/read` requires `Content-Type: application/json`, the same as the other writes. Files: `POST api/uploads` (`{name, size}`, answers `{id, offset, chunk}`), `PUT api/uploads/:id?offset=N` (a chunk of at most 32 MiB as `application/octet-stream`; `offset` must be what the server has, else 409), `GET api/uploads/:id` (`{offset, size, state}`, for a resume), `POST api/uploads/:id/finalise` (`{sha256}`), `DELETE api/uploads/:id`; a message or a new thread names finished uploads in `attachments: [id, ...]`; `GET api/threads/:id/attachments/:attachment` downloads one (`?inline=1` for a PDF preview).
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
 ## Security notes
 
-This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). A share link is the one path to let through that login. Match the 43-character token with the anchored pattern in [Share links](#share-links): Bun normalises a `%2e%2e` inside a prefix match into the API. Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox. The key box and the vault do not change that: they keep a key out of the thread, and a redacted message out of the served data, but they do not authenticate anyone. Anyone who can reach the server can still ask it to redact the user's messages. An artifact page is served from the same host but runs in an opaque sandboxed origin, so its scripts cannot read the inbox. The server treats HTTP callers as the person and CLI or MCP callers as agents, and loopback has no authentication, so the agent guardrails bind a cooperative agent using the CLI or MCP. An agent with shell access can call the HTTP API or edit the files itself; for a stronger split, run agents as a different OS user.
+This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). A share link is the one path to let through that login. Match the 43-character token with the anchored pattern in [Share links](#share-links): Bun normalises a `%2e%2e` inside a prefix match into the API. Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox. The key box and the vault do not change that: they keep a key out of the thread, and a redacted message out of the served data, but they do not authenticate anyone. Anyone who can reach the server can still ask it to redact the user's messages. An artifact page is served from the same host but runs in an opaque sandboxed origin, so its scripts cannot read the inbox. A viewer of a share link can send a note and (only when the owner has switched it on) a recording; both are rate limited and size capped, neither can be read back through a link, and see [Privacy](#privacy). The server treats HTTP callers as the person and CLI or MCP callers as agents, and loopback has no authentication, so the agent guardrails bind a cooperative agent using the CLI or MCP. An agent with shell access can call the HTTP API or edit the files itself; for a stronger split, run agents as a different OS user.
 
 ## Development
 
@@ -523,10 +562,11 @@ bun e2e/v09.mjs     # optional browser test: artifacts, share links, the sandbox
 bun e2e/rf093.mjs   # optional browser test: a withdrawn or re-asked question keeps the answer being typed (same needs)
 bun e2e/attach.mjs  # optional browser test: files in chunks through a proxy that refuses over 50 MB, progress, cancel, retry, PDF and zip chips, offline queue (same needs)
 bun e2e/parity.mjs <older-source-tree> <data-folder>   # an older release and this one must say the same about a copy of your data
-bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
+bun e2e/rf0100.mjs  # optional browser test: feedback on a shared page, session replay, the notice and opt-out, the heatmap (same needs)
+bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js, recorder.js, player.js, player.css
 ```
 
-Commit `dist/` together with any change to `src/widget/`, because git installs use it as is.
+Commit `dist/` together with any change to `src/widget/` or `src/replay/`, because git installs use it as is. `rrweb` and `rrweb-player` are pinned (`2.2.0`, MIT) in `devDependencies` and bundled into `dist/recorder.js` and `dist/player.js`; nothing is loaded from a CDN.
 
 ## Licence
 
