@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// react-feedback serve         start the feedback server (FEEDBACK_DIR, FEEDBACK_HOST, PORT)
+// react-feedback serve [--remote]  start the feedback server (FEEDBACK_DIR, FEEDBACK_HOST, PORT); --remote adds the paired-device listener (FEEDBACK_REMOTE_PORT, FEEDBACK_PUBLIC_URL)
 // react-feedback mcp           an MCP server on stdio (FEEDBACK_AGENT_NAME names the agent)
 // react-feedback --version     print the version
 // react-feedback <command> ... the agent CLI (list, reply, new, status, ask, todo, metrics ...)
@@ -9,6 +9,7 @@ import { Invalid } from "../server/store";
 import { startScheduler } from "../server/reminders";
 import { loadReplayDays } from "../server/config";
 import { startReplayCleanup } from "../server/replay";
+import { remoteWanted, startRemote } from "../server/remote";
 
 const args = process.argv.slice(2);
 if (args[0] === "serve") {
@@ -25,6 +26,12 @@ if (args[0] === "serve") {
   }
   // Session replays are kept FEEDBACK_REPLAY_DAYS days (default 30); a pass runs at start and then daily.
   for (const folder of dirs) startReplayCleanup(folder, loadReplayDays(process.env));
+  if (remoteWanted(args)) {
+    try { await startRemote({ ...options, fetch: options.fetch }, dirs[0]!, process.env); } catch (error) {
+      console.error(error instanceof Invalid ? error.message : error);
+      process.exit(1);
+    }
+  }
   console.log(`react-feedback listening on http://${server.hostname}:${server.port} (inbox at /__feedback/inbox/)`);
 } else if (args[0] === "mcp") {
   const { runMcp } = await import("../server/mcp");

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+- **Open on phone.** The inbox (the sidebar footer, and the thread header or its ⋯ menu) shows a QR code, the plain link with Copy, and a five-minute countdown; a phone that opens it is paired and lands on the thread you were reading. The code is in the URL fragment (`#/pair/<code>?to=<thread>`), so it is never sent to a server, proxy or log. The QR is drawn client-side by a bundled encoder (`qrcode-generator` 2.0.4, MIT; no CDN).
+- **Pairing.** Codes are 128 random bits, kept as a hash, single use, valid five minutes, at most five open, compared in constant time, and the exchange is rate limited. A device gets a cookie (`HttpOnly; Secure; SameSite=Strict; Path=/__feedback/`, 30 days, sliding). Devices are stored as hashes (`_devices.json`, mode 0600) with a browser-family name and a last-seen time; the user agent is not stored.
+- **Paired devices** page (name, paired, last seen, This device, Revoke, Revoke all) and a CLI: `react-feedback devices list|revoke <id>|revoke-all`. A revoke takes effect on the next request. There is no MCP tool for pairing or devices.
+- **Remote mode: `react-feedback serve --remote`.** A second listener on `FEEDBACK_REMOTE_PORT` (default `PORT` + 1), bound to 127.0.0.1, for a tunnel or proxy. Every request needs the device cookie (loopback is never trusted there), except the share routes, the pairing exchange and the pairing page at the inbox address. Writes also need an `Origin` matching the public address and a JSON body. `FEEDBACK_PUBLIC_URL` names the public address; with `cloudflared` on the PATH and none set, a quick tunnel is started and stopped with the server. The ordinary listener is unchanged.
+- README: "Continue on your phone", "Remote mode" (including how to use pairing instead of, or with, a basic-auth proxy), the new variables and routes.
+
+### Changed
+- The service worker also keeps `pair.js` for offline starts. (The cache name is unchanged: the version is assigned at release.)
+
 ## 0.12.0
 
 ### Added

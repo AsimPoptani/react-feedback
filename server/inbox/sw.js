@@ -2,7 +2,7 @@
 // It only ever handles GET requests for the files and API reads listed below. It never sees a key (those are PUT requests to the app), and it caches no image and no file.
 const VERSION = 'fb-inbox-0.12.0';
 const SHELL = `${VERSION}-shell`, DATA = `${VERSION}-data`;
-const FILES = ['./', 'app.js', 'areas.js', 'markdown.js', 'donut.js', 'quote.js', 'aside.js', 'tracker.js', 'secret.js', 'outbox.js', 'sha256.js', 'uploader.js', 'presence.js', 'replays.js', 'shot.js', 'version.js'];
+const FILES = ['./', 'app.js', 'areas.js', 'markdown.js', 'donut.js', 'quote.js', 'aside.js', 'tracker.js', 'secret.js', 'outbox.js', 'sha256.js', 'uploader.js', 'presence.js', 'replays.js', 'shot.js', 'version.js', 'pair.js'];
 const SCOPE = new URL('./', self.location.href).pathname;
 const API = new URL('../api/', self.location.href).pathname;
 // The thread list, one thread's JSON, the profile (and its two avatars), pins, areas, tracker and config. Never a search (?q=) or anything with a query.

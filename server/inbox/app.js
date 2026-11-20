@@ -12,6 +12,7 @@ import { presenceLines } from './presence.js';
 import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
 import { durationText, heatPositions, newSessionId, replaySummary } from './replays.js';
 import { parseShot } from './shot.js';
+import { initPair, notifyUnpaired } from './pair.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const PROJECT_KEY = 'fb-inbox-project';
@@ -64,6 +65,7 @@ async function api(path, options) {
   catch { setOffline(true); const e = new Error("You're offline, or the server can't be reached."); e.network = true; throw e; }
   setOffline(!!response.headers?.get?.('X-Fb-Offline')); // the service worker marks a saved copy it served in place of the network
   if (!response.ok) {
+    if (response.status === 401) notifyUnpaired(); // a paired phone that was revoked or expired
     let detail = '';
     try { detail = (await response.json()).detail || ''; } catch { /* not JSON */ }
     const error = new Error(detail || (response.status === 413 ? 'That is too large to send.' : `Request failed (${response.status})`));
@@ -1752,6 +1754,7 @@ function openMore() {
     ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
     ...(state.projects.length > 1 && !d.merged_into ? [{ label: 'Move to project…', onclick: () => openMoveMenu($('more')) }] : []),
     { label: 'Reminders', onclick: openReminders },
+    ...(!COARSE && pairing ? [{ label: '\u{1F4F1} Open on phone', onclick: () => { void pairing.openPhone(d.id); } }] : []),
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
     ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : []),
@@ -2546,6 +2549,7 @@ async function poll() {
 setInterval(poll, POLL_MS);
 document.addEventListener('visibilitychange', poll);
 drawMe();
+const pairing = initPair({ api, el, showToast, context: () => ({ thread: /^[\w-]{1,64}$/.test(state.openId || '') ? state.openId : '', project: state.project && state.project !== state.defaultProject ? state.project : '' }) });
 refreshPins();
 fitViewport(); drawOffline(); outbox.start();
 Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(route).then(refreshPresence).then(refreshReplaySetting);

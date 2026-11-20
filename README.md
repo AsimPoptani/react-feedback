@@ -108,6 +108,9 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_PROJECTS` | none | a JSON list of `{id, name, dir, icon?}` when one server hosts several projects (see [Projects](#projects)). Unset: one project, `FEEDBACK_DIR`, and `?project=` is ignored |
 | `FEEDBACK_REPLAY_DAYS` | `30` | how many days a session replay is kept (a whole number from 1 to 3650). A pass at start and then once a day removes older ones (see [Session replay](#session-replay)) |
 | `FEEDBACK_CLIENT_IP_HEADER` | none | the one request header your proxy sets to the real caller's address, used only for the share-link rate limits (see [Caller address](#caller-address-and-rate-limits)). Unset: the socket address. `X-Forwarded-For` is never believed |
+| `FEEDBACK_PUBLIC_URL` | none | the https address your phone uses to reach remote mode (see [Remote mode](#remote-mode)). An origin only. With `serve --remote` and cloudflared on the PATH, a quick tunnel supplies one when this is unset |
+| `FEEDBACK_REMOTE_PORT` | `PORT` + 1 | the port of the remote listener (`serve --remote`); it binds 127.0.0.1 only |
+| `FEEDBACK_REMOTE` | off | `1`, `on`, `true` or `yes` is the same as `serve --remote` |
 | `FEEDBACK_PROJECT` | the first project | which project the CLI and `react-feedback mcp` use. `--project <id>` overrides it |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
@@ -300,6 +303,7 @@ react-feedback redact <id> <message-id> [--reason "why"]        # move a sensiti
 react-feedback unredact <id> <message-id>                       # put it back from the vault (CLI only)
 react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "text"   # a nudge in the agent's event feed
 react-feedback remind <id> list | remove <rid> | off-default | on-default
+react-feedback devices list | revoke <id> | revoke-all         # phones paired for remote mode (see Remote mode)
 react-feedback mcp                                              # an MCP server on stdio (see Connect your agents)
 react-feedback ask-cancel <id> <qid> [--reason "why"]           # withdraw an unanswered question
 react-feedback ask-bump <id> <qid>                              # ask it again at the bottom of the thread
@@ -582,6 +586,34 @@ The inbox registers a small service worker (`sw.js`, scoped to the inbox path) t
 - The message keeps the time you wrote it as `written_at`, shown in the thread. `created_at` stays the time it arrived, so read ticks and acknowledgements stay right; a bad `written_at` (in the future, over 30 days old) is ignored.
 - Read-only threads refuse to queue anything. Secret key entry is never queued. Nothing but ordinary messages is stored, and no pictures or secrets are cached by the service worker; a browser without IndexedDB keeps the queue in memory and says so. The saved copy of a thread is replaced the next time you are online and open it, so a message redacted since then disappears from it too.
 
+## Continue on your phone
+
+In the inbox, **Open on phone** (the sidebar footer, and the thread header or its **⋯** menu) shows a QR code and the same link in plain text with **Copy** and a five-minute countdown. Scan it with the phone's camera: the phone pairs, then opens the thread you were reading. It needs [remote mode](#remote-mode); with that off, the box says what to start.
+
+- **The link** is `<public address>/__feedback/inbox/#/pair/<code>?to=<thread>`. The code is in the URL **fragment** (`#`), which a browser never sends to the server, a proxy or a log. The pairing page reads it, removes it from the address, sends it once in a request body, and opens the thread.
+- **The code** is 128 random bits, kept only as a hash, single use, and valid for five minutes. At most five are open at once (a sixth drops the oldest). Closing the box withdraws an unused one. A wrong, used or expired code all get the same one-line answer, and the exchange is rate limited per caller (5 a minute, 20 an hour).
+- **The device** gets a cookie: `HttpOnly; Secure; SameSite=Strict; Path=/__feedback/`, 30 days, renewed each time the device is used. The server keeps only a hash of it, a name from the browser family ("iPhone · Safari"; the user agent itself is not stored), the pairing time and the last-seen time.
+- **Paired devices** lists them (name, paired, last seen, and which one this is) with **Revoke** and **Revoke all**; a revoked phone is refused on its next request. The CLI does the same: `react-feedback devices list`, `devices revoke <id>`, `devices revoke-all`. There is no MCP tool for pairing or devices: an agent cannot pair a device or revoke one.
+- The QR code is drawn in the browser by a small bundled encoder (`server/inbox/qr.js`, see THIRD_PARTY_NOTICES.md), with no network request.
+
+## Remote mode
+
+`react-feedback serve --remote` (or `FEEDBACK_REMOTE=1`) adds a **second listener** on its own port (`FEEDBACK_REMOTE_PORT`, default `PORT` + 1), bound to `127.0.0.1`, for a tunnel or reverse proxy to point at. The ordinary listener behaves exactly as before.
+
+**Every request on the remote listener needs a valid device cookie**, whatever address it comes from. Behind a tunnel every request arrives from loopback, so loopback is not trusted there. The exceptions are exact:
+
+- the share routes, `GET /__feedback/s/<token>` and `POST /__feedback/s/<token>/feedback|replay` (the token is their credential);
+- `POST /__feedback/api/pair/exchange`, which is how a device gets its cookie;
+- `GET /__feedback/inbox/`, which, for an unpaired browser, is a small self-contained pairing page and not the inbox.
+
+Anything else without a device is `401`. A write from a paired device must also carry an `Origin` that matches the public address, and a JSON (or octet-stream, for upload chunks) body: a form post from another site is refused.
+
+**The public address.** Set `FEEDBACK_PUBLIC_URL` (https; an origin) to the address your phone uses, and point your tunnel or proxy at `127.0.0.1:<remote port>`. If it is unset and `cloudflared` is on the PATH, `serve --remote` starts a quick tunnel (`cloudflared tunnel --url http://127.0.0.1:<remote port>`), uses the address it prints, and stops it on exit; that address changes each time. With neither, it prints what to do, and the Origin check falls back to the request's own Host. Behind your own tunnel set `FEEDBACK_CLIENT_IP_HEADER` (for Cloudflare, `Cf-Connecting-Ip`) so the pairing rate limit tells callers apart; a tunnel the server starts itself uses that header by default.
+
+**Already behind a proxy with basic auth** (see [Reverse proxy](#reverse-proxy))? Pairing replaces it. Point the proxy at the remote port instead of the ordinary one and drop the basic auth: the device cookie is the login, and it can be revoked per device. Or keep both: the proxy's login comes first, then the device cookie (the phone must still pair once, and the proxy must let `/__feedback/api/pair/exchange` and the pairing page through with the same credentials your phone already holds). Keep the share routes open as before.
+
+Security notes for remote mode: the pairing link is a credential for five minutes, so show the QR code only to the phone and close the box afterwards; revoke a lost phone at once (`devices revoke-all`); the cookie is `Secure`, so a plain `http://` public address does not work (except localhost); the device list and the hashes live in `FEEDBACK_DIR/_devices.json` (mode 0600); and a device that is paired can do everything the inbox can, including creating more codes. No request is logged by the server.
+
 ## Phone layout
 
 At 760 px and narrower the thread view is one slim header (← title, the checklist donut, **⋯** with Pin, Merge into…, Move to project… when there is more than one project, Mark done or Reopen, the version, and the read-only note), and a one-line composer: **＋** (Attach image, Side question), a paperclip (Attach file), an auto-growing text box (about five lines at most) and a send arrow. Enter adds a new line; Send is the button. Keyboard hints are hidden on touch screens (`(hover: none) and (pointer: coarse)`), the Feedback launcher hides while the composer has focus, and the page follows `visualViewport` so an open keyboard leaves the message list the remaining height, scrolled to the newest message. Wide screens keep the old layout.
@@ -593,6 +625,8 @@ All under `/__feedback/`. With `FEEDBACK_PROJECTS` set, add `?project=<id>` (omi
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
 ## Security notes
+
+Remote mode (`serve --remote`) is the supported way to reach the inbox from a phone: it needs a paired device for every request, see [Remote mode](#remote-mode). The rest of this section is about the ordinary listener.
 
 This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). A share link is the one path to let through that login. Match the 43-character token with the anchored pattern in [Share links](#share-links): Bun normalises a `%2e%2e` inside a prefix match into the API. Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox. The key box and the vault do not change that: they keep a key out of the thread, and a redacted message out of the served data, but they do not authenticate anyone. Anyone who can reach the server can still ask it to redact the user's messages. An artifact page is served from the same host but runs in an opaque sandboxed origin, so its scripts cannot read the inbox. A viewer's note and pointed-at text have escape sequences and control characters stripped, and an agent reading one through MCP gets a notice that it comes from a public viewer, not the user. A viewer of a share link can send a note and (only when the owner has switched it on) a recording; both are rate limited and size capped, neither can be read back through a link, and see [Privacy](#privacy). The server treats HTTP callers as the person and CLI or MCP callers as agents, and loopback has no authentication, so the agent guardrails bind a cooperative agent using the CLI or MCP. An agent with shell access can call the HTTP API or edit the files itself; for a stronger split, run agents as a different OS user.
 

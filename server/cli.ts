@@ -28,6 +28,7 @@
 //   react-feedback unredact <id> <message-id>   (restore from the vault; CLI only)
 //   react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "..."   (a nudge in your event feed)
 //   react-feedback remind <id> list | remove <rid> | off-default | on-default
+//   react-feedback devices list | revoke <id> | revoke-all   (phones paired for remote mode; revoking is immediate)
 //   react-feedback mcp   (an MCP server on stdio: FEEDBACK_AGENT_NAME names this agent)
 //   react-feedback --version
 import { readFile } from 'node:fs/promises';
@@ -46,6 +47,7 @@ import { formatOfName, listArtifacts, publishArtifact, suggestShare } from './ar
 import { createShare, readShares, revokeShare, sharePill, statsFor, type Expiry } from './shares';
 import { loadProjects, projectById } from './projects';
 import { describeMove, moveThreadToProject } from './move-project';
+import { devicesCommand } from './pair';
 import { attachmentPath, cancelUpload, checkAttachmentIds, MAX_ATTACHMENTS, stagePath } from './files';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
@@ -80,6 +82,7 @@ const USAGE = `Usage:
   react-feedback redact <id> <message-id> [--reason "why"]   (needs FEEDBACK_VAULT_DIR)
   react-feedback unredact <id> <message-id>
   react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "text"
+  react-feedback devices list | revoke <id> | revoke-all   (phones paired for remote mode)
   react-feedback remind <id> list | remove <rid> | off-default | on-default   (FEEDBACK_DEFAULT_REMINDER=off turns the built-in one off everywhere)
   react-feedback ask-cancel <id> <qid> [--reason "why"]   (withdraw an unanswered question)
   react-feedback ask-bump <id> <qid>   (re-ask it at the bottom of the thread)
@@ -336,6 +339,7 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   const { words, images, files, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
   let me: string | undefined;
   try { me = store.checkAgentName(env.FEEDBACK_AGENT_NAME); } catch { /* an unusable name: the unnamed agent */ }
+  if (command === 'devices') return devicesCommand(dir, words); // an owner's command, not the agent being here: no presence
   if (!(command === 'move-project' && flags.includes('--dry-run'))) await store.touchPresence(dir, { agent: me }); // any command is the agent being here, under its own name. A dry run must not write.
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {

@@ -16,6 +16,8 @@ import * as files from './files';
 import * as replay from './replay';
 import { shellPage, withCapture } from './shell';
 import { ByteBudget, Limiter, clientKey, type ServerLike } from './limits';
+import { pairRoutes, type ExtraRoute } from './pair-routes';
+import { pairingFor } from './pair';
 
 const PREFIX = '/__feedback';
 const FILE = /^(image\.png|annotated\.png|context\.png|feedback\.md)$/;
@@ -174,7 +176,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'replays.js': 'text/javascript; charset=utf-8', 'shot.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'replays.js': 'text/javascript; charset=utf-8', 'shot.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'pair.js': 'text/javascript; charset=utf-8', 'qr.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -295,7 +297,7 @@ async function pinsRoute(req: Request, dir: string, path: string, read: (req: Re
   const data = await read(req);
   return json(await store.setPin(dir, { kind: data.kind, id: data.id, pinned: data.pinned }));
 }
-export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number; projects?: Project[]; files?: files.FilesOptions }
+export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number; projects?: Project[]; files?: files.FilesOptions; extra?: ExtraRoute }
 // A chunk is at most 32 MiB; the server accepts that and a little more, and a JSON body is held to LIMIT by body() itself.
 const CHUNK_REQUEST = files.CHUNK_BYTES + 1024 * 1024;
 const SANDBOX = { 'Content-Security-Policy': 'sandbox allow-scripts allow-popups', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' };
@@ -662,6 +664,8 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
           return new Response(new URL(req.url).searchParams.get('capture') === '1' ? await withCapture(html) : html, { headers: { ...SANDBOX, 'Content-Type': 'text/html; charset=utf-8' } });
         } catch (error) { if (error instanceof Invalid && error.status === 404) return new Response('Not found\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' } }); throw error; }
       }
+      const extra = await options.extra?.(req, path); // pairing and paired devices (server/pair-routes.ts)
+      if (extra) return extra;
       // The user is here when the inbox page loads, polls or sends: the widget's own captures (api/items) and the health check do not count.
       if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares|uploads)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
       if (req.method === 'GET' && path === `${PREFIX}/healthz`) return json({ status: 'ok' });
@@ -701,7 +705,7 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   const feedbackDir = configured?.[0]?.dir ?? env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
   files.validateLimits(env);
-  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env } });
+  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env }, extra: pairRoutes(pairingFor(feedbackDir)) });
   return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch };
 }
 // The data folders this server serves (one, or one per configured project).
