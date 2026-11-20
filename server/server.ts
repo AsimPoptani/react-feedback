@@ -196,7 +196,7 @@ const PLAYER_PAGE = `<!doctype html>
 `;
 // The player page takes recorded events (which anyone with a recording link could have crafted) and draws them. It may run only its own script, make no requests,
 // and cannot be framed by or form-post anywhere; rrweb 2.2 rebuilds a recording only inside an iframe that runs no scripts.
-const PLAYER_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: blob: http: https:; font-src data: http: https:; media-src data: blob: http: https:; frame-src about: blob: data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+const PLAYER_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; frame-src about: blob: data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
 async function replayAssetRoute(req: Request, path: string): Promise<Response | null> {
   const match = path.match(/^\/__feedback\/replay\/([a-z.]+)$/);
   if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) return null;
@@ -559,11 +559,17 @@ async function viewerFeedback(req: Request, found: { folder: string; share: shar
 }
 async function viewerReplay(req: Request, found: { folder: string; share: shares.Share }, caller: string, limits: ShareLimits, now: number): Promise<Response> {
   const { folder, share } = found;
-  // Recording is the owner's switch. A link that does not record takes nothing.
-  if (share.record !== true) return shareJson({ kind: 'recording_off' }, 403);
   if (!limits.replayChunks.take(`${share.id}|${caller}`, now)) return shareJson({ kind: 'rate_limited' }, 429);
   try {
     const data = await viewerBody(req, MAX_REPLAY_BODY);
+    // A viewer who chose "Don't record" asks for this visit's session to be deleted. That works even if the owner has since switched recording off.
+    if (data.discard === true) {
+      const meta = await artifacts.readArtifact(folder, share.artifact);
+      if (!meta) return shareMiss();
+      return shareJson({ ok: true, discarded: await replay.discardSession(folder, { scope: meta.id, link: share.id, version: null }, data.session) }, 200);
+    }
+    // Recording is the owner's switch. A link that does not record takes nothing.
+    if (share.record !== true) return shareJson({ kind: 'recording_off' }, 403);
     if (data.seq === 0 && !limits.replaySessions.take(share.id, now)) return shareJson({ kind: 'rate_limited' }, 429);
     const meta = await artifacts.readArtifact(folder, share.artifact);
     if (!meta) return shareMiss();

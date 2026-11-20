@@ -171,23 +171,38 @@ const SHELL_SCRIPT = `(function () {
     $('notice').hidden = false;
     $('norec').addEventListener('click', function () {
       declined = true; recording = false; buffer = []; tell({ rf: 'ctl', op: 'stop' });
+      forget();
       try { history.replaceState(null, '', location.pathname + location.search + NOREC); } catch (e) { /* the choice lasts for this page only */ }
-      $('notice-text').textContent = 'Not recording. Nothing from this page is sent.'; $('norec').hidden = true;
+      $('notice-text').textContent = 'Not recording. Nothing more from this page is sent, and anything already sent is deleted.'; $('norec').hidden = true;
     });
     if (declined) { $('notice-text').textContent = 'Not recording. Nothing from this page is sent.'; $('norec').hidden = true; }
   }
   var bytes = new Uint8Array(18); crypto.getRandomValues(bytes);
   var session = btoa(String.fromCharCode.apply(null, bytes)).replace(/\\+/g, '-').replace(/\\//g, '_');
-  var buffer = [], size = 0, seq = 0, sending = false, stopped = false;
+  var buffer = [], size = 0, seq = 0, sending = false, stopped = false, inflight = null;
+  // Nothing leaves this page for the first HOLD_MS (the notice is up and the choice is open), and the first upload goes out only at the next 4 s tick after that.
+  var HOLD_MS = 10000, born = Date.now();
+  function held() { return Date.now() - born < HOLD_MS; }
+  // "Don't record" also deletes whatever this visit already sent: the server checks the session belongs to this link.
+  function forget() {
+    var tries = 0;
+    function send() {
+      post('replay', JSON.stringify({ session: session, discard: true })).then(function (r) { if (r.status === 429 || r.status >= 500) again(); }, again);
+    }
+    function again() { if (++tries < 4) setTimeout(send, 1500); }
+    var go = function () { if (seq > 0 || inflight) send(); };
+    (inflight || Promise.resolve()).then(go, go);
+  }
   function push(event) { var s = JSON.stringify(event).length; buffer.push(event); size += s; if (size > 300000) flush(); }
   function flush() {
-    if (sending || stopped || declined || !buffer.length) return;
+    if (held() || sending || stopped || declined || !buffer.length) return;
     var events = buffer, taken = size; buffer = []; size = 0; sending = true;
-    post('replay', JSON.stringify({ session: session, seq: seq, events: events })).then(function (r) {
+    inflight = post('replay', JSON.stringify({ session: session, seq: seq, events: events }));
+    inflight.then(function (r) {
       if (r.ok) seq++;
       else if (r.status === 429 || r.status >= 500) { buffer = events.concat(buffer); size += taken; }
       else { stopped = true; recording = false; tell({ rf: 'ctl', op: 'stop' }); } // full, or switched off, or the link has gone
-    }, function () { buffer = events.concat(buffer); size += taken; }).then(function () { sending = false; });
+    }, function () { buffer = events.concat(buffer); size += taken; }).then(function () { sending = false; inflight = null; });
   }
   if (cfg.record) {
     setInterval(flush, 4000);

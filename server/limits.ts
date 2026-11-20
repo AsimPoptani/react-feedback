@@ -1,6 +1,6 @@
 // A small in-memory rate limiter for the public share endpoints. Keys live only in this process: nothing is written to disk, and a restart forgets them.
 export interface Rule { windowMs: number; max: number }
-const MAX_KEYS = 20000;
+export const MAX_KEYS = 20000;
 
 export class Limiter {
   private hits = new Map<string, number[]>();
@@ -15,16 +15,26 @@ export class Limiter {
     if (this.hits.size > MAX_KEYS) this.prune(now, longest);
     return true;
   }
+  // Over the cap: drop keys with no recent hits first, then the oldest-seen keys, just enough to get back under. Never clear everyone's counters.
   private prune(now: number, longest: number) {
     for (const [key, list] of this.hits) if (!list.some(at => at > now - longest)) this.hits.delete(key);
-    if (this.hits.size > MAX_KEYS) this.hits.clear(); // a flood of distinct keys: forget rather than grow
+    if (this.hits.size <= MAX_KEYS) return;
+    const excess = this.hits.size - MAX_KEYS;
+    let dropped = 0;
+    for (const key of this.hits.keys()) { if (dropped++ >= excess) break; this.hits.delete(key); } // a Map keeps insertion order: the stalest first
   }
+  get size() { return this.hits.size; }
 }
 
-// The caller's address, for rate limiting only. It is never stored or logged. Behind a proxy the first X-Forwarded-For hop is used.
+// The caller's address, for rate limiting only. It is never stored or logged. By default it is the socket address. A forwarded header is believed only when the
+// operator names the one header their proxy sets (FEEDBACK_CLIENT_IP_HEADER, e.g. cf-connecting-ip behind a Cloudflare tunnel): X-Forwarded-For is never used,
+// because a client can write its first hop.
 export interface ServerLike { requestIP?: (request: Request) => { address: string } | null }
-export function clientKey(request: Request, server?: ServerLike): string {
-  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  if (forwarded) return forwarded.slice(0, 64);
+export function clientKey(request: Request, server?: ServerLike, header: string | undefined = process.env.FEEDBACK_CLIENT_IP_HEADER): string {
+  const name = header?.trim().toLowerCase();
+  if (name && /^[a-z0-9-]{1,64}$/.test(name)) {
+    const value = request.headers.get(name)?.split(',').pop()?.trim();
+    if (value) return value.slice(0, 64);
+  }
   try { return server?.requestIP?.(request)?.address ?? 'unknown'; } catch { return 'unknown'; }
 }

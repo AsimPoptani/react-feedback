@@ -107,6 +107,7 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_FILE_DIR` | none | the folder(s) (a `:`-separated list) an MCP agent may attach files from; unset: MCP files are off (see [Connect your agents](#connect-your-agents-mcp)) |
 | `FEEDBACK_PROJECTS` | none | a JSON list of `{id, name, dir}` when one server hosts several projects (see [Projects](#projects)). Unset: one project, `FEEDBACK_DIR`, and `?project=` is ignored |
 | `FEEDBACK_REPLAY_DAYS` | `30` | how many days a session replay is kept (a whole number from 1 to 3650). A pass at start and then once a day removes older ones (see [Session replay](#session-replay)) |
+| `FEEDBACK_CLIENT_IP_HEADER` | none | the one request header your proxy sets to the real caller's address, used only for the share-link rate limits (see [Caller address](#caller-address-and-rate-limits)). Unset: the socket address. `X-Forwarded-For` is never believed |
 | `FEEDBACK_PROJECT` | the first project | which project the CLI and `react-feedback mcp` use. `--project <id>` overrides it |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
@@ -143,6 +144,10 @@ With Vite in development:
 ```ts
 server: { proxy: { "/__feedback": { target: "http://127.0.0.1:8099", changeOrigin: true } } }
 ```
+
+### Caller address and rate limits
+
+The share endpoints are rate limited per link and per caller, in memory. The caller is the **socket address** of the connection. Behind a reverse proxy or tunnel that is the proxy, so every viewer then looks like one caller. To tell them apart, set `FEEDBACK_CLIENT_IP_HEADER` to the single header your proxy sets itself and that a viewer cannot write: behind a Cloudflare tunnel it is `Cf-Connecting-Ip`. (`X-Forwarded-For` is not used by default: a client can send its own first hop and dodge the limit. If you name it, the last hop is used, the one your own proxy added.) Only set this when every request really comes through that proxy. The address is used for the limit and never stored. The limiter keeps at most 20,000 callers and drops the stalest first when a flood of distinct addresses fills it; it never forgets everyone at once.
 
 ## Where the data is stored
 
@@ -418,13 +423,13 @@ Recording is **off for every link** until the owner switches it on, and it is bu
 
 > This page records clicks and mouse movement to help the author. **Don't record**
 
-**Don't record** stops the recorder and discards what is waiting; nothing more is sent. The choice is kept for that link in the address of that tab (the shell has no storage of its own because it is sandboxed), so a reload stays declined; a fresh visit shows the notice again. Events go to the shell by `postMessage`, and the shell uploads them in batches to `POST /__feedback/s/<token>/replay`, with a session id it makes up. The server takes them only while the link is active and the switch is on (otherwise 403, or the usual 404).
+Nothing is uploaded for the first 10 seconds, or until the first 4-second upload tick after that, so a viewer who reads the notice and declines in that time has sent nothing at all. **Don't record** stops recording and deletes anything this visit sent: it stops the recorder, drops what is waiting and, if an upload had already gone, asks the server to delete that session (`POST /__feedback/s/<token>/replay` with `{session, discard: true}`; the server removes it only if it belongs to that link). The choice is kept for that link in the address of that tab (the shell has no storage of its own because it is sandboxed), so a reload stays declined; a fresh visit shows the notice again. Events go to the shell by `postMessage`, and the shell uploads them in batches to `POST /__feedback/s/<token>/replay`, with a session id it makes up. The server takes them only while the link is active and the switch is on (otherwise 403, or the usual 404).
 
 **In the inbox itself.** The profile has **Record my inbox sessions** (off by default). When on, the inbox records itself (inputs masked) and uploads to `POST api/replays`, and the sidebar footer shows **● Recording**. These are yours alone: they are listed under **Metrics, My sessions**.
 
 **What is recorded.** The page's structure and what changes on it, clicks, mouse movement sampled every 50 ms, scrolling, and the window size. Every input is masked (`maskAllInputs`), and anything inside an element marked `data-rf-private` is blocked. A session is at most 30 minutes and 5 MB; when it reaches either, the server refuses more and the page stops sending. It is stored as `_replays/<artifact>/<session>.jsonl.gz` (gzip, appended chunk by chunk) with a small `<session>.json` of metadata: link id, version, start, duration, click count and click positions. No address and no user agent are stored. Inbox sessions live in `_replays/_inbox/`.
 
-**Watching them.** The artifact viewer has a **Replays** tab (date, duration, clicks, version, link) with **Play** and **Delete**, and a **Heatmap** toggle that draws every click on that version of the page, scaled to its width. **Play** opens rrweb-player, bundled and served by the package, with orange markers on the timeline at each click. The player page has a strict Content-Security-Policy (its own script only, no requests), and rrweb rebuilds a recording only inside an iframe that runs no scripts, because anyone with a recording link can send crafted events.
+**Watching them.** The artifact viewer has a **Replays** tab (date, duration, clicks, version, link) with **Play** and **Delete**, and a **Heatmap** toggle that draws every click on that version of the page, scaled to its width. **Play** opens rrweb-player, bundled and served by the package, with orange markers on the timeline at each click. The player page has a strict Content-Security-Policy (its own script only, no requests; images, fonts and media may load only from the player itself, `data:` and `blob:`, so **external images in a replay do not load**, and a crafted recording cannot beacon to another host), and rrweb rebuilds a recording only inside an iframe that runs no scripts, because anyone with a recording link can send crafted events.
 
 **Retention.** 30 days by default (`FEEDBACK_REPLAY_DAYS`). A pass at start and then daily removes sessions that have not been written to for that long. **Revoking a link** stops new recordings at once; recordings that exist stay until you delete them or they expire.
 
@@ -433,7 +438,7 @@ Recording is **off for every link** until the owner switches it on, and it is bu
 Recording clicks and mouse movement of people looking at a page is processing of their behaviour, and in many places (including UK and EU data protection law) people must be told. This feature mirrors that transparency duty: the notice is always shown, cannot be turned off by the page, and the viewer can opt out. **You, the owner, are responsible for telling people** who use your links, for having a reason to record, and for how long you keep recordings. This is not legal advice.
 
 - Off by default, per link, and only the owner can switch it on.
-- The notice is shown before anything is recorded, and **Don't record** sends nothing.
+- The notice is shown before anything is recorded, and **Don't record** stops recording and deletes anything this visit sent.
 - Inputs are masked; `data-rf-private` content is not recorded.
 - No IP address and no user agent are stored. The server sees the caller's address while it handles a request, uses it only for in-memory rate limits, and writes it nowhere.
 - Recordings are deleted after the retention period, and you can delete any of them sooner.

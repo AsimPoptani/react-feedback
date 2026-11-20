@@ -143,6 +143,24 @@ export async function deleteReplay(dir: string, scope: Scope, session: string): 
   }).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; });
 }
 
+// A viewer who opts out: removes their session if it belongs to this link. Another link's session is refused (404); one that was never stored is a quiet no.
+export async function discardSession(dir: string, origin: Origin, session: unknown): Promise<boolean> {
+  if (!validScope(origin.scope)) throw new Invalid('Not found', 404);
+  if (typeof session !== 'string' || !SESSION_ID.test(session)) throw new Invalid('Invalid session id');
+  const where = folder(dir, origin.scope);
+  return withLock(where, async () => {
+    const old = parseMeta(await optional(join(where, `${session}.json`)));
+    if (!old) {
+      await rm(join(where, `${session}.jsonl.gz`), { force: true }); // a chunk file without metadata (an interrupted write) is no one's: it goes too
+      return false;
+    }
+    if (old.link !== origin.link || old.scope !== origin.scope) throw new Invalid('Not found', 404);
+    await rm(join(where, `${session}.json`), { force: true });
+    await rm(join(where, `${session}.jsonl.gz`), { force: true });
+    return true;
+  }).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; });
+}
+
 // Click positions across an artifact's sessions of one version, as fractions of the page width: left = x / w, top = y / w (of the width it was recorded at).
 export async function heatmap(dir: string, artifact: string, version: number | null): Promise<{ sessions: number; clicks: { x: number; y: number }[] }> {
   if (!ART_ID.test(artifact)) return { sessions: 0, clicks: [] };
