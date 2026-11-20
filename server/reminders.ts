@@ -106,7 +106,8 @@ const mainAgent = (m: store.Message) => m.author === 'agent' && !m.divider && !m
 function lastChecklistChange(items: store.ChecklistItem[]): string {
   return items.reduce((hi, i) => [i.created_at, i.done_at, i.unclaimed_at].reduce<string>((h, x) => (x && x > h ? x : h), hi), '');
 }
-const repliesSince = (state: ThreadState, cutoff: string) => state.messages.filter(m => mainAgent(m) && !m.added_items?.length && !m.ticked_items?.length && m.created_at > cutoff).length;
+// Plain agent replies after the last fire (strictly: the fire is stamped in the ms of the reply that caused it) and not before the last checklist change. That one is inclusive: timestamps are whole milliseconds, so a reply sent right after an add or tick can share its ms, and must still count.
+const repliesSince = (state: ThreadState, firedAfter: string, changedBefore: string) => state.messages.filter(m => mainAgent(m) && !m.added_items?.length && !m.ticked_items?.length && m.created_at > firedAfter && m.created_at >= changedBefore).length;
 const lastAgentAt = (state: ThreadState) => state.messages.filter(mainAgent).reduce((hi, m) => (m.created_at > hi ? m.created_at : hi), '');
 export interface Due { id: string; text: string; set_by: SetBy; agent_name?: string }
 const cooling = (last: string | null, now: number) => last !== null && now - t(last) < COOLDOWN_MS;
@@ -116,7 +117,7 @@ function dueReminder(r: Reminder, state: ThreadState, now: number, armedAt: numb
   if (!r.enabled || state.status === 'done' || cooling(r.last_fired_at, now)) return false;
   const base = r.last_fired_at ?? r.created_at;
   if (r.kind === 'every') return now - t(base) >= parseDuration(r.value) && t(lastUserAt(state) || '1970') > Math.max(t(base), armedAt);
-  if (r.kind === 'after_agent_replies') return t(lastAgentAt(state) || '1970') > armedAt && repliesSince(state, [r.last_fired_at ?? '', lastChecklistChange(state.items), r.created_at].reduce((h, x) => (x > h ? x : h), '')) >= Number(r.value);
+  if (r.kind === 'after_agent_replies') return t(lastAgentAt(state) || '1970') > armedAt && repliesSince(state, r.last_fired_at && r.last_fired_at > r.created_at ? r.last_fired_at : r.created_at, lastChecklistChange(state.items)) >= Number(r.value);
   return state.waiting === 'agent' && now - t(state.lastMessageAt) >= parseDuration(r.value) && (r.last_fired_at === null || r.last_fired_at < state.lastMessageAt);
 }
 // The built-in reminder: only while the agent has open items of its own. After 3 agent replies with no add or tick, or 6 h after the last fire (or the oldest open item) when the thread has had activity.
@@ -124,7 +125,7 @@ function dueDefault(s: Stored, state: ThreadState, now: number, armedAt: number)
   const open = state.items.filter(i => i.owner === 'agent' && !i.done);
   if (!open.length || state.status === 'done' || cooling(s.default_fired_at, now)) return null;
   const base = s.default_fired_at ?? open.reduce((lo, i) => (i.created_at < lo ? i.created_at : lo), open[0]!.created_at);
-  const byReplies = t(lastAgentAt(state) || '1970') > armedAt && repliesSince(state, [s.default_fired_at ?? '', lastChecklistChange(state.items)].reduce((h, x) => (x > h ? x : h), '')) >= DEFAULT_AFTER;
+  const byReplies = t(lastAgentAt(state) || '1970') > armedAt && repliesSince(state, s.default_fired_at ?? '', lastChecklistChange(state.items)) >= DEFAULT_AFTER;
   const byTime = now - t(base) >= DEFAULT_EVERY_MS && t(lastUserAt(state) || '1970') > Math.max(t(base), armedAt);
   if (!byReplies && !byTime) return null;
   // No title in the text: a title can be a capture's note, and redacting it must not leave it here.
