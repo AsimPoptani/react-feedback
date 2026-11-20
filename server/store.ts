@@ -337,7 +337,7 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: Author | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: Author | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.set_by ? { set_by: event.set_by } : {}), ...(event.agent_name ? { agent_name: event.agent_name } : {}), ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -1612,7 +1612,7 @@ function waitingOn(status: Status, messages: Message[], items: ChecklistItem[], 
   const lastUser = messages.map(m => m.author).lastIndexOf('user');
   if (messages.slice(lastUser + 1).some(m => needsUser(m, answered))) return 'you';
   const pendingMerge = awaitAgent !== null && !messages.some(m => m.author === 'agent' && !m.divider && m.created_at > awaitAgent);
-  const last = messages[messages.length - 1];
+  const last = [...messages].reverse().find(m => !m.divider);
   const handled = !!last && last.author === 'user' && ackedThrough !== null && last.created_at <= ackedThrough; // the agent acknowledged it without replying
   if ((last?.author !== 'agent' && !handled) || items.some(i => !i.done && i.claimed_by_user_at) || pendingMerge) return 'agent';
   if (items.some(i => i.owner === 'user' && !i.done && !i.claimed_by_user_at)) return 'you';
@@ -1623,7 +1623,7 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const item = await readItem(path);
   const messages = await readMessages(path, item);
   const main = mainMessages(messages).filter(m => !m.moved_to && m.kind !== 'share_notice'); // asides, move stubs and share notices never decide who spoke last
-  const last = main[main.length - 1];
+  const last = [...main].reverse().find(m => !m.divider); // a system divider (a project move) is not someone speaking
   const created_at = item.created_at as string;
   const last_author: Author = last?.author ?? 'user';
   const last_message_at = lastAt(messages, item);

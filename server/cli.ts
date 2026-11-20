@@ -16,6 +16,7 @@
 //   react-feedback merge <from-id> <into-id>
 //   react-feedback repair-merged [--dry-run]   (re-point answers a merge left on the old question id, and copy answers posted on the source after the merge)
 //   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>   (move messages to another thread)
+//   react-feedback move-project <thread> <project-id> [--dry-run]   (move a thread to another project)
 //   react-feedback new "title" "text" --read-only     (a thread the user cannot reply to)
 //   react-feedback readonly <id> on|off
 //   react-feedback ack <id>     (the user's latest message is handled; no reply)
@@ -43,6 +44,7 @@ import { packageVersion } from './version';
 import { formatOfName, listArtifacts, publishArtifact, suggestShare } from './artifacts';
 import { createShare, readShares, revokeShare, sharePill, statsFor, type Expiry } from './shares';
 import { loadProjects, projectById } from './projects';
+import { describeMove, moveThreadToProject } from './move-project';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
@@ -66,6 +68,7 @@ const USAGE = `Usage:
   react-feedback merge <from-id> <into-id>
   react-feedback repair-merged [--dry-run]   (re-point answers a merge left on the old question id, and copy answers posted on the source after the merge)
   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>
+  react-feedback move-project <thread> <project-id> [--dry-run]   (the whole thread; only when FEEDBACK_PROJECTS has more than one project)
   react-feedback new "title" "text" --read-only
   react-feedback readonly <id> on|off
   react-feedback ack <id>
@@ -290,7 +293,7 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
   let me: string | undefined;
   try { me = store.checkAgentName(env.FEEDBACK_AGENT_NAME); } catch { /* an unusable name: the unnamed agent */ }
-  await store.touchPresence(dir, { agent: me }); // any command is the agent being here, under its own name
+  if (!(command === 'move-project' && flags.includes('--dry-run'))) await store.touchPresence(dir, { agent: me }); // any command is the agent being here, under its own name. A dry run must not write.
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
     const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
@@ -306,6 +309,12 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     if (!to) throw new store.Invalid('move needs --to <thread>');
     const r = await store.moveMessages(dir, words[0]!, words.slice(1), to, 'agent');
     return r.moved.length ? `Moved ${r.moved.join(' ')} from ${words[0]} to ${to}` : `Those messages were already moved to ${to}`;
+  }
+  if (command === 'move-project' && words.length === 2) {
+    const projects = loadProjects(env);
+    const from = projects.find(project => resolve(project.dir) === resolve(dir));
+    if (!from) throw new store.Invalid('This directory is not one of FEEDBACK_PROJECTS', 404);
+    return describeMove(await moveThreadToProject({ projects, from: from.id, to: words[1]!, thread: words[0]!, dryRun: flags.includes('--dry-run'), vault: loadVaultDir(env) }));
   }
   if (command === 'ask-secret' && words.length === 1) {
     if (!named.name || !named.label) throw new store.Invalid('ask-secret needs --name and --label');

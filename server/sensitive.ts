@@ -26,7 +26,8 @@ export function scanForSecrets(text: string): string | null {
   for (const shape of SECRET_SHAPES) if (shape.re.test(text)) return shape.name;
   return null;
 }
-const KEY = /^(\d{8}-\d{6}-[0-9a-f]{4})\/(m\d+)$/;
+// A vault file is `<thread>/<message>`, or `<project>/<thread>/<message>` once the thread has moved to that project.
+const KEY = /^(?:[a-z0-9][a-z0-9_-]{0,39}\/)?\d{8}-\d{6}-[0-9a-f]{4}\/m\d+$/;
 
 // The real path of something that may not exist yet: its nearest existing parent, resolved, plus the rest.
 async function real(path: string): Promise<string> {
@@ -51,17 +52,48 @@ export function validateVault(dir: string, vault: string | null | undefined): vo
 }
 
 async function writeVault(vault: string, key: string, data: unknown): Promise<void> {
-  const [thread] = key.split('/') as [string, string];
-  const folder = join(vault, thread);
-  await mkdir(vault, { recursive: true, mode: 0o700 });
+  if (!KEY.test(key)) throw new Invalid('Invalid vault key');
+  const file = join(vault, `${key}.json`);
+  const folder = dirname(file);
   await mkdir(folder, { recursive: true, mode: 0o700 });
-  await chmod(vault, 0o700); await chmod(folder, 0o700);
-  const file = join(vault, `${key}.json`), tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  const root = resolve(vault);
+  for (let dir = folder; ; dir = dirname(dir)) {
+    await chmod(dir, 0o700);
+    if (resolve(dir) === root) break;
+    if (dirname(dir) === dir) break;
+  }
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(data), { flag: 'wx', mode: 0o600 });
     await chmod(tmp, 0o600);
     await rename(tmp, file);
   } catch (error) { await rm(tmp, { force: true }); throw error; }
+}
+// Copies one vault entry to the key it will have in the target project. The old file stays until the move has committed.
+export async function copyVaultEntry(vault: string, oldKey: string, newKey: string, thread: string): Promise<void> {
+  if (!KEY.test(oldKey) || !KEY.test(newKey)) throw new Invalid('Invalid vault key');
+  if (oldKey === newKey) return;
+  const from = join(vault, `${oldKey}.json`), to = join(vault, `${newKey}.json`);
+  let raw: string;
+  try { raw = await readFile(from, 'utf8'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    try { await readFile(to); return; } catch { throw new Invalid(`The vault has no entry at ${oldKey}`, 404); }
+  }
+  let data: unknown;
+  try { data = JSON.parse(raw); } catch { throw new Invalid(`The vault entry ${oldKey} is unreadable`); }
+  if (data && typeof data === 'object' && !Array.isArray(data)) (data as Record<string, unknown>).thread = thread;
+  await writeVault(vault, newKey, data);
+}
+export async function removeVaultEntry(vault: string, key: string): Promise<void> {
+  if (!KEY.test(key)) return;
+  const file = join(vault, `${key}.json`);
+  await rm(file, { force: true });
+  const root = resolve(vault);
+  for (let dir = dirname(file); resolve(dir) !== root; dir = dirname(dir)) {
+    try { await rm(dir); } catch { break; }
+    if (dirname(dir) === dir) break;
+  }
 }
 async function readVault(vault: string, key: string): Promise<{ message: Message; images: { name: string; data: string }[]; item_note?: string } | null> {
   if (!KEY.test(key)) return null;

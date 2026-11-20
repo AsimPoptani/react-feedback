@@ -11,6 +11,7 @@ import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from
 import * as artifacts from './artifacts';
 import * as shares from './shares';
 import { loadProjects, projectById, type Project } from './projects';
+import { moveThreadToProject } from './move-project';
 
 const PREFIX = '/__feedback';
 const FILE = /^(image\.png|annotated\.png|context\.png|feedback\.md)$/;
@@ -354,9 +355,20 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     const data = await read(req);
     return json(await store.createThread(dir, { title: data.title, text: data.text, images: store.dataUrlImages(data.images), origin: 'user' }), 201);
   }
-  const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)(?:\/(messages|status|read|answer|merge))?$/);
+  const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)(?:\/(messages|status|read|answer|merge|move-project))?$/);
   if (!match) return null;
   const [, id, action] = match;
+  if (action === 'move-project') {
+    if (req.method !== 'POST') return null;
+    const projects = options.projects ?? [];
+    if (projects.length < 2) throw new Invalid('Moving a thread needs more than one project (set FEEDBACK_PROJECTS)', 409);
+    const data = await read(req);
+    if (typeof data.project !== 'string' || !data.project.trim()) throw new Invalid('project is required');
+    const from = projects.find(project => resolve(project.dir) === resolve(dir));
+    if (!from) throw new Invalid('Not found', 404);
+    const result = await moveThreadToProject({ projects, from: from.id, to: data.project.trim(), thread: id!, vault: vaultDir });
+    return json({ moved: result.moved, id: result.id, project: result.to, from: result.from });
+  }
   await itemDir(dir, id!);
   if (!action && req.method === 'GET') return json(await threadDetail(dir, id!));
   if (req.method !== 'POST') return null;

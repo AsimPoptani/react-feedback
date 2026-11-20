@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.3
+
+### Added
+- **Move a thread to another project.** `move-project <thread> <project> [--dry-run]`, MCP `move_project`, and **Move to project…** in the thread's ⋯ menu (a desktop button too). Only when `FEEDBACK_PROJECTS` has more than one project. The folder moves with its images, checklist, reminders and other files, and so do the artifacts and share links that belong to it — a link keeps working and keeps its view count — and the vault entries for redacted messages. A thread merged into it moves with it. The id stays when the target does not already use it; when it does, a new id is assigned and every reference is rewritten. Both projects get a `moved` event, and the thread gains a system line, "Moved from" followed by the source project's name. A failure leaves the thread where it was. Running it again finishes the move or changes nothing.
+
+### Fixed
+- **Typing an answer is not lost when the question is withdrawn or re-asked.** The open thread picks the change up on the next poll. The question collapses to one muted line — "Withdrawn ·" the prompt and, when there is one, the reason — or "Re-asked below" linking to the new copy — and leaves the pinned bar. Options, Other and Submit are hidden; **show** expands it read-only. Whatever was selected or typed stays, with **Send as a message** (a normal reply quoting the question) and, when it was re-asked, **Use on the new copy**. Submitting after it has gone does the same, instead of only showing "That question was withdrawn" under the composer.
+
+### Changed
+- The service worker cache is `fb-inbox-0.9.3`.
+
 ## 0.9.2
 
 ### Fixed

@@ -17,6 +17,7 @@ import { areaOf } from './inbox/areas.js';
 import { publishArtifact, listArtifacts, suggestShare, type ArtifactFormat } from './artifacts';
 import { createShare, readShares, revokeShare, sharePill, statsFor, publicShare, type Expiry } from './shares';
 import { loadProjects, projectById } from './projects';
+import { moveThreadToProject } from './move-project';
 import { defaultDir } from './cli';
 import { forViewer } from './inbox/presence.js';
 import type { AreasConfig } from './inbox/areas.js';
@@ -105,7 +106,13 @@ export function createMcpServer(options: McpOptions): McpServer {
   // Registers one tool whose handler may throw: a store refusal is returned to the model as a tool error.
   const tool = <S extends z.ZodRawShape>(name: string, description: string, inputSchema: S, handler: (args: z.infer<z.ZodObject<S>>) => Promise<unknown>, readOnly = false) =>
     server.registerTool(name, { description: `${description} ${NOTICE}`, inputSchema, annotations: { readOnlyHint: readOnly, openWorldHint: false } },
-      (async (args: z.infer<z.ZodObject<S>>) => { try { await store.touchPresence(dir, { agent }); return say(await handler(args)); } catch (error) { return fail(error); } }) as never);
+      (async (args: z.infer<z.ZodObject<S>>) => {
+        try {
+          const dry = name === 'move_project' && !!args && typeof args === 'object' && (args as { dry_run?: boolean }).dry_run === true;
+          if (!dry) await store.touchPresence(dir, { agent }); // a dry run must not write, including presence
+          return say(await handler(args));
+        } catch (error) { return fail(error); }
+      }) as never);
   const thread = z.string().describe('Thread id, like 20261118-163556-0dac');
   const text = z.string().min(1).max(store.MAX_TEXT);
   const flags = { fyi: z.boolean().optional(), needs_you: z.boolean().optional(), done: z.boolean().optional() };
@@ -153,6 +160,13 @@ export function createMcpServer(options: McpOptions): McpServer {
   }, true);
   tool('merge', 'Merge one thread into another.', { from: thread, into: thread }, async a => ({ ...(await store.mergeThreads(dir, a.from, a.into, 'agent')) }));
   tool('move', 'Move messages from one thread to another.', { from: thread, messages: z.array(z.string()).min(1).max(100), to: thread }, async a => ({ ...(await store.moveMessages(dir, a.from, a.messages, a.to, 'agent')) }));
+  tool('move_project', 'Move a whole thread into another project: its messages, images, checklist, reminders, artifacts and share links. A link keeps working. Only when FEEDBACK_PROJECTS lists more than one project. dry_run changes nothing.', {
+    id: thread, project: z.string().describe('Target project id'), dry_run: z.boolean().optional() }, async a => {
+    const projects = loadProjects(env);
+    const from = projects.find(project => resolve(project.dir) === dir);
+    if (!from) throw new store.Invalid('This directory is not one of FEEDBACK_PROJECTS', 404);
+    return await moveThreadToProject({ projects, from: from.id, to: a.project, thread: a.id, dryRun: a.dry_run === true, vault: loadVaultDir(env) });
+  });
   tool('ack', 'Say the user\'s latest message is handled and needs no reply.', { id: thread }, async a => ({ ...(await store.ackThread(dir, a.id, agent)) }));
   tool('remind_add', 'Add a reminder to a thread: it lands in the agent event feed. Give exactly one of every ("2h"), after_replies (N agent replies with no checklist change) or idle ("1h", the thread waits on the agent that long).', {
     id: thread, say: z.string().min(1).max(reminders.MAX_SAY), every: z.string().optional(), after_replies: z.number().int().optional(), idle: z.string().optional() }, async a => {

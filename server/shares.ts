@@ -128,6 +128,20 @@ export async function revokeShare(dir: string, id: string, by: { user: true } | 
   });
 }
 
+// Moves share records onto another project. The token hash is unchanged, so an existing link keeps working and keeps its view count.
+// A record the target already has (a retry) is left as it is. The source copies are removed.
+export async function transferShares(fromDir: string, toDir: string, moving: Share[]): Promise<void> {
+  if (!moving.length) return;
+  const hashes = new Set(moving.map(share => share.token_hash));
+  await mkdir(toDir, { recursive: true });
+  await updateShares(toDir, shares => {
+    for (const share of moving) if (!shares.some(item => item.token_hash === share.token_hash)) shares.push(share);
+  });
+  await updateShares(fromDir, shares => {
+    for (let i = shares.length - 1; i >= 0; i--) if (hashes.has(shares[i]!.token_hash)) shares.splice(i, 1);
+  });
+}
+
 // The HTML to serve, or null when the token is unknown, revoked or expired. Those three are not distinguished. Views count only a page we serve.
 // Nothing about the caller (no address, no user agent) is stored.
 export async function openShare(dir: string, token: string, now = Date.now()): Promise<string | null> {

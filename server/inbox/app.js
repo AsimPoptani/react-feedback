@@ -32,7 +32,7 @@ const CL_KEY = 'fb-inbox-checklist';
 const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
-  profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds(),
+  profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, qopen: new Set(), keptShown: new Set(), folds: loadFolds(),
   projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -59,7 +59,9 @@ async function api(path, options) {
   if (!response.ok) {
     let detail = '';
     try { detail = (await response.json()).detail || ''; } catch { /* not JSON */ }
-    throw new Error(detail || (response.status === 413 ? 'That is too large to send.' : `Request failed (${response.status})`));
+    const error = new Error(detail || (response.status === 413 ? 'That is too large to send.' : `Request failed (${response.status})`));
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -407,8 +409,118 @@ const imageButtonBlock = imageFig;
 function answerFor(d, q) { return d.messages.find(m => m.answer && m.answer.question_id === q.id) || null; }
 function activeQuestion() {
   const d = state.detail; if (!d || d.merged_into || d.read_only) return null;
-  const open = d.messages.filter(m => m.question && !answerFor(d, m.question)).map(m => m.question);
+  const open = d.messages.filter(m => m.question && !m.question.withdrawn && !m.question.reasked && !answerFor(d, m.question)).map(m => m.question);
   return open[open.length - 1] || null;
+}
+const flatPrompt = text => String(text || '').replace(/\s+/g, ' ').trim();
+function laterCopy(d, m) {
+  return d.messages.slice(d.messages.indexOf(m) + 1).find(item => item.question && item.question.prompt === m.question.prompt && !item.question.withdrawn && !item.question.reasked) || null;
+}
+function keptText(s, q) {
+  const labels = s.ids.map(id => q.options.find(o => o.id === id)?.label).filter(Boolean);
+  const other = s.other.trim();
+  return [...labels, ...(other ? [other] : [])].join(', ');
+}
+// Read every Other box before a redraw. The pinned bar does not write state until Enter, so a withdraw would otherwise drop the text.
+function harvestDrafts() {
+  const found = new Map();
+  for (const input of document.querySelectorAll('.qother')) {
+    const qid = input.closest('[data-question]')?.getAttribute('data-question') || (input.closest('#waiting-bar') ? $('waiting-bar')?.dataset.question : '');
+    if (!qid) continue;
+    const focused = document.activeElement === input;
+    const prev = found.get(qid);
+    if (!prev || focused || (!prev.focused && input.value.length >= prev.value.length)) found.set(qid, { value: input.value, focused });
+  }
+  for (const [qid, draft] of found) {
+    const prev = state.qsel[qid] ?? { ids: [], other: '' };
+    if (!prev.ids.length && !draft.value.trim()) delete state.qsel[qid];
+    else state.qsel[qid] = { ids: prev.ids, other: draft.value };
+  }
+}
+function revealKept(d) {
+  if (!d) return;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  for (const m of d.messages || []) {
+    const q = m.question;
+    if (!q || (!q.withdrawn && !q.reasked)) continue;
+    const s = state.qsel[q.id];
+    if (!s || (!s.ids.length && !s.other.trim())) continue;
+    const key = `${d.id}:${q.id}`;
+    if (state.keptShown.has(key)) continue;
+    state.keptShown.add(key);
+    document.querySelector(`#msgs [data-question="${q.id}"]`)?.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' });
+  }
+}
+async function sendKept(d, m) {
+  const q = m.question, s = state.qsel[q.id];
+  const text = s ? keptText(s, q) : '';
+  if (!d || !text || state.busy) return;
+  state.busy = true;
+  try {
+    await post(`threads/${d.id}/messages`, { text, reply_to: m.id });
+    delete state.qsel[q.id];
+    state.shown = '';
+    await Promise.all([loadThread(d.id), refreshList()]);
+  } catch (error) { showError($('error'), error.message); }
+  finally { state.busy = false; }
+}
+async function useOnCopy(d, m, copy) {
+  const q = m.question, nq = copy?.question, s = state.qsel[q.id];
+  if (!d || !nq || !s || state.busy) return;
+  const option_ids = s.ids.map(id => { const label = q.options.find(o => o.id === id)?.label; return nq.options.find(o => o.label === label)?.id; }).filter(Boolean);
+  const other = s.other.trim();
+  if (!option_ids.length && !other) return;
+  state.busy = true;
+  try {
+    await post(`threads/${d.id}/answer`, { question_id: nq.id, option_ids, ...(other ? { other_text: other } : {}) });
+    delete state.qsel[q.id];
+    state.shown = '';
+    await Promise.all([loadThread(d.id), refreshList()]);
+  } catch (error) { showError($('error'), error.message); }
+  finally { state.busy = false; }
+}
+function rescueFor(d, m, copy) {
+  const q = m.question, s = state.qsel[q.id];
+  if (!s || (!s.ids.length && !s.other.trim()) || (!q.withdrawn && !q.reasked)) return null;
+  const box = el('div', { class: 'qrescue' });
+  const labels = s.ids.map(id => q.options.find(o => o.id === id)?.label).filter(Boolean);
+  if (labels.length) box.append(el('span', { class: 'hint', text: labels.join(', ') }));
+  if (s.other.trim()) {
+    const other = el('input', { type: 'text', class: 'qother', maxlength: '1000', 'aria-label': 'Kept answer' });
+    other.value = s.other;
+    other.addEventListener('input', () => { s.other = other.value; });
+    other.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      if (q.reasked && copy) void useOnCopy(d, m, copy); else void sendKept(d, m);
+    });
+    box.append(other);
+  }
+  box.append(el('button', { type: 'button', onclick: () => { void sendKept(d, m); } }, 'Send as a message'));
+  if (q.reasked && copy) box.append(el('button', { type: 'button', onclick: () => { void useOnCopy(d, m, copy); } }, 'Use on the new copy'));
+  return box;
+}
+function closedQuestion(d, m) {
+  const q = m.question, open = state.qopen.has(q.id), copy = q.reasked ? laterCopy(d, m) : null, flat = flatPrompt(q.prompt);
+  const show = el('button', { type: 'button', class: 'show', text: open ? 'hide' : 'show', onclick: () => { if (open) state.qopen.delete(q.id); else state.qopen.add(q.id); drawMessages(d); } });
+  const line = el('div', { class: 'qclosed' });
+  if (q.reasked) line.append(el('button', { type: 'button', class: 'qlink', text: 'Re-asked below', onclick: () => { if (copy) jumpToQuestion(copy.question.id); } }), el('span', { class: 'qsum', text: ` · ${flat}` }), show);
+  else line.append(el('span', { class: 'qsum', text: `Withdrawn · ${flat}${q.withdrawn?.reason ? ` · ${q.withdrawn.reason}` : ''}` }), show);
+  const card = el('div', { class: `qcard ${q.withdrawn ? 'withdrawn' : 'reasked'}`, 'data-question': q.id, role: 'group', 'aria-label': q.withdrawn ? 'Withdrawn question' : 'Re-asked question' }, line);
+  if (open) {
+    card.append(el('p', { class: 'prompt struck', text: q.prompt }));
+    const opts = el('div', { class: 'qopts' });
+    for (const o of q.options) {
+      const b = el('button', { type: 'button', class: 'qopt', 'data-opt': o.id, 'aria-pressed': 'false' }, el('span', { text: o.label }));
+      b.disabled = true;
+      opts.append(b);
+    }
+    card.append(opts);
+    if (copy) card.append(el('button', { type: 'button', class: 'qlink', text: 'Re-asked below', onclick: () => jumpToQuestion(copy.question.id) }));
+  }
+  const rescue = rescueFor(d, m, copy);
+  if (rescue) card.append(rescue);
+  return card;
 }
 const selFor = q => (state.qsel[q.id] ??= { ids: [], other: '' });
 function toggleOption(q, optId) {
@@ -434,24 +546,26 @@ async function submitAnswer(q) {
     if (sent?.forwarded_to) { showToast('Sent in the merged thread'); location.hash = `#/${sent.forwarded_to}`; return; }
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) {
-    showError($('error'), error.message);
-    await loadThread(d.id, { quiet: true });
-    const now = state.detail;
-    const into = now?.id === d.id ? now.merged_into || error.forwarded_to : '';
-    if (/already answered/.test(error.message) && into) {
-      if (s.other.trim()) state.carryDraft = { from: d.id, into, text: state.carryDraft?.from === d.id ? state.carryDraft.text : '', other: s.other, prompt: q.prompt };
-      const title = state.threads.find(t => t.id === into)?.title || into;
-      const box = $('error');
-      box.replaceChildren(document.createTextNode('This thread was merged into '), el('strong', { text: title }), document.createTextNode(' · '), el('a', { href: `#/${into}`, text: 'Open' }));
-      box.hidden = false;
+    if (error.status === 409 && /withdrawn|re-asked/.test(error.message || '')) { showError($('error'), ''); await loadThread(d.id, { quiet: true }); }
+    else {
+      showError($('error'), error.message);
+      await loadThread(d.id, { quiet: true });
+      const now = state.detail;
+      const into = now?.id === d.id ? now.merged_into || error.forwarded_to : '';
+      if (/already answered/.test(error.message) && into) {
+        if (s.other.trim()) state.carryDraft = { from: d.id, into, text: state.carryDraft?.from === d.id ? state.carryDraft.text : '', other: s.other, prompt: q.prompt };
+        const title = state.threads.find(t => t.id === into)?.title || into;
+        const box = $('error');
+        box.replaceChildren(document.createTextNode('This thread was merged into '), el('strong', { text: title }), document.createTextNode(' · '), el('a', { href: `#/${into}`, text: 'Open' }));
+        box.hidden = false;
+      }
     }
   }
   finally { state.busy = false; }
 }
 function questionCard(d, m) {
   const q = m.question;
-  if (q.withdrawn) return el('div', { class: 'qcard withdrawn', 'data-question': q.id, role: 'group', 'aria-label': 'Withdrawn question' }, el('p', { class: 'prompt struck', text: q.prompt }), el('p', { class: 'locked', text: q.withdrawn.reason ? `Withdrawn · ${q.withdrawn.reason}` : 'Withdrawn' }));
-  if (q.reasked) return el('div', { class: 'qcard reasked', 'data-question': q.id, role: 'group', 'aria-label': 'Re-asked question' }, el('p', { class: 'prompt struck', text: q.prompt }), el('p', { class: 'locked', text: 'Re-asked below' }));
+  if (q.withdrawn || q.reasked) return closedQuestion(d, m);
   const ans = answerFor(d, q), s = selFor(q);
   const card = el('div', { class: 'qcard', 'data-question': q.id, role: 'group', 'aria-label': 'Question' }, el('p', { class: 'prompt', text: q.prompt }));
   const chosen = ans ? ans.answer.option_ids : [];
@@ -682,8 +796,9 @@ function queuedNode(d, e) {
 }
 function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
+  const qopen = [...state.qopen].sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.kind || '')),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.kind || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
@@ -1062,7 +1177,12 @@ function drawThread() {
   if (state.captureFor !== d.id) { drawCapture(d); state.captureFor = d.id; }
   $('merge-open').hidden = !!d.merged_into || d.read_only === true;
   drawPinThread(); drawChecklist(d);
+  const typing = document.activeElement;
+  const typingQ = typing?.classList?.contains('qother') ? (typing.closest('[data-question]')?.getAttribute('data-question') || ($('waiting-bar')?.contains(typing) ? $('waiting-bar').dataset.question || '' : '')) : '';
+  harvestDrafts();
   drawMessages(d); drawArtifactCards(d); drawWaiting(d); drawReplyBar();
+  if (typingQ && !document.activeElement?.classList?.contains('qother')) document.querySelector(`#msgs [data-question="${typingQ}"] .qother`)?.focus();
+  revealKept(d);
 }
 async function loadThread(id, { quiet = false } = {}) {
   try {
@@ -1091,7 +1211,7 @@ function route() {
   state.focusItem = id && item ? item : null;
   if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn && artsPage === state.artifactsOn && artifactId === state.artifactId && artifactVer === state.artifactVer) { if (state.focusItem && state.detail) focusItemNow(); return; }
   state.metricsOn = metrics; state.trackerOn = tracker; state.artifactsOn = artsPage; state.artifactOn = !!artMatch; state.artifactId = artifactId; state.artifactVer = artifactVer;
-  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); closeMenu(false);
+  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); state.qsel = {}; closeMenu(false);
   $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
@@ -1356,10 +1476,29 @@ async function refreshConfig() {
   } catch { /* keep what we knew */ }
 }
 // ---- The phone's header ⋯ and composer ＋ menus: the same actions as the desktop buttons.
+function openMoveMenu(anchor) {
+  const items = state.projects.filter(p => p.id !== state.project).map(p => ({ label: p.name, onclick: () => { void moveToProject(p.id); } }));
+  if (items.length) openMenu(anchor || $('more'), items);
+}
+async function moveToProject(projectId) {
+  const d = state.detail; if (!d || state.busy) return;
+  state.busy = true;
+  try {
+    const result = await post(`threads/${d.id}/move-project`, { project: projectId });
+    state.project = result.project || projectId;
+    try { localStorage.setItem(PROJECT_KEY, state.project); } catch { /* storage may be blocked */ }
+    state.openId = null; state.detail = null; state.shown = '';
+    await refreshProjects();
+    const next = `#/${result.id}`;
+    if (location.hash === next) route(); else location.hash = next;
+  } catch (error) { showError($('error'), error.message); }
+  finally { state.busy = false; }
+}
 function openMore() {
   const d = state.detail; if (!d) return;
   openMenu($('more'), [{ label: isPinned('thread', d.id) ? 'Unpin' : 'Pin', onclick: () => togglePin('thread', d.id) },
     ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
+    ...(state.projects.length > 1 ? [{ label: 'Move to project…', onclick: () => openMoveMenu($('more')) }] : []),
     { label: 'Reminders', onclick: openReminders },
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
@@ -1476,6 +1615,7 @@ $('file').addEventListener('change', e => { addImages(state.images, [...e.target
 $('toggle-done').addEventListener('click', toggleDone);
 $('pin-thread').addEventListener('click', () => { if (state.openId) togglePin('thread', state.openId); });
 $('merge-open').addEventListener('click', openMerge);
+$('move-open')?.addEventListener('click', () => openMoveMenu($('move-open')));
 $('remind-open').addEventListener('click', openReminders);
 $('remind-close').addEventListener('click', () => $('remind-dialog').close());
 $('remind-kind').addEventListener('change', drawReminderForm);
@@ -1566,17 +1706,18 @@ function liveQuestions(d) {
 function drawWaiting(d) {
   const bar = $('waiting-bar'); if (!bar) return;
   const open = liveQuestions(d);
-  if (!open.length) { bar.hidden = true; bar.replaceChildren(); bar.dataset.key = ''; state.waitingOpen = false; return; }
+  if (!open.length) { bar.hidden = true; bar.replaceChildren(); bar.dataset.key = ''; delete bar.dataset.question; state.waitingOpen = false; return; }
   const newest = open[open.length - 1];
   const q = newest.question;
   const more = open.length - 1;
   const inline = open.length === 1 && q.options.length <= 4 && !q.multi;
   // A poll redraws the thread every few seconds; the bar is rebuilt only when what it shows changes,
-  // so an answer being typed in it is never wiped. Typed text carries over a rebuild for the same thread.
+  // so an answer being typed in it is never wiped. Typed text carries over a rebuild of the same question.
   const key = `${d.id}|${open.map(m => m.question.id).join(',')}|${inline ? 'inline' : state.waitingOpen ? 'open' : 'closed'}`;
-  if (bar.dataset.key === key && bar.childElementCount) return;
-  const typed = (bar.dataset.key || '').split('|')[0] === d.id ? bar.querySelector('.qother')?.value || '' : '';
+  if (bar.dataset.key === key && bar.childElementCount) { bar.dataset.question = q.id; return; }
+  const typed = bar.dataset.question === q.id && (bar.dataset.key || '').split('|')[0] === d.id ? bar.querySelector('.qother')?.value || '' : '';
   bar.dataset.key = key;
+  bar.dataset.question = q.id;
   bar.hidden = false;
   const summary = el('span', { text: clip(q.prompt, 80) });
   if (inline) {
@@ -1621,8 +1762,11 @@ function drawArtifactCards(d) {
   host.replaceChildren(...rows.map(artifactCard));
 }
 function drawProjects() {
-  const box = $('project-switch'); if (!box) return;
+  const box = $('project-switch');
+  const move = $('move-open');
   const many = state.projects.length > 1;
+  if (move) move.hidden = !many;
+  if (!box) return;
   box.hidden = !many;
   if (!many) return;
   const current = state.projects.find(p => p.id === state.project) || state.projects[0];

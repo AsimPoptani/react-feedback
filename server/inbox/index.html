@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="rf-version" content="0.9.2">
+<meta name="rf-version" content="0.9.3">
 <title>Feedback inbox</title>
 <style>
 :root {
@@ -196,6 +196,11 @@ button.primary kbd { color: var(--paper); border-color: currentColor; background
 .qother { margin-top: 8px; width: 100%; border: 2px solid var(--ink); border-radius: 10px; padding: 6px 10px; background: var(--white); }
 .qcard .qbar { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .qcard .locked { font-size: 13px; color: var(--teal); font-weight: 700; }
+.qclosed { display: flex; align-items: baseline; gap: 6px; color: var(--ink-2); font-size: 13px; min-width: 0; }
+.qclosed .qsum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qcard .qlink { color: var(--teal); text-decoration: underline; background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
+.qrescue { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.qrescue .qother { margin-top: 0; flex: 1 1 12rem; }
 .light-wrap { position: relative; }
 .light-nav { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
 .light-cap { text-align: center; font-size: 14px; color: var(--ink-2); margin: 0 0 6px; overflow-wrap: anywhere; }
@@ -551,7 +556,7 @@ button.share-pill:hover { background: var(--paper); }
     </div>
     <div id="groups"></div>
     <p class="empty" id="list-empty" hidden>No threads here.</p>
-    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.9.2</span></div><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
+    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.9.3</span></div><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
   </nav>
   <main class="thread" id="thread" aria-label="Thread">
     <p class="placeholder" id="placeholder">Select a thread, or start a new one.</p>
@@ -607,6 +612,7 @@ button.share-pill:hover { background: var(--paper); }
         <span class="flag upd" id="ro-badge" hidden>Updates</span>
         <button type="button" id="pin-thread" class="desk" aria-pressed="false"></button>
         <button type="button" id="merge-open" class="desk">Merge into…</button>
+        <button type="button" id="move-open" class="desk" hidden>Move to project…</button>
         <button type="button" id="remind-open" class="desk">Reminders</button>
         <button type="button" id="toggle-done" class="desk"></button>
         <button type="button" class="cl-btn" id="cl-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="checklist" hidden></button>
