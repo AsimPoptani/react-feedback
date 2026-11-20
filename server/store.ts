@@ -1203,7 +1203,8 @@ function answeredAfter(messages: Message[], edits: Map<string, RepairEdit>): Set
 }
 function strandedAnswers(messages: Message[], mergeAt: string, intoId: string): Message[] {
   const cut = messages.findIndex(m => m.author === 'agent' && m.text.startsWith('Merged into [') && m.text.includes(`(#/${intoId})`));
-  return (cut === -1 ? messages : messages.slice(cut + 1)).filter(m => !!m.answer && m.created_at > mergeAt);
+  // Once the farewell is found, everything after it was posted after the merge; only without it is the clock used.
+  return (cut === -1 ? messages.filter(m => m.created_at > mergeAt) : messages.slice(cut + 1)).filter(m => !!m.answer);
 }
 function alreadyCarried(target: Message[], src: Message): boolean {
   return target.some(m => m.author === src.author && m.created_at === src.created_at && m.text.includes('Sent in ') && m.text.includes('after the merge'));
@@ -1294,6 +1295,7 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
     spans.push(spanOf(from, note.into, pairs, note.map?.items));
     pending.push({ from, note, source, title });
   }
+  const chained = new Set(spans.filter(span => notes.some(n => n.from === span.into)).map(span => span.from));
   const byInto = new Map<string, RepairSpan[]>();
   for (const span of spans) {
     const list = byInto.get(span.into) ?? [];
@@ -1310,6 +1312,7 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
       for (const span of group) {
         const row = pending.find(p => p.from === span.from);
         if (!row) continue;
+        if (chained.has(span.from)) continue; // its target was merged away: the answer follows the chain, below
         for (const src of strandedAnswers(row.source, row.note.at, span.into)) {
           const qid = src.answer!.question_id;
           const mapped = span.questions.get(qid);
@@ -1362,7 +1365,63 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
       results.push({ into: span.into, from: span.from, status: edits.size || plans.some(plan => !plan.skipped) ? 'repaired' : 'unchanged', detail });
     }
   }
+  for (const span of spans) if (chained.has(span.from)) await carryAlongChain(dir, span, spans, notes, pending, results, !!opts.dryRun);
   return results.sort((a, b) => a.into.localeCompare(b.into) || a.from.localeCompare(b.from) || a.detail.localeCompare(b.detail));
+}
+// A merged into B, then B into C. An answer posted on A after the first merge belongs on C, so the id maps are composed along the chain.
+// If a link of the chain has no usable map the answer is left, and the line says where the thread went.
+async function carryAlongChain(dir: string, first: RepairSpan, spans: RepairSpan[], notes: { from: string; note: MergeNote }[], pending: { from: string; note: MergeNote; source: Message[]; title: string }[], results: MergeRepair[], dryRun: boolean): Promise<void> {
+  const row = pending.find(p => p.from === first.from);
+  if (!row) return;
+  const stranded = strandedAnswers(row.source, row.note.at, first.into);
+  let questions = first.questions, messages = first.messages, at = first.into, broken = '';
+  const seen = new Set([first.from]);
+  while (!broken) {
+    const next = notes.find(n => n.from === at);
+    if (!next) break;
+    if (seen.has(at)) { broken = `target was merged into ${next.note.into}`; break; }
+    seen.add(at);
+    const hop = spans.find(s => s.from === at);
+    if (!hop) { broken = `target was merged into ${next.note.into}`; break; }
+    const q = new Map<string, string>(), m = new Map<string, string>();
+    for (const [from, via] of questions) if (hop.questions.has(via)) q.set(from, hop.questions.get(via)!);
+    for (const [from, via] of messages) if (hop.messages.has(via)) m.set(from, hop.messages.get(via)!);
+    questions = q; messages = m; at = hop.into;
+  }
+  const into = at;
+  const path = join(dir, into);
+  const line = (detail: string, carried: boolean) => {
+    const own = results.find(r => r.from === first.from && r.into === first.into);
+    if (own) { own.detail = own.detail === 'nothing to change' ? detail : `${detail}; ${own.detail}`; if (carried) own.status = 'repaired'; }
+    else results.push({ into: first.into, from: first.from, status: carried ? 'repaired' : 'unchanged', detail });
+  };
+  if (!stranded.length) return;
+  const target = { ...first, into, questions, messages };
+  const apply = async () => {
+    const fresh = await readMessages(path, await readItem(path));
+    const taken = answeredAfter(fresh, new Map());
+    const plans: CarryPlan[] = [];
+    let n = fresh.length;
+    for (const src of stranded) {
+      const qid = src.answer!.question_id;
+      const mapped = broken ? undefined : questions.get(qid);
+      if (!mapped) { plans.push({ from: first.from, src, copyId: '', fromQ: qid, toQ: '', title: row.title, span: target, skipped: broken || `${qid} was asked after the merge` }); continue; }
+      const known = row.note.carried?.[src.id];
+      if ((known && fresh.some(m => m.id === known)) || alreadyCarried(fresh, src)) continue;
+      const plan: CarryPlan = { from: first.from, src, copyId: `m${++n}`, fromQ: qid, toQ: mapped, title: row.title, span: target };
+      if (taken.has(mapped)) plan.plain = true; else taken.add(mapped);
+      plans.push(plan);
+    }
+    const live = plans.filter(plan => !plan.skipped);
+    if (plans.length) line(`${describeCarry(plans)}${broken ? '' : ` (onto ${into})`}`, live.length > 0);
+    if (dryRun || !live.length) return;
+    const copies: Message[] = [];
+    for (const plan of live) copies.push(await strandedCopy(join(dir, plan.from), path, plan));
+    await appendFile(join(path, 'thread.jsonl'), copies.map(c => `${JSON.stringify(c)}\n`).join(''));
+    await recordCarried(join(dir, first.from), Object.fromEntries(live.map(plan => [plan.src.id, plan.copyId])));
+  };
+  try { await withLock(path, apply); }
+  catch { line('target was merged away and cannot be read; nothing changed', false); }
 }
 function pairsFromIds(source: Message[], target: Message[], span: RepairSpan): { src: Message; copy: Message }[] | null {
   const pairs: { src: Message; copy: Message }[] = [];

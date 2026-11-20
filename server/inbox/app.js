@@ -29,7 +29,7 @@ function paintVersion() { const node = $('app-version'); if (node && LOADED) nod
 
 const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
-const state = { trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
+const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds(),
@@ -433,7 +433,19 @@ async function submitAnswer(q) {
     delete state.qsel[q.id];
     if (sent?.forwarded_to) { showToast('Sent in the merged thread'); location.hash = `#/${sent.forwarded_to}`; return; }
     await Promise.all([loadThread(d.id), refreshList()]);
-  } catch (error) { showError($('error'), error.message); await loadThread(d.id, { quiet: true }); }
+  } catch (error) {
+    showError($('error'), error.message);
+    await loadThread(d.id, { quiet: true });
+    const now = state.detail;
+    const into = now?.id === d.id ? now.merged_into || error.forwarded_to : '';
+    if (/already answered/.test(error.message) && into) {
+      if (s.other.trim()) state.carryDraft = { from: d.id, into, text: state.carryDraft?.from === d.id ? state.carryDraft.text : '', other: s.other, prompt: q.prompt };
+      const title = state.threads.find(t => t.id === into)?.title || into;
+      const box = $('error');
+      box.replaceChildren(document.createTextNode('This thread was merged into '), el('strong', { text: title }), document.createTextNode(' · '), el('a', { href: `#/${into}`, text: 'Open' }));
+      box.hidden = false;
+    }
+  }
   finally { state.busy = false; }
 }
 function questionCard(d, m) {
@@ -912,8 +924,29 @@ function drawMerged(d) {
     const title = state.threads.find(t => t.id === into)?.title || into;
     banner.replaceChildren(document.createTextNode('Merged into '), el('strong', { text: title }), document.createTextNode(' · '), el('a', { href: `#/${into}`, text: 'Open' }));
   }
+  if (into) keepDraft(d);
+  const kept = !!into && !!state.carryDraft && state.carryDraft.from === d.id && !!$('text')?.value; // typed text stays visible and selectable so it can be copied out
   $('composer')?.setAttribute('aria-disabled', String(off));
-  for (const id of ['text', 'send', 'attach', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = off; }
+  for (const id of ['text', 'send', 'attach', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = off && !(kept && id === 'text'); }
+  if ($('text')) $('text').readOnly = off && kept;
+}
+// What the person had typed (composer, or an Other box) when a thread turned merged. It is restored on the target, so a merge never loses typing.
+function keepDraft(d) {
+  const text = $('text')?.value || '';
+  const open = (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked);
+  const bar = $('waiting-bar')?.querySelector('.qother')?.value || '';
+  const stored = open.map(m => ({ q: m.question, other: state.qsel[m.question.id]?.other || '' })).filter(x => x.other.trim()).pop();
+  const typed = bar.trim() ? { q: open[open.length - 1]?.question, other: bar } : stored;
+  const prev = state.carryDraft?.from === d.id ? state.carryDraft : null;
+  const draft = { from: d.id, into: d.merged_into, text: text || prev?.text || '', other: typed?.other || prev?.other || '', prompt: typed?.q?.prompt || prev?.prompt || '' };
+  if (draft.text.trim() || draft.other.trim()) state.carryDraft = draft; else if (prev) state.carryDraft = null;
+}
+function takeDraft(into) {
+  const c = state.carryDraft;
+  if (!c || c.into !== into) return '';
+  state.carryDraft = null;
+  const quoted = c.other.trim() ? `${c.prompt ? `> ${clip(c.prompt, 200)}\n` : ''}${c.other.trim()}` : '';
+  return [quoted, c.text.trim() ? c.text : ''].filter(Boolean).join('\n\n');
 }
 let toastTimer = 0;
 function showToast(text) {
@@ -1059,7 +1092,7 @@ function route() {
   if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn && artsPage === state.artifactsOn && artifactId === state.artifactId && artifactVer === state.artifactVer) { if (state.focusItem && state.detail) focusItemNow(); return; }
   state.metricsOn = metrics; state.trackerOn = tracker; state.artifactsOn = artsPage; state.artifactOn = !!artMatch; state.artifactId = artifactId; state.artifactVer = artifactVer;
   state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); closeMenu(false);
-  $('text').value = ''; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
+  $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
   if (id) loadThread(id);

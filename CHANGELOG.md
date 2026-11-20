@@ -9,8 +9,14 @@
 - **`react-feedback repair-merged [--dry-run]`.** For a thread merged before this fix, re-points answers that still name the source question id. It also copies an answer that was posted on the merged thread after the merge, with the question id rewritten and a line saying where it was sent, and records that copy so a second run does not add it again. A withdrawal whose reason starts with "Answered:" or "Settled:" is removed when it travelled with the copy, or when it was added after the merge and an answer in the target names that question. A later withdrawal with no answer is left, and so is any other withdrawal. It can do this only when the old-to-new map is still recoverable (the map stored with the merge, or the source lined up after the merge divider). Otherwise it says so and changes nothing.
 - **A post to a thread that was already merged is written on the target.** The message keeps a line, "Sent in <title> after the merge", and an answer's question id is rewritten from the merge map. The API returns that message with `forwarded_to` set to the target. Asking a new question on the merged thread is refused. The inbox shows "Merged into <target> · Open" and disables the composer and the question cards; if a send races the merge, `forwarded_to` opens the target and shows a short toast.
 
+- **Typed text survives a merge.** If a thread is merged while you are typing, the composer text and any Other answer are kept (the composer becomes read-only so you can still copy it) and are restored as a draft when you open the target; an Other answer is prefixed with the question as a quote. An answer refused with "already answered" on a thread that has since been merged shows "This thread was merged into <title> · Open" and carries the typed text the same way.
+- **`repair-merged` follows a chain of merges.** An answer left on A after A was merged into B, when B has since been merged into C, is carried onto C with the question ids composed along the chain. If a link has no usable map, the answer is left with "target was merged into X". Stranded answers are now found by position after the merge farewell, not by time.
+
 ### Changed
 - The service worker cache is `fb-inbox-0.9.2`.
+
+### Known
+- Two redaction tests can fail if run at 14:11 (the thread id contains 4111); fixed in a later release.
 
 ## 0.9.1
 

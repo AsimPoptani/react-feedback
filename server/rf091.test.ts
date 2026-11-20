@@ -267,3 +267,37 @@ test('forwarding an answer to a question the target already answers is refused w
   expect(err.status).toBe(409);
   expect((await readThread(into)).messages.filter(m => m.answer)).toHaveLength(1);
 });
+
+test('repair follows a chain: A merged into B, answered on A, then B merged into C lands on C and is idempotent', async () => {
+  const c = (await store.createThread(dir, { title: 'Final', text: 'c hello', origin: 'user' })).id;
+  const b = (await store.createThread(dir, { title: 'Middle', text: 'b hello', origin: 'user' })).id;
+  const a = (await store.createThread(dir, { title: 'Side', text: 'a hello', origin: 'user' })).id;
+  await ask(a, 'Which project?');
+  await store.mergeThreads(dir, a, b, 'agent');
+  const note = JSON.parse(await readFile(join(dir, a, 'merged.json'), 'utf8'));
+  const source = await readThread(a);
+  const stranded = { id: `m${source.messages.length + 1}`, author: 'user', text: 'Chose: A', images: [], created_at: new Date(Date.parse(note.at) + 1000).toISOString(), answer: { question_id: 'q2', option_ids: ['o1'] } };
+  await appendFile(threadFile(a), `${JSON.stringify(stranded)}\n`);
+  await store.mergeThreads(dir, b, c, 'agent');
+  const qid = (await readThread(c)).messages.find(m => m.question?.prompt === 'Which project?')!.question!.id;
+  const aBefore = await readFile(threadFile(a)), bBefore = await readFile(threadFile(b));
+
+  const dry = await run(['repair-merged', '--dry-run'], dir);
+  expect(dry).toContain(`carried ${stranded.id}`);
+  expect(dry).toContain(`onto ${c}`);
+  expect(await readFile(threadFile(c), 'utf8')).not.toContain('after the merge');
+
+  await run(['repair-merged'], dir);
+  const after = await readThread(c);
+  const carried = after.messages.find(m => m.text.includes('Sent in Side after the merge'))!;
+  expect(carried.answer!.question_id).toBe(qid);
+  expect(store.openQuestions(after.messages)).toEqual([]);
+  expect(await readFile(threadFile(a))).toEqual(aBefore);
+  expect(await readFile(threadFile(b))).toEqual(bBefore);
+  expect(JSON.parse(await readFile(join(dir, a, 'merged.json'), 'utf8')).carried[stranded.id]).toBe(carried.id);
+
+  const fixed = await readFile(threadFile(c));
+  await run(['repair-merged'], dir);
+  expect(await readFile(threadFile(c))).toEqual(fixed);
+  expect((await readThread(c)).messages.filter(m => m.answer)).toHaveLength(1);
+});
