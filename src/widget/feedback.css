@@ -19,7 +19,7 @@
 .fb-root label, .fb-root small { display: block; overflow-wrap: anywhere; }
 .fb-root h2 { font: bold 19px/1.2 var(--rf-font, system-ui, sans-serif); margin: 0; }
 .fb-root p { margin: 8px 0; }
-.fb-launchers { position: absolute; bottom: max(12px, env(safe-area-inset-bottom)); left: 12px; display: flex; gap: 8px; pointer-events: auto; }
+.fb-launchers { position: absolute; bottom: max(calc(12px + var(--rf-launcher-offset, 0px)), env(safe-area-inset-bottom)); left: calc(12px + var(--rf-launcher-offset, 0px)); display: flex; gap: 8px; pointer-events: auto; }
 .fb-launcher { border-radius: 999px; box-shadow: 0 2px 12px #0003; touch-action: none; cursor: grab; }
 .fb-root.fb-dragging, .fb-root.fb-dragging * { cursor: grabbing; user-select: none; -webkit-user-select: none; }
 .fb-panel { position: absolute; left: 12px; bottom: calc(64px + env(safe-area-inset-bottom)); width: min(370px, calc(100vw - 24px)); max-height: calc(100dvh - 140px); overflow: auto; overscroll-behavior: contain; padding: 16px; border: 1px solid var(--fb-border); border-radius: 14px; background: var(--fb-bg); box-shadow: 0 8px 35px #0004; pointer-events: auto; overflow-wrap: anywhere; }
@@ -53,7 +53,7 @@
 .fb-toast { position: absolute; left: 12px; bottom: calc(66px + env(safe-area-inset-bottom)); padding: 8px 14px; background: var(--fb-bg); border: 1px solid var(--fb-border); border-radius: 10px; box-shadow: 0 2px 12px #0003; }
 /* position="bottom-right": the launcher, its panels and the toast sit in the right corner instead. */
 .fb-right .fb-launchers, .fb-right .fb-panel, .fb-right .fb-toast { left: auto; right: 12px; }
-.fb-right .fb-launchers { justify-content: flex-end; }
+.fb-right .fb-launchers { justify-content: flex-end; right: calc(12px + var(--rf-launcher-offset, 0px)); }
 .fb-capture-toolbar .fb-toolbar, .fb-note .fb-toolbar { margin: 0; }
 .fb-note .fb-toolbar { margin-top: 12px; }
 .fb-note { width: min(340px, calc(100vw - 24px)); }
@@ -111,3 +111,11 @@
 .fb-outbox li[data-status="stuck"] > span:first-of-type { color: #b8741a; }
 /* No keyboard hints on a touch screen. */
 @media (hover: none) and (pointer: coarse) { .fb-root kbd { display: none; } }
+/* A phone: the launcher sits on the edge, so it does not cover a line of page text. It stays 40px tall, and it slides away while the page scrolls. --rf-launcher-offset pushes it out from that edge. */
+@media (max-width: 480px) {
+  .fb-launchers { left: var(--rf-launcher-offset, 0px); bottom: max(var(--rf-launcher-offset, 0px), env(safe-area-inset-bottom)); }
+  .fb-right .fb-launchers { left: auto; right: var(--rf-launcher-offset, 0px); }
+  .fb-root .fb-launcher { min-height: 40px; padding: 2px 8px; font-size: 12px; border-radius: 0 10px 0 0; }
+  .fb-right .fb-launcher { border-radius: 10px 0 0 0; }
+  .fb-scrolling .fb-launchers { transform: translateY(100%); pointer-events: none; }
+}

@@ -1,0 +1,40 @@
+// The recipient page decrypts from the URL fragment and wipes it. It does not load the inbox.
+import { webcrypto } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
+import { secretPage } from '../secret-page';
+
+const $ = (id: string) => document.getElementById(id) as HTMLElement;
+
+describe('the recipient page', () => {
+  it('decrypts from the fragment on Reveal and wipes the fragment', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    const text = 'horse battery staple';
+    const keyBytes = crypto.getRandomValues(new Uint8Array(32));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
+    const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
+    const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+    const fragment = b64(keyBytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const id = 'F'.repeat(43);
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return { ok: true, status: 200, json: async () => ({ ciphertext: b64(cipher), iv: b64(iv) }) };
+    }));
+    const page = secretPage('n'.repeat(22));
+    const code = page.slice(page.indexOf('<script'), page.lastIndexOf('</script>')).replace(/^<script[^>]*>/, '');
+    const parsed = new DOMParser().parseFromString(page, 'text/html');
+    parsed.querySelectorAll('script').forEach(node => node.remove());
+    document.body.innerHTML = parsed.body.innerHTML;
+    history.replaceState(null, '', `/__feedback/x/${id}#${fragment}`);
+    window.eval(code);
+    expect(calls).toEqual([]);
+    $('reveal').click();
+    await vi.waitFor(() => expect($('secret').hidden).toBe(false));
+    expect($('secret').textContent).toBe(text);
+    expect(location.hash).toBe('');
+    expect(calls).toEqual([`/__feedback/x/${id}/open`]);
+    expect(calls.join('')).not.toContain(fragment);
+    expect(calls.join('')).not.toContain(text);
+  });
+});

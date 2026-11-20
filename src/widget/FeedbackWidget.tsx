@@ -74,6 +74,28 @@ function FeedbackPanel({ outbox, endpoint, position, bridge }: { outbox: Outbox 
   const place = useLauncherPosition(launcher);
   const previousStep = useRef<Step>(step);
   const root = useRef<HTMLDivElement>(null);
+  // On a phone the launcher sits on the edge and slides off while the page scrolls, so a line of text underneath can be read.
+  useEffect(() => {
+    if (bridge) return;
+    const rootEl = root.current;
+    if (!rootEl) return;
+    const narrow = () => { try { return window.matchMedia('(max-width: 480px)').matches; } catch { return false; } };
+    let timer = 0;
+    const onScroll = () => {
+      if (!narrow()) { rootEl.classList.remove('fb-scrolling'); return; }
+      rootEl.classList.add('fb-scrolling');
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => rootEl.classList.remove('fb-scrolling'), 700);
+    };
+    document.addEventListener('scroll', onScroll, true);
+    window.addEventListener('scroll', onScroll);
+    return () => {
+      document.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('scroll', onScroll);
+      window.clearTimeout(timer);
+      rootEl.classList.remove('fb-scrolling');
+    };
+  }, [bridge]);
   // Focus before the widget opened. A Save returns there (the launcher if that control is gone);
   // closing with Esc or the launcher focuses the launcher, ready to open it again.
   const opener = useRef<HTMLElement | null>(null);

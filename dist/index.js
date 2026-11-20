@@ -2670,6 +2670,36 @@ function FeedbackPanel({ outbox, endpoint, position, bridge }) {
 	const place = useLauncherPosition(launcher);
 	const previousStep = useRef(step);
 	const root = useRef(null);
+	useEffect(() => {
+		if (bridge) return;
+		const rootEl = root.current;
+		if (!rootEl) return;
+		const narrow = () => {
+			try {
+				return window.matchMedia("(max-width: 480px)").matches;
+			} catch {
+				return false;
+			}
+		};
+		let timer = 0;
+		const onScroll = () => {
+			if (!narrow()) {
+				rootEl.classList.remove("fb-scrolling");
+				return;
+			}
+			rootEl.classList.add("fb-scrolling");
+			window.clearTimeout(timer);
+			timer = window.setTimeout(() => rootEl.classList.remove("fb-scrolling"), 700);
+		};
+		document.addEventListener("scroll", onScroll, true);
+		window.addEventListener("scroll", onScroll);
+		return () => {
+			document.removeEventListener("scroll", onScroll, true);
+			window.removeEventListener("scroll", onScroll);
+			window.clearTimeout(timer);
+			rootEl.classList.remove("fb-scrolling");
+		};
+	}, [bridge]);
 	const opener = useRef(null);
 	const savedClose = useRef(false);
 	const returnTo = useRef(null);

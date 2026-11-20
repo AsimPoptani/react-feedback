@@ -60,12 +60,12 @@ try {
   check('phone: the document never scrolls, only the message list does (no pull-to-refresh)', scroll.doc && scroll.bodyOverflow === 'hidden');
   check('phone: overscroll-behavior is none on html and body, contain on the list', scroll.html === 'none' && scroll.body === 'none' && scroll.listOb === 'contain');
   await phone.locator('#more').tap();
-  check('phone: ⋯ holds Pin, Merge, Reminders, Mark done and Feedback on this page', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Reminders|Mark done|Feedback on this page');
+  check('phone: ⋯ holds Pin, Merge, Reminders, Share a secret, Secret links, Mark done and Feedback on this page', (await phone.locator('#popmenu button').allInnerTexts()).join('|') === 'Pin|Merge into…|Reminders|Share a secret|Secret links|Mark done|Feedback on this page');
   await shot(phone, 'phone-header-menu-390');
   await phone.keyboard.press('Escape');
   await phone.locator('#plus').tap();
-  const plusItems = (await phone.locator('#popmenu button').allInnerTexts()).join('|'); if (plusItems !== 'Attach image|Side question') console.log('plus menu:', plusItems);
-  check('phone: ＋ holds Attach image and Side question', plusItems === 'Attach image|Side question');
+  const plusItems = (await phone.locator('#popmenu button').allInnerTexts()).join('|'); if (plusItems !== 'Attach image|Side question|Share a secret') console.log('plus menu:', plusItems);
+  check('phone: ＋ holds Attach image, Side question and Share a secret', plusItems === 'Attach image|Side question|Share a secret');
   await shot(phone, 'phone-plus-menu-390');
   await phone.keyboard.press('Escape');
   // keyboard open: the visible height shrinks

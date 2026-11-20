@@ -698,7 +698,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <button type="button" class="close-done" id="close-done" hidden>Close all done threads</button>
     <div id="groups"></div>
     <p class="empty" id="list-empty" hidden>No threads here.</p>
-    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.10.0</span></div><p class="rec" id="rec-dot" role="status" hidden><span aria-hidden="true">●</span> Recording</p><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
+    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><button type="button" class="metrics-link" id="secret-links">Secret links</button><span class="ver" id="app-version">react-feedback v0.10.0</span></div><p class="rec" id="rec-dot" role="status" hidden><span aria-hidden="true">●</span> Recording</p><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
   </nav>
   <main class="thread" id="thread" aria-label="Thread">
     <p class="placeholder" id="placeholder">Select a thread, or start a new one.</p>
@@ -767,6 +767,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
         <button type="button" id="merge-open" class="desk">Merge into…</button>
         <button type="button" id="move-open" class="desk" hidden>Move to project…</button>
         <button type="button" id="remind-open" class="desk">Reminders</button>
+        <button type="button" id="secret-open" class="desk">Share a secret</button>
         <button type="button" id="toggle-done" class="desk"></button>
         <button type="button" class="cl-btn" id="cl-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="checklist" hidden></button>
         <button type="button" class="more-btn" id="more" aria-haspopup="menu" aria-expanded="false" aria-label="More actions"><span aria-hidden="true">&#8943;</span></button>
@@ -788,7 +789,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
               <span class="replybar-text" id="replybar-text"></span>
               <button type="button" class="replybar-x" id="replybar-x" aria-label="Cancel reply">&times;</button>
             </div>
-            <button type="button" class="plus-btn" id="plus" aria-haspopup="menu" aria-expanded="false" aria-label="Attach an image or ask a side question"><span aria-hidden="true">+</span></button>
+            <button type="button" class="plus-btn" id="plus" aria-haspopup="menu" aria-expanded="false" aria-label="Attach, ask a side question, or share a secret"><span aria-hidden="true">+</span></button>
             <label class="sr" for="text">Message</label>
             <textarea id="text" placeholder="Write a message. Paste an image to attach it (Ctrl/Cmd+V)." maxlength="10000"></textarea>
             <div class="previews" id="previews"></div>
@@ -853,6 +854,36 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <p id="share-url" data-rf-private hidden></p>
     <div class="bar"><button type="button" id="share-cancel">Close</button><button type="submit" class="primary" id="share-create">Create link</button><button type="button" id="share-copy" hidden>Copy</button></div>
   </form>
+</dialog>
+<dialog id="secret-dialog" data-rf-private aria-labelledby="secret-h">
+  <form id="secret-form">
+    <h2 id="secret-h">Share a secret</h2>
+    <p class="hint">The secret is encrypted in this browser before it is sent. The server stores only the ciphertext. Inbox threads may be read by agents: posting the link into a thread is enough for an agent to open it, so send the link somewhere else if you don't want that.</p>
+    <label for="secret-text">Secret</label>
+    <textarea id="secret-text" maxlength="8000" rows="4" required placeholder="Paste a password or a key"></textarea>
+    <fieldset>
+      <legend>Link expires</legend>
+      <label><input type="radio" name="secret-exp" value="10m"> 10 min</label>
+      <label><input type="radio" name="secret-exp" value="1h" checked> 1 hour</label>
+      <label><input type="radio" name="secret-exp" value="1d"> 1 day</label>
+    </fieldset>
+    <fieldset>
+      <legend>How many times it can be opened</legend>
+      <label><input type="radio" name="secret-views" value="1" checked> One view</label>
+      <label><input type="radio" name="secret-views" value="2"> 2 views</label>
+      <label><input type="radio" name="secret-views" value="3"> 3 views</label>
+    </fieldset>
+    <p class="error" id="secret-error" role="alert" hidden></p>
+    <p class="hint" id="secret-note" hidden></p>
+    <input type="text" id="secret-url" readonly hidden>
+    <div class="bar"><button type="button" id="secret-cancel">Close</button><button type="submit" class="primary" id="secret-create">Create link</button><button type="button" id="secret-copy" hidden>Copy</button></div>
+  </form>
+</dialog>
+<dialog id="secret-list" data-rf-private aria-labelledby="secret-list-h">
+  <h2 id="secret-list-h">Secret links</h2>
+  <p class="hint">Created, expiry and views left. The secret is not here: this server never had it. Revoke makes a link unreadable.</p>
+  <div id="secret-list-body"></div>
+  <div class="bar"><span class="grow"></span><button type="button" id="secret-list-close">Close</button></div>
 </dialog>
 <dialog id="share-warn" aria-labelledby="share-warn-h">
   <h2 id="share-warn-h">This page looks sensitive</h2>

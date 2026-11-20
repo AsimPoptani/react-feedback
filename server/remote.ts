@@ -1,6 +1,7 @@
 // Remote mode: a second listener, on 127.0.0.1 only, for a tunnel or reverse proxy to point at.
 // Behind a tunnel EVERY request arrives from loopback, so loopback is never trusted here. Each request needs the device cookie, except exactly these:
 //   - the share routes (GET /__feedback/s/<token>, POST /__feedback/s/<token>/feedback|replay): the token is their credential;
+//   - the secret routes (GET /__feedback/x/<id>, POST /__feedback/x/<id>/open): the fragment key is their credential, and it is not on these paths;
 //   - POST /__feedback/api/pair/exchange: it is how a device gets its cookie;
 //   - GET /__feedback/inbox/ (and its redirect), which then is a small pairing page and not the inbox.
 // The local listener is the ordinary handler and is not touched by any of this.
@@ -17,6 +18,9 @@ const PREFIX = '/__feedback';
 const SHARE_TOKEN = '[A-Za-z0-9_-]{20,64}';
 const SHARE_PAGE = new RegExp(`^/__feedback/s/${SHARE_TOKEN}$`);
 const SHARE_SEND = new RegExp(`^/__feedback/s/${SHARE_TOKEN}/(feedback|replay)$`);
+const SECRET_ID = '[A-Za-z0-9_-]{43}';
+const SECRET_PAGE = new RegExp(`^/__feedback/x/${SECRET_ID}$`);
+const SECRET_OPEN = new RegExp(`^/__feedback/x/${SECRET_ID}/open$`);
 const EXCHANGE = `${PREFIX}/api/pair/exchange`;
 const ME = `${PREFIX}/api/pair/me`;
 const SAFE = new Set(['GET', 'HEAD']);
@@ -38,6 +42,7 @@ function cookieOf(req: Request): string | null {
 }
 
 export const isShareRoute = (path: string, method: string) => (method === 'GET' && SHARE_PAGE.test(path)) || (method === 'POST' && SHARE_SEND.test(path));
+export const isSecretRoute = (path: string, method: string) => (method === 'GET' && SECRET_PAGE.test(path)) || (method === 'POST' && SECRET_OPEN.test(path));
 
 // The page an unpaired browser is given at the inbox address. It reads the code from the URL fragment (which a browser never sends), wipes the fragment, sends the code once, and
 // goes on to the thread named in `to`. Everything is inline under a nonce, so it needs no other file from the server.
@@ -165,7 +170,7 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, rawOptions: 
     // A Host header that is there but empty is not a name at all: refused plainly, whatever else is configured.
     if (req.headers.has('host') && !req.headers.get('host')!.trim()) return reply({ kind: 'invalid_request', detail: 'A Host header is required' }, 400);
     if (options.hostGuard && !remoteHostOk(req)) return reply({ kind: 'forbidden', detail: 'This host name is not allowed here. Use the public address, or list the name in FEEDBACK_ALLOWED_HOSTS.' }, 403);
-    if (isShareRoute(path, method)) { markHostChecked(req); return inner(req, server); }
+    if (isShareRoute(path, method) || isSecretRoute(path, method)) { markHostChecked(req); return inner(req, server); }
     if (path === EXCHANGE && method === 'POST') return exchange(req, server);
 
     const token = cookieOf(req);

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { readdir, readFile, writeFile, lstat, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import * as store from './store';
@@ -10,6 +11,8 @@ import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
 import * as artifacts from './artifacts';
 import * as shares from './shares';
+import * as secrets from './secrets';
+import { secretPage } from './secret-page';
 import { checkIcons, closestProject, loadProjects, matchProject, projectById, readProjectIcon, routesByUrl, type Project } from './projects';
 import { moveThreadToProject } from './move-project';
 import * as files from './files';
@@ -363,6 +366,81 @@ const newLimits = (): ShareLimits => ({
   replayChunks: new Limiter([{ windowMs: 60e3, max: 120 }]),
   replaySessions: new Limiter([{ windowMs: 864e5, max: 50 }]),
 });
+// Opens of a secret link, in memory only, counted the same way as a share link's notes: per id and per caller. The address is never stored.
+interface SecretLimits { id: Limiter; caller: Limiter }
+const newSecretLimits = (): SecretLimits => ({
+  id: new Limiter([{ windowMs: 60e3, max: 5 }, { windowMs: 864e5, max: 50 }]),
+  caller: new Limiter([{ windowMs: 60e3, max: 5 }]),
+});
+const SECRET_HEADERS = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex', 'X-Frame-Options': 'DENY' };
+const SECRET_PAGE = /^\/__feedback\/x\/[A-Za-z0-9_-]{43}$/;
+const SECRET_OPEN = /^\/__feedback\/x\/([A-Za-z0-9_-]{43})\/open$/;
+const secretMiss = () => Response.json({ detail: secrets.GONE }, { status: 404, headers: SECRET_HEADERS });
+function secretHtml(head: boolean): Response {
+  const nonce = randomBytes(16).toString('base64url');
+  const csp = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+  return new Response(head ? null : secretPage(nonce), { headers: { ...SECRET_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': csp } });
+}
+// A public open carries no secret. Anything larger than a tiny JSON object is refused unread, so a plaintext body is never stored.
+async function discardSmall(req: Request): Promise<boolean> {
+  if (Number(req.headers.get('content-length') ?? 0) > 1024) return false;
+  const reader = req.body?.getReader();
+  if (!reader) return true;
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > 1024) { await reader.cancel(); return false; }
+  }
+  return true;
+}
+async function secretPublic(req: Request, path: string, dirs: string[], limits: SecretLimits, now: number, server?: ServerLike): Promise<Response> {
+  if ((req.method === 'GET' || req.method === 'HEAD') && SECRET_PAGE.test(path)) return secretHtml(req.method === 'HEAD');
+  const open = SECRET_OPEN.exec(path);
+  if (req.method !== 'POST' || !open) return secretMiss();
+  const id = open[1]!;
+  try {
+    if (!(await discardSmall(req))) return Response.json({ detail: 'Body is too large' }, { status: 413, headers: SECRET_HEADERS });
+    const caller = clientKey(req, server);
+    if (!limits.caller.take(caller, now) || !limits.id.take(id, now)) return Response.json({ detail: 'Too many tries. Wait a minute.' }, { status: 429, headers: { ...SECRET_HEADERS, 'Retry-After': '60' } });
+    let opened: { ciphertext: string; iv: string } | null = null;
+    for (const folder of dirs) {
+      opened = await secrets.openSecret(folder, id, now);
+      if (opened) break;
+    }
+    if (!opened) return secretMiss();
+    return Response.json({ ciphertext: opened.ciphertext, iv: opened.iv }, { headers: SECRET_HEADERS });
+  } catch {
+    console.error('Secret link error', secrets.secretPrefix(id));
+    return Response.json({ detail: 'Something went wrong' }, { status: 500, headers: SECRET_HEADERS });
+  }
+}
+async function secretApiRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, now: number): Promise<Response | null> {
+  if (path === `${PREFIX}/api/secret-links` && req.method === 'GET') return json({ links: await secrets.listSecrets(dir, now) });
+  if (path === `${PREFIX}/api/secret-links` && req.method === 'POST') {
+    const data = await read(req);
+    try {
+      const created = await secrets.createSecret(dir, data, now);
+      return json({ id: created.id, url: created.path, expires_at: created.expires_at, views_left: created.views_left, created_at: created.created_at }, 201);
+    } catch (error) {
+      if (error instanceof Invalid) throw error;
+      console.error('Secret link error', 'create');
+      throw new Invalid('Could not store the secret link', 500);
+    }
+  }
+  const revoke = path.match(/^\/__feedback\/api\/secret-links\/([A-Za-z0-9_-]{43})\/revoke$/);
+  if (revoke && req.method === 'POST') {
+    await read(req);
+    try { return json(await secrets.revokeSecret(dir, revoke[1]!)); }
+    catch (error) {
+      if (error instanceof Invalid) throw error;
+      console.error('Secret link error', secrets.secretPrefix(revoke[1]!));
+      throw new Invalid('Could not revoke the secret link', 500);
+    }
+  }
+  return null;
+}
 function dataDirOf(req: Request, fallback: string, projects?: Project[]): string {
   if (!projects) return fallback; // single-project mode: ?project= is ignored and every URL is the one it has always been
   const id = new URL(req.url).searchParams.get('project');
@@ -652,6 +730,7 @@ async function viewerReplay(req: Request, found: { folder: string; share: shares
 export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AREAS, options: HandlerOptions = {}) {
   const dir = resolve(directory);
   const limits = newLimits();
+  const secretLimits = newSecretLimits();
   return async (req: Request, server?: ServerLike): Promise<Response> => {
     try {
       const path = new URL(req.url).pathname;
@@ -678,6 +757,11 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
         if (!found) return shareMiss();
         const caller = clientKey(req, server);
         return sharedSend[2] === 'feedback' ? await viewerFeedback(req, found, caller, limits, now) : await viewerReplay(req, found, caller, limits, now);
+      }
+      // A secret link is not the inbox. The page never includes the secret. A miss on open is one message, whatever the reason. Nothing about the id, the ciphertext or the IV is logged.
+      if (path === '/__feedback/x' || path.startsWith('/__feedback/x/')) {
+        const dirs = options.projects?.length ? options.projects.map(project => project.dir) : [dir];
+        return secretPublic(req, path, dirs, secretLimits, now, server);
       }
       if (path === `${PREFIX}/api/projects` && req.method === 'GET') {
         await store.touchPresence(options.projects?.[0]?.dir ?? dir, 'user', now);
@@ -713,7 +797,7 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
       const extra = await options.extra?.(req, path); // pairing and paired devices (server/pair-routes.ts)
       if (extra) return extra;
       // The user is here when the inbox page loads, polls or sends: the widget's own captures (api/items) and the health check do not count.
-      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares|uploads)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
+      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares|uploads|secret-links)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
       if (req.method === 'GET' && path === `${PREFIX}/healthz`) return json({ status: 'ok' });
       if (path === `${PREFIX}/api/items` && req.method === 'POST') { const data = await body(req); const target = captureTarget(data, dataDir, req, options.projects); return await create(target.dir, data, target.unmatched); }
       if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(routesByUrl(options.projects) && !new URL(req.url).searchParams.has('project') ? options.projects!.map(project => project.dir) : dataDir);
@@ -723,6 +807,8 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
       if (uploaded) return uploaded;
       const threads = await threadRoute(req, dataDir, path, body, areas, options);
       if (threads) return threads;
+      const sealed = await secretApiRoute(req, dataDir, path, body, now);
+      if (sealed) return sealed;
       const published = await artifactRoute(req, dataDir, path, body, now);
       if (published) return published;
       const replays = await replayRoute(req, dataDir, path, body, now);

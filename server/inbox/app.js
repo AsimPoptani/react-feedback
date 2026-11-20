@@ -2007,6 +2007,8 @@ function openMore() {
     ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
     ...(state.projects.length > 1 && !d.merged_into ? [{ label: 'Move to project…', onclick: () => openMoveMenu($('more')) }] : []),
     { label: 'Reminders', onclick: openReminders },
+    { label: 'Share a secret', onclick: openSecret },
+    { label: 'Secret links', onclick: () => { void openSecretList(); } },
     ...(!COARSE && pairing ? [{ label: '\u{1F4F1} Open on phone', onclick: () => { void pairing.openPhone(d.id); } }] : []),
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
@@ -2014,7 +2016,7 @@ function openMore() {
     ...(isPhone() && LOADED ? [{ note: `react-feedback v${LOADED}`, foot: true }] : [])]);
 }
 function openPlus() {
-  openMenu($('plus'), [{ label: 'Attach image', onclick: () => $('file').click() }, { label: 'Side question', onclick: startAside }], { up: true });
+  openMenu($('plus'), [{ label: 'Attach image', onclick: () => $('file').click() }, { label: 'Side question', onclick: startAside }, { label: 'Share a secret', onclick: openSecret }], { up: true });
 }
 // The text box grows with what is typed, up to about five lines, on a phone. On a wide screen it stays as it was.
 function growText() {
@@ -2159,6 +2161,7 @@ $('pin-thread').addEventListener('click', () => { if (state.openId) togglePin('t
 $('merge-open').addEventListener('click', openMerge);
 $('move-open')?.addEventListener('click', () => openMoveMenu($('move-open')));
 $('remind-open').addEventListener('click', openReminders);
+$('secret-open').addEventListener('click', openSecret);
 $('remind-close').addEventListener('click', () => $('remind-dialog').close());
 $('remind-kind').addEventListener('change', drawReminderForm);
 $('remind-form').addEventListener('submit', addReminder);
@@ -2365,6 +2368,101 @@ async function refreshProjects() {
   try { saved = localStorage.getItem(PROJECT_KEY) || ''; } catch { saved = ''; }
   if (!state.project || !list.some(p => p.id === state.project)) state.project = list.some(p => p.id === saved) ? saved : state.defaultProject;
   drawProjects();
+}
+function bytesToBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function bytesToBase64url(bytes) { return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+// AES-GCM in this browser. The key is only returned so it can be put in the link fragment; it is never sent.
+async function encryptSecret(text) {
+  const keyBytes = crypto.getRandomValues(new Uint8Array(32));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
+  const packed = { ciphertext: bytesToBase64(cipher), iv: bytesToBase64(iv), fragment: bytesToBase64url(keyBytes) };
+  keyBytes.fill(0);
+  return packed;
+}
+function secretNote(views) {
+  const times = views === 1 ? 'once' : `${views} times`;
+  return `Anyone with this link can read it ${times}. Send it in a different channel from anything that says what it's for.`;
+}
+function secretLabel() { return document.querySelector('label[for="secret-text"]'); }
+function resetSecretDialog() {
+  showError($('secret-error'), '');
+  $('secret-text').value = ''; $('secret-text').hidden = false;
+  const label = secretLabel(); if (label) label.hidden = false;
+  $('secret-form').querySelectorAll('fieldset').forEach(node => { node.hidden = false; });
+  $('secret-note').hidden = true; $('secret-note').textContent = '';
+  $('secret-url').hidden = true; $('secret-url').value = '';
+  $('secret-copy').hidden = true; $('secret-copy').textContent = 'Copy'; $('secret-create').hidden = false;
+  const hour = document.querySelector('input[name="secret-exp"][value="1h"]'); if (hour) hour.checked = true;
+  const once = document.querySelector('input[name="secret-views"][value="1"]'); if (once) once.checked = true;
+}
+function openSecret() { resetSecretDialog(); $('secret-dialog').showModal(); $('secret-text').focus(); }
+function wipeSecretDialog() { if ($('secret-text')) $('secret-text').value = ''; if ($('secret-url')) $('secret-url').value = ''; }
+async function secretOrigin() {
+  try {
+    const status = await api('pair/status');
+    if (status && typeof status.public_url === 'string') {
+      const url = new URL(status.public_url);
+      if ((url.protocol === 'https:' || url.protocol === 'http:') && url.origin !== 'null') return url.origin;
+    }
+  } catch { /* this page's own address */ }
+  return location.origin;
+}
+async function createSecretLink(event) {
+  event.preventDefault();
+  showError($('secret-error'), '');
+  const text = $('secret-text').value;
+  if (!text) { showError($('secret-error'), 'Paste the secret first.'); return; }
+  const expires = document.querySelector('input[name="secret-exp"]:checked')?.value || '1h';
+  const views = Number(document.querySelector('input[name="secret-views"]:checked')?.value || '1');
+  let packed;
+  try { packed = await encryptSecret(text); } catch { showError($('secret-error'), 'This browser could not encrypt the secret.'); return; }
+  const body = { ciphertext: packed.ciphertext, iv: packed.iv, expires, views };
+  if (text.length >= 8 && JSON.stringify(body).includes(text)) { showError($('secret-error'), 'The secret would have been sent in the clear. Nothing was sent.'); return; }
+  try {
+    const created = await post('secret-links', body);
+    const url = `${await secretOrigin()}${created.url}#${packed.fragment}`;
+    $('secret-text').value = ''; $('secret-text').hidden = true;
+    const label = secretLabel(); if (label) label.hidden = true;
+    $('secret-form').querySelectorAll('fieldset').forEach(node => { node.hidden = true; });
+    $('secret-note').hidden = false; $('secret-note').textContent = secretNote(views);
+    $('secret-url').hidden = false; $('secret-url').value = url;
+    $('secret-copy').hidden = false; $('secret-create').hidden = true;
+    $('secret-copy').onclick = async () => {
+      try { await navigator.clipboard.writeText(url); $('secret-copy').textContent = 'Copied'; }
+      catch { $('secret-copy').textContent = legacyCopy(url) ? 'Copied' : 'Copy failed'; }
+    };
+    $('secret-url').focus(); $('secret-url').select();
+  } catch (error) { showError($('secret-error'), error.message); }
+}
+function drawSecretList(links) {
+  const body = $('secret-list-body');
+  if (!links.length) { body.replaceChildren(el('p', { text: 'No secret links yet.' })); return; }
+  body.replaceChildren(...links.map(link => el('article', { class: 'share-card' },
+    el('div', { class: 'share-card-main' },
+      el('p', { text: `Created ${when(link.created_at)}` }),
+      el('p', { text: `Expires ${when(link.expires_at)}` }),
+      el('p', { text: `Views left ${link.views_left}` })),
+    el('button', { type: 'button', onclick: () => { void revokeSecretLink(link.id); } }, 'Revoke'))));
+}
+async function openSecretList() {
+  try {
+    const data = await api('secret-links');
+    drawSecretList(Array.isArray(data.links) ? data.links : []);
+    $('secret-list').showModal();
+  } catch (error) { showToast(error.message); }
+}
+async function revokeSecretLink(id) {
+  try {
+    await post(`secret-links/${id}/revoke`, {});
+    const data = await api('secret-links');
+    drawSecretList(Array.isArray(data.links) ? data.links : []);
+  } catch (error) { showToast(error.message); }
 }
 function shareLink(path) { return `${location.origin}${path}`; }
 function openShare(id) {
@@ -2794,6 +2892,11 @@ $('project-button')?.addEventListener('click', () => {
 });
 $('artifact-back')?.addEventListener('click', () => { location.hash = '#/'; });
 $('artifacts-back')?.addEventListener('click', () => { location.hash = '#/'; });
+$('secret-form')?.addEventListener('submit', e => { void createSecretLink(e); });
+$('secret-cancel')?.addEventListener('click', () => { wipeSecretDialog(); $('secret-dialog').close(); });
+$('secret-dialog')?.addEventListener('close', wipeSecretDialog);
+$('secret-list-close')?.addEventListener('click', () => $('secret-list').close());
+$('secret-links')?.addEventListener('click', () => { void openSecretList(); });
 $('share-form')?.addEventListener('submit', e => { e.preventDefault(); void createUserShare(false); });
 $('share-cancel')?.addEventListener('click', () => $('share-dialog').close());
 $('share-warn-cancel')?.addEventListener('click', () => $('share-warn').close());
