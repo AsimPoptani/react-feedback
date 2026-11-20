@@ -1,5 +1,5 @@
 // Secret share links. The token is 32 random bytes, url-safe, and only its sha256 is stored. A revoked, expired or unknown token is the same miss.
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { artifactSource, readArtifact, artifactHtml, clearSuggest } from './artifacts';
@@ -18,6 +18,13 @@ export interface Share {
 }
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
+// Constant-time compare. A stored hash of the wrong length is a miss; the equal-length compare still runs so the length check is not the only branch.
+export function sameHash(stored: string, computed: string): boolean {
+  const left = Buffer.from(stored);
+  const right = Buffer.from(computed);
+  if (left.length !== right.length) { timingSafeEqual(right, right); return false; }
+  return timingSafeEqual(left, right);
+}
 export const isActive = (share: Share, now = Date.now()) => !share.revoked_at && !(share.expires_at && Date.parse(share.expires_at) <= now);
 
 export function sharePill(links: number, views: number): string {
@@ -88,6 +95,8 @@ export async function createShare(dir: string, input: NewShare): Promise<{ share
   if (!meta) throw new Invalid('No such artifact', 404);
   const now = input.now ?? Date.now();
   const expiresAt = expiryOf(input, now);
+  // An agent link is pinned to the version that exists now. A later publish would otherwise skip the scan.
+  if (input.agent && input.latest) throw new Invalid('An agent share is pinned to the current version. A link that follows later versions is only created from the inbox.');
   const version: number | 'latest' = input.latest ? 'latest' : meta.latest;
   const source = await artifactSource(dir, meta.id, version === 'latest' ? meta.latest : version);
   const hit = scanForSecrets(source);
@@ -125,14 +134,14 @@ export async function openShare(dir: string, token: string, now = Date.now()): P
   if (!token || token.length > 128) return null;
   const hash = hashToken(token);
   // A miss reads the file and stops. It does not take the lock, and it does not create the data directory or _shares.json.
-  const known = (await readShares(dir)).find(share => share.token_hash === hash);
+  const known = (await readShares(dir)).find(share => sameHash(share.token_hash, hash));
   if (!known || !isActive(known, now)) return null;
   let html: string;
   try { html = await artifactHtml(dir, known.artifact, known.version); } catch { return null; }
   let served = false;
   try {
     await updateShares(dir, shares => {
-      const share = shares.find(item => item.token_hash === hash);
+      const share = shares.find(item => sameHash(item.token_hash, hash));
       if (!share || !isActive(share, now)) return;
       share.views += 1;
       share.last_viewed_at = new Date(now).toISOString();

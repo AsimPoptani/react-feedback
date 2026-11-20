@@ -79,7 +79,7 @@ const USAGE = `Usage:
   react-feedback artifact publish <id> <file.html|file.md> --title "Title" [--id <artifact>]
   react-feedback artifact list [<id>]
   react-feedback artifact suggest-share <artifact>
-  react-feedback artifact share <artifact> [--expires 1d|7d|30d] [--latest]   (default expiry 7d; no expiry is inbox-only)
+  react-feedback artifact share <artifact> [--expires 1d|7d|30d]   (pinned to the current version; default expiry 7d; no expiry and latest are inbox-only)
   react-feedback artifact unshare <share-id>   (only a link this agent created)
   react-feedback mcp   (an MCP server on stdio; FEEDBACK_AGENT_NAME names the agent)
   --project <id> or FEEDBACK_PROJECT selects a project (FEEDBACK_PROJECTS); the default is the first`;
@@ -262,7 +262,8 @@ async function artifactCommand(dir: string, words: string[], named: Record<strin
     return `Suggested sharing ${meta.id} "${meta.title}"`;
   }
   if (sub === 'share' && words.length === 2) {
-    const created = await createShare(dir, { artifact: words[1]!, expires: (named.expires ?? '7d') as Expiry, latest: flags.includes('--latest'), by, agent: true });
+    if (flags.some(flag => flag === '--latest' || flag.startsWith('--latest='))) throw new store.Invalid('An agent share is pinned to the current version. A link that follows later versions is only created from the inbox.');
+    const created = await createShare(dir, { artifact: words[1]!, expires: (named.expires ?? '7d') as Expiry, by, agent: true });
     const until = created.share.expires_at ? created.share.expires_at.slice(0, 10) : 'never';
     return `Shared ${words[1]} (${created.share.id}, expires ${until})\n${created.path}`;
   }

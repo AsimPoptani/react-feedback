@@ -371,7 +371,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user'));
   if (action === 'answer') return json(await store.appendMessage(dir, id!, { author: 'user', text: undefined, answer: await read(req) }), 201);
   if (action === 'read') {
-    const data = req.headers.get('content-type') ? await read(req) : {};
+    const data = await read(req); // JSON only, like the other writes: a sandboxed page cannot mark a thread read with a form post
     await store.markRead(dir, id!, data.seen);
     return json({ ok: true });
   }

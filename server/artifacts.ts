@@ -3,7 +3,8 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { ID, Invalid, MAX_TITLE, itemDir, optional, threadTitle, withLock, writeAtomic } from './store';
+import { ID, Invalid, MAX_TITLE, appendShareNotice, itemDir, optional, threadTitle, withLock, writeAtomic } from './store';
+import { scanForSecrets } from './sensitive';
 
 export const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024;
 export const ART_ID = /^a[0-9a-f]{12}$/;
@@ -93,6 +94,38 @@ export async function readArtifact(dir: string, id: string): Promise<ArtifactMet
 
 function newArtId(): string { return `a${randomBytes(6).toString('hex')}`; }
 
+async function readVersionMeta(folder: string, n: number): Promise<ArtifactVersion | null> {
+  const raw = await optional(join(folder, `v${n}`, 'meta.json'));
+  if (raw === null) return null;
+  try {
+    const version = parseVersion(JSON.parse(raw));
+    return version && version.n === n ? version : null;
+  } catch { return null; }
+}
+
+// Version directories on disk. A crash after the version rename and before meta.json leaves one that meta does not list.
+async function diskVersions(folder: string): Promise<{ n: number; version: ArtifactVersion | null }[]> {
+  let entries: { name: string; isDirectory: () => boolean }[];
+  try { entries = await readdir(folder, { withFileTypes: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  const out: { n: number; version: ArtifactVersion | null }[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const match = /^v(\d+)$/.exec(entry.name);
+    if (!match) continue;
+    const n = Number(match[1]);
+    if (!Number.isInteger(n) || n < 1) continue;
+    out.push({ n, version: await readVersionMeta(folder, n) });
+  }
+  return out.sort((a, b) => a.n - b.n);
+}
+
+// Active "latest" links for this artifact. Imported lazily: shares.ts already imports this module.
+async function latestLinks(dir: string, id: string) {
+  const { readShares, isActive } = await import('./shares');
+  return (await readShares(dir)).filter(share => share.artifact === id && share.version === 'latest' && isActive(share));
+}
+
 export interface PublishInput { thread: string; title: unknown; content: string; format: ArtifactFormat; id?: string }
 export async function publishArtifact(dir: string, input: PublishInput): Promise<ArtifactMeta> {
   if (!ID.test(input.thread)) throw new Invalid('Invalid id', 404);
@@ -116,10 +149,29 @@ export async function publishArtifact(dir: string, input: PublishInput): Promise
   const folder = artDir(dir, id);
   await mkdir(folder, { recursive: true });
   return withLock(folder, async () => {
-    const existing = await readArtifact(dir, id!);
-    if (input.id && !existing) throw new Invalid('No such artifact', 404);
+    let existing = await readArtifact(dir, id!);
+    const disk = await diskVersions(folder);
+    const known = new Set(existing?.versions.map(version => version.n) ?? []);
+    // A version folder with its own meta.json is folded back in. One without is left in place and its number is not reused.
+    const repaired = disk.flatMap(item => (item.version && !known.has(item.n) ? [item.version] : []));
+    if (existing && repaired.length) {
+      const versions = [...existing.versions, ...repaired].sort((a, b) => a.n - b.n);
+      const last = versions[versions.length - 1]!;
+      existing = { ...existing, versions, latest: last.n, title: last.title, updated_at: last.created_at };
+    } else if (!existing && repaired.length) {
+      const versions = [...repaired].sort((a, b) => a.n - b.n);
+      const first = versions[0]!;
+      const last = versions[versions.length - 1]!;
+      existing = { id: id!, thread: input.thread, title: last.title, created_at: first.created_at, updated_at: last.created_at, latest: last.n, versions };
+    }
+    if (input.id && !existing && disk.length === 0) throw new Invalid('No such artifact', 404);
     if (existing && existing.thread !== input.thread) throw new Invalid('That artifact belongs to another thread', 409);
-    const n = (existing?.latest ?? 0) + 1;
+    const n = disk.reduce((max, item) => Math.max(max, item.n), 0) + 1;
+    const active = await latestLinks(dir, id!);
+    if (active.length) {
+      const hit = scanForSecrets(input.content);
+      if (hit) throw new Invalid(`This artifact looks like it contains ${hit}. It was not published: a shared link serves the latest version, so this version was checked before it could go live.`);
+    }
     const created_at = new Date().toISOString();
     const html = input.format === 'md' ? await renderMarkdownPage(title, input.content) : htmlPage(title, input.content);
     const tmp = join(rootOf(dir), `.tmp-${process.pid}-${randomBytes(4).toString('hex')}`);
@@ -131,10 +183,15 @@ export async function publishArtifact(dir: string, input: PublishInput): Promise
       await rename(tmp, join(folder, `v${n}`));
     } catch (error) { await rm(tmp, { recursive: true, force: true }); throw error; }
     const version: ArtifactVersion = { n, format: input.format, bytes, title, created_at };
+    const versions = [...(existing?.versions ?? []), version].sort((a, b) => a.n - b.n);
     const meta: ArtifactMeta = existing
-      ? { ...existing, title, updated_at: created_at, latest: n, versions: [...existing.versions, version] }
-      : { id: id!, thread: input.thread, title, created_at, updated_at: created_at, latest: n, versions: [version] };
+      ? { ...existing, title, updated_at: created_at, latest: n, versions }
+      : { id: id!, thread: input.thread, title, created_at, updated_at: created_at, latest: n, versions };
     await writeAtomic(join(folder, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);
+    if (active.length) {
+      const live = (await latestLinks(dir, id!))[0];
+      if (live) await appendShareNotice(dir, meta.thread, `New version v${n} is now live on a shared link`, live.id, meta.id);
+    }
     return meta;
   });
 }

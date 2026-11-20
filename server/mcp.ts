@@ -179,10 +179,10 @@ export function createMcpServer(options: McpOptions): McpServer {
     const meta = await suggestShare(dir, a.id);
     return { suggested: { id: meta.id, title: meta.title } };
   });
-  tool('share_artifact', 'Create a secret link to an artifact. Expiry is 1d, 7d or 30d (the default is 7d). A link with no expiry is only created from the inbox. A secret-looking page is refused.', {
-    id: artifactId, expires: z.enum(['1d', '7d', '30d']).optional(), latest: z.boolean().optional() }, async a => {
+  tool('share_artifact', 'Create a secret link to an artifact, pinned to the version that is current now. Expiry is 1d, 7d or 30d (the default is 7d). A link with no expiry, and a link that follows later versions, are only created from the inbox. A secret-looking page is refused.', {
+    id: artifactId, expires: z.enum(['1d', '7d', '30d']).optional() }, async a => {
     const by = agent ?? 'Agent';
-    const created = await createShare(dir, { artifact: a.id, expires: (a.expires ?? '7d') as Expiry, latest: a.latest === true, by, agent: true });
+    const created = await createShare(dir, { artifact: a.id, expires: (a.expires ?? '7d') as Expiry, by, agent: true });
     return { share: publicShare(created.share), url: created.path };
   });
   tool('revoke_share', 'Revoke a share link this agent created.', { id: z.string().describe('Share id, like s1a2b3c4d') }, async a => ({ ...(await revokeShare(dir, a.id, { agent: agent ?? 'Agent' })) }));

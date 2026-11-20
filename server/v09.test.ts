@@ -1,7 +1,7 @@
 // 0.9: artifacts, sandboxed share links, projects, and pinned questions.
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -10,7 +10,7 @@ import { createHandler } from './server';
 import { run } from './cli';
 import { createMcpServer } from './mcp';
 import { MAX_ARTIFACT_BYTES, publishArtifact } from './artifacts';
-import { hashToken } from './shares';
+import { createShare, hashToken } from './shares';
 import * as store from './store';
 import type { Project } from './projects';
 
@@ -40,7 +40,7 @@ async function connect(name = 'Scout') {
     const result = await client.callTool({ name: n, arguments: args }) as { isError?: boolean; structuredContent?: Record<string, unknown>; content: { text: string }[] };
     return { error: result.isError === true, data: result.structuredContent, text: result.content[0]!.text };
   };
-  return { tool, close: () => client.close() };
+  return { tool, close: () => client.close(), tools: () => client.listTools() };
 }
 
 function missShape(response: Response, body: string) {
@@ -222,4 +222,89 @@ test('an unknown share does not create the shares file', async () => {
   const response = await textOf('/__feedback/s/missing-token-value');
   expect(response.status).toBe(404);
   await expect(stat(join(dir, '_shares.json'))).rejects.toThrow();
+});
+
+test('an agent share is pinned to the current version', async () => {
+  const id = await thread();
+  const page = await publish(id, '<p>Pin me</p>', 'html', 'Pin me');
+  await expect(createShare(dir, { artifact: page.id, latest: true, by: 'Scout', agent: true })).rejects.toThrow(/pinned to the current version/);
+  await expect(run(['artifact', 'share', page.id, '--latest'], dir, undefined, { FEEDBACK_AGENT_NAME: 'Scout' })).rejects.toThrow(/pinned to the current version/);
+  expect(await readFile(join(dir, '_shares.json'), 'utf8').catch(() => '')).toBe('');
+  const agent = await run(['artifact', 'share', page.id], dir, undefined, { FEEDBACK_AGENT_NAME: 'Scout' });
+  const token = agent.split('/').pop()!.trim();
+  expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  const stored = JSON.parse(await readFile(join(dir, '_shares.json'), 'utf8')) as { shares: { version: number | string; created_by: string }[] };
+  expect(stored.shares.find(share => share.created_by === 'Scout')!.version).toBe(1);
+  const mcp = await connect('Scout');
+  const listed = await mcp.tools();
+  const schema = listed.tools.find(tool => tool.name === 'share_artifact')!.inputSchema as { properties?: Record<string, unknown> };
+  expect(schema.properties?.latest).toBeUndefined();
+  const shared = await mcp.tool('share_artifact', { id: page.id, latest: true });
+  expect(shared.error).toBe(false);
+  expect((shared.data as { share: { version: number | string } }).share.version).toBe(1);
+  await mcp.close();
+  const user = await createShare(dir, { artifact: page.id, expires: '7d', latest: true, by: 'you', agent: false });
+  expect(user.share.version).toBe('latest');
+});
+
+test('a latest link scans the next version and a new version posts a thread line', async () => {
+  const id = await thread();
+  const page = await publish(id, '<p>Clean</p>', 'html', 'Clean');
+  const pinned = await createShare(dir, { artifact: page.id, expires: '7d', by: 'you', agent: false });
+  expect(pinned.share.version).toBe(1);
+  const secretOnPinned = await publish(id, '<p>sk-live-ABCDEFGH1234</p>', 'html', 'Secret', page.id);
+  expect(secretOnPinned.latest).toBe(2);
+  const messages = async () => store.readMessages(join(dir, id), await store.readItem(join(dir, id)));
+  expect((await messages()).some(message => message.text?.includes('now live on a shared link'))).toBe(false);
+
+  const clean = await publish(id, '<p>Public</p>', 'html', 'Public');
+  const latest = await createShare(dir, { artifact: clean.id, expires: '30d', latest: true, by: 'you', agent: false });
+  expect(latest.share.version).toBe('latest');
+  await expect(publish(id, '<p>sk-live-ABCDEFGH1234</p>', 'html', 'Nope', clean.id)).rejects.toThrow(/not published/);
+  const stayed = JSON.parse(await readFile(join(dir, '_artifacts', clean.id, 'meta.json'), 'utf8')) as { latest: number };
+  expect(stayed.latest).toBe(1);
+  await expect(stat(join(dir, '_artifacts', clean.id, 'v2'))).rejects.toThrow();
+  const next = await publish(id, '<p>Second</p>', 'html', 'Second', clean.id);
+  expect(next.latest).toBe(2);
+  expect((await messages()).some(message => message.text === 'New version v2 is now live on a shared link')).toBe(true);
+  expect(await (await textOf(latest.path)).text()).toContain('Second');
+  const odd = JSON.parse(await readFile(join(dir, '_shares.json'), 'utf8')) as { shares: { token_hash: string }[] };
+  odd.shares[0]!.token_hash = 'abc';
+  await writeFile(join(dir, '_shares.json'), JSON.stringify(odd));
+  expect((await textOf(pinned.path)).status).toBe(404);
+});
+
+test('a version folder left behind by a crash does not wedge the next publish', async () => {
+  const id = await thread();
+  const page = await publish(id, '<p>One</p>', 'html', 'One');
+  const folder = join(dir, '_artifacts', page.id);
+  await mkdir(join(folder, 'v2'), { recursive: true });
+  await writeFile(join(folder, 'v2', 'body.html'), '<p>Orphan</p>');
+  await writeFile(join(folder, 'v2', 'source.html'), '<p>Orphan</p>');
+  await writeFile(join(folder, 'v2', 'meta.json'), JSON.stringify({ n: 2, format: 'html', bytes: 12, title: 'One', created_at: '2026-11-20T12:00:00.000Z' }));
+  const repaired = await publish(id, '<p>Three</p>', 'html', 'Three', page.id);
+  expect(repaired.versions.map(version => version.n)).toEqual([1, 2, 3]);
+  expect(repaired.latest).toBe(3);
+  expect(await readFile(join(folder, 'v2', 'body.html'), 'utf8')).toContain('Orphan');
+  expect(await readFile(join(folder, 'v3', 'body.html'), 'utf8')).toContain('Three');
+
+  const bare = await publish(id, '<p>Bare</p>', 'html', 'Bare');
+  await mkdir(join(dir, '_artifacts', bare.id, 'v2'), { recursive: true });
+  await writeFile(join(dir, '_artifacts', bare.id, 'v2', 'body.html'), '<p>No meta</p>');
+  const skipped = await publish(id, '<p>Next</p>', 'html', 'Next', bare.id);
+  expect(skipped.versions.map(version => version.n)).toEqual([1, 3]);
+  expect(skipped.latest).toBe(3);
+  expect(await readFile(join(dir, '_artifacts', bare.id, 'v3', 'body.html'), 'utf8')).toContain('Next');
+});
+
+test('marking a thread read requires a JSON content type', async () => {
+  const id = await thread();
+  expect((await store.summarise(dir, id)).summary.user_read_at).toBeNull();
+  const plain = await handle(new Request(`http://local/__feedback/api/threads/${id}/read`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' }));
+  const form = await handle(new Request(`http://local/__feedback/api/threads/${id}/read`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'seen=1' }));
+  const none = await handle(new Request(`http://local/__feedback/api/threads/${id}/read`, { method: 'POST' }));
+  expect([plain.status, form.status, none.status]).toEqual([415, 415, 415]);
+  expect((await store.summarise(dir, id)).summary.user_read_at).toBeNull();
+  expect((await handle(api(`api/threads/${id}/read`, {}))).status).toBe(200);
+  expect((await store.summarise(dir, id)).summary.user_read_at).not.toBeNull();
 });

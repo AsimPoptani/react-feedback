@@ -992,6 +992,7 @@ function drawThread() {
   $('metrics-link').setAttribute('aria-current', state.metricsOn ? 'page' : 'false');
   const art = $('artifact'), arts = $('artifacts'), artLink = $('artifacts-link');
   if (art) art.style.display = state.artifactOn ? 'flex' : 'none';
+  if (!state.artifactOn) removeArtifactFrame();
   if (arts) arts.style.display = state.artifactsOn ? 'flex' : 'none';
   if (artLink) artLink.setAttribute('aria-current', state.artifactOn || state.artifactsOn ? 'page' : 'false');
   if (!d) { drawWaiting(null); return; }
@@ -1496,10 +1497,25 @@ function drawWaiting(d) {
   const open = liveQuestions(d);
   if (!open.length) { bar.hidden = true; bar.replaceChildren(); state.waitingOpen = false; return; }
   const newest = open[open.length - 1];
+  const q = newest.question;
   const more = open.length - 1;
+  const inline = open.length === 1 && q.options.length <= 4 && !q.multi;
   bar.hidden = false;
+  const summary = el('span', { text: clip(q.prompt, 80) });
+  if (inline) {
+    const head = el('div', { class: 'waiting-head' }, el('strong', { text: 'Waiting for your answer' }), summary);
+    const opts = el('div', { class: 'waiting-opts' }, ...q.options.map(o => el('button', { type: 'button', class: 'waiting-opt', onclick: () => { const s = selFor(q); s.ids = [o.id]; s.other = ''; void submitAnswer(q); } }, o.label)));
+    const kids = [head, opts];
+    if (q.allow_other) {
+      const other = el('input', { type: 'text', class: 'qother', placeholder: 'Other (write your own answer)', maxlength: '1000', 'aria-label': 'Other answer' });
+      other.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); const s = selFor(q); s.ids = []; s.other = other.value; void submitAnswer(q); } });
+      kids.push(other);
+    }
+    bar.replaceChildren(...kids);
+    return;
+  }
   const head = el('button', { type: 'button', class: 'waiting-head', 'aria-expanded': String(!!state.waitingOpen), onclick: () => { state.waitingOpen = !state.waitingOpen; drawWaiting(d); } },
-    el('strong', { text: 'Waiting for your answer' }), el('span', { text: clip(newest.question.prompt, 80) }), ...(more ? [el('span', { class: 'hint', text: `${more} more` })] : []));
+    el('strong', { text: 'Waiting for your answer' }), summary, ...(more ? [el('span', { class: 'hint', text: `${more} more` })] : []));
   bar.replaceChildren(head);
   if (state.waitingOpen) bar.append(questionCard(d, newest));
 }
@@ -1513,7 +1529,7 @@ function artifactSrc(id, version) {
 }
 function artifactCard(a) {
   const kids = [el('strong', { text: a.title }), el('span', { class: 'hint', text: `v${a.latest}` }), el('a', { href: `#/artifact/${a.id}`, text: 'Open' })];
-  if (a.links) kids.push(el('button', { type: 'button', class: 'pill', onclick: () => { void openManage(a.id); } }, pillText(a)));
+  if (a.links) kids.push(el('button', { type: 'button', class: 'share-pill', onclick: () => { void openManage(a.id); } }, pillText(a)));
   if (a.suggest) kids.push(el('button', { type: 'button', class: 'primary', onclick: () => openShare(a.id) }, 'Share?'));
   return el('article', { class: 'art-card', 'data-artifact': a.id }, ...kids);
 }
@@ -1592,9 +1608,16 @@ async function createUserShare(confirm) {
   }
 }
 function linkRow(link, title) {
-  return el('div', { class: 'share-row' },
-    ...(title ? [el('a', { href: `#/artifact/${link.artifact}`, text: title })] : []),
-    el('p', { text: `${link.created_by} · ${when(link.created_at)} · ${link.expires_at ? `expires ${link.expires_at.slice(0, 10)}` : 'no expiry'} · ${link.version === 'latest' ? 'latest' : `v${link.version}`} · viewed ${link.views}×${link.last_viewed_at ? ` · last ${when(link.last_viewed_at)}` : ''}` }),
+  const version = link.version === 'latest' ? 'latest' : `v${link.version}`;
+  const viewed = `Viewed ${link.views}×${link.last_viewed_at ? ` · last ${when(link.last_viewed_at)}` : ''}`;
+  return el('article', { class: 'share-card' },
+    el('div', { class: 'share-card-main' },
+      ...(title ? [el('a', { href: `#/artifact/${link.artifact}`, text: title })] : []),
+      el('p', { class: 'share-who' }, el('strong', { text: link.created_by })),
+      el('p', { text: `Created ${when(link.created_at)}` }),
+      el('p', { text: link.expires_at ? `Expires ${link.expires_at.slice(0, 10)}` : 'No expiry' }),
+      el('p', { text: `Version ${version}` }),
+      el('p', { text: viewed })),
     el('button', { type: 'button', onclick: () => { void revokeShare(link.id); } }, 'Revoke'));
 }
 function drawManage(links) {
@@ -1613,16 +1636,45 @@ async function revokeShare(id) {
   if (state.artifactsOn) await loadArtifactsPage();
   if ($('manage-dialog')?.open && state.manageFor) { const meta = await api(`artifacts/${state.manageFor}`); drawManage(meta.shares || []); }
 }
+function removeArtifactFrame() {
+  const frame = $('artifact-frame');
+  if (!frame) return;
+  frame.removeAttribute('src');
+  frame.remove();
+}
+function artifactFrame(src) {
+  const host = $('artifact');
+  if (!host) return;
+  let frame = $('artifact-frame');
+  if (!frame) {
+    frame = el('iframe', { id: 'artifact-frame', sandbox: 'allow-scripts allow-popups', referrerpolicy: 'no-referrer', title: 'Artifact' });
+    host.append(frame);
+  }
+  if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);
+}
+function drawVersionPicker(meta, version) {
+  const select = $('artifact-version');
+  if (!select) return;
+  const versions = (meta.versions || []).map(item => (typeof item === 'number' ? item : item.n));
+  const want = versions.length ? versions : [version];
+  const signature = want.join(',');
+  if (select.dataset.versions !== signature) {
+    select.replaceChildren(...want.map(n => el('option', { value: String(n), text: `v${n}` })));
+    select.dataset.versions = signature;
+  }
+  select.value = String(version);
+  select.onchange = () => {
+    const n = Number(select.value);
+    if (!Number.isInteger(n) || n < 1) return;
+    const next = `#/artifact/${meta.id}/v${n}`;
+    if (location.hash !== next) location.hash = next;
+  };
+}
 function drawArtifact(meta, version) {
   $('artifact-title').textContent = meta.title;
   document.title = `${meta.title} · Artifact`;
-  const src = artifactSrc(meta.id, version);
-  const frame = $('artifact-frame');
-  if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);
-  $('artifact-versions').replaceChildren(...(meta.versions || []).map(item => {
-    const n = typeof item === 'number' ? item : item.n;
-    return el('a', { href: `#/artifact/${meta.id}/v${n}`, 'aria-current': n === version ? 'page' : 'false', text: `v${n}` });
-  }));
+  artifactFrame(artifactSrc(meta.id, version));
+  drawVersionPicker(meta, version);
   const pill = $('artifact-pill');
   if (meta.links) { pill.textContent = pillText(meta); pill.onclick = () => { void openManage(meta.id); }; pill.hidden = false; }
   else pill.hidden = true;
