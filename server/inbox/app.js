@@ -2241,11 +2241,11 @@ async function startRecording() {
   r.stop = recorder.start({ inbox: true, emit: event => { r.buf.push(event); if (r.buf.length >= 400) void flushRecording(r); } });
   r.timer = setInterval(() => { void flushRecording(r); }, 5000);
   state.recorder = r;
-  $('rec-dot').hidden = false;
+  $('rec-dot').hidden = false; if ($('rec-mini')) $('rec-mini').hidden = false;
 }
 function stopRecording() {
   const r = state.recorder;
-  $('rec-dot').hidden = true;
+  $('rec-dot').hidden = true; if ($('rec-mini')) $('rec-mini').hidden = true;
   if (!r) return;
   state.recorder = null;
   try { r.stop?.(); } catch { /* already stopped */ }

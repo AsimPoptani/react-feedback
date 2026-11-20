@@ -19,7 +19,7 @@
     "./package.json": "./package.json"
   },
   "bin": { "react-feedback": "./bin/react-feedback.ts" },
-  "files": ["dist", "bin", "server", "!server/*.test.ts", "!server/dom", "README.md", "LICENSE"],
+  "files": ["dist", "bin", "server", "!server/*.test.ts", "!server/dom", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
   "scripts": {
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json",
     "lint": "biome lint --error-on-warnings .",

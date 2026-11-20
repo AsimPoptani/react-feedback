@@ -243,10 +243,31 @@ function parseSecret(m: ItemData): SecretRequest | undefined {
   return { name: s.name, label: s.label, ...(typeof s.help_url === 'string' && /^https:\/\//.test(s.help_url) ? { help_url: s.help_url } : {}),
     ...(s.status === 'saved' ? { status: 'saved' as const, ...(typeof s.hint === 'string' && s.hint.length <= MAX_HINT ? { hint: s.hint } : {}), ...(typeof s.saved_at === 'string' ? { saved_at: s.saved_at } : {}), ...(s.check === 'works' || s.check === 'rejected' ? { check: s.check } : {}) } : {}) };
 }
+// A viewer's text is shown in terminals and logs by agents and the CLI: ANSI and OSC escape sequences and other control characters are removed. Newlines and tabs stay.
+export function stripControls(value: string): string {
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0x1b) { // ESC: skip a whole sequence
+      const next = value[i + 1];
+      if (next === ']') { // OSC: up to BEL or ESC \
+        i += 2;
+        while (i < value.length && value.charCodeAt(i) !== 0x07 && value.charCodeAt(i) !== 0x1b) i++;
+        if (value.charCodeAt(i) === 0x1b && value[i + 1] === '\\') i++;
+      } else if (next === '[') { // CSI: parameter and intermediate bytes, then one final byte
+        i += 2;
+        while (i < value.length && value.charCodeAt(i) >= 0x20 && value.charCodeAt(i) <= 0x3f) i++;
+      } else if (next !== undefined && next >= '@' && next <= '_') i++; // a two-byte escape
+      continue;
+    }
+    if (code === 0x0a || code === 0x09 || (code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f))) out += value[i];
+  }
+  return out;
+}
 export function parseQuote(q: unknown): ViewerQuote | undefined {
   if (!isObject(q)) return undefined;
-  const text = typeof q.text === 'string' ? q.text.slice(0, 300) : '';
-  const path = typeof q.path === 'string' ? q.path.slice(0, 300) : '';
+  const text = typeof q.text === 'string' ? stripControls(q.text).slice(0, 300) : '';
+  const path = typeof q.path === 'string' ? stripControls(q.path).slice(0, 300) : '';
   const box = Array.isArray(q.box) && q.box.length === 4 && q.box.every(n => typeof n === 'number' && Number.isFinite(n)) ? (q.box as number[]).map(n => Math.round(n * 1000) / 1000) as [number, number, number, number] : null;
   return text || path || box ? { text, path, box } : undefined;
 }
@@ -741,14 +762,15 @@ export async function appendViewerFeedback(dir: string, id: string, input: { tex
       const note = await readMerge(path);
       if (note?.state === 'done') return note.into;
       const stored = await materialise(path, await readItem(path));
-      const text = sentIn ? quoteSent(sentIn, input.text) : input.text;
+      const clean = stripControls(input.text);
+      const text = sentIn ? quoteSent(sentIn, clean) : clean;
       const created: Message = { id: `m${stored.length + 1}`, author: 'viewer', text, images: [], created_at: new Date().toISOString(), flag: 'needs_you', kind: 'viewer_feedback',
-        share_id: input.shareId, artifact_id: input.artifactId, label: input.label, ...(input.quote ? { quote: input.quote } : {}) };
+        share_id: input.shareId, artifact_id: input.artifactId, label: stripControls(input.label), ...(input.quote ? { quote: input.quote } : {}) };
       await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
       return created;
     });
     if (typeof written === 'string') { sentIn ??= titleOf(await readItem(path), at); at = written; continue; }
-    await logEvent(dir, { id: at, kind: 'message', text: `Viewer feedback · ${input.label}: ${input.text}`, author: 'viewer' });
+    await logEvent(dir, { id: at, kind: 'message', text: `Viewer feedback · ${stripControls(input.label)}: ${stripControls(input.text)}`, author: 'viewer' });
     return { ...written, ...(at !== id ? { forwarded_to: at } : {}) };
   }
 }

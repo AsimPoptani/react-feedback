@@ -275,6 +275,7 @@ async function inboxPrivacy(width, tap) {
   await page.goto(`${origin}/__feedback/inbox/#/${t2}`);
   await page.getByText(KEY).first().waitFor();
   check(`${width}: the key-like message is on screen while recording`, true);
+  check(`${width}: with a thread open, the recording dot in the thread header is ${tap ? 'visible on a phone' : 'hidden on desktop (the sidebar shows it)'}`, (await page.locator('#rec-mini').isVisible()) === tap);
   await page.goto(`${origin}/__feedback/inbox/#/artifact/${art.id}`);
   await page.waitForSelector('#artifact-frame');
   await page.locator('#artifact-share')[act]();

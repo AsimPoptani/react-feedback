@@ -561,6 +561,9 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
 #replay-frame { width: 100%; height: min(70dvh, 620px); border: 0; background: #fff; display: block; }
 .rec { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-weight: 700; color: var(--berry); font-size: 13px; }
 .rec[hidden] { display: none; }
+.rec-mini { color: var(--berry); font-size: 14px; font-weight: 700; flex: none; }
+.rec-mini[hidden] { display: none; }
+@media (min-width: 760px) { .rec-mini { display: none; } }
 .msg.viewer { align-self: flex-start; background: var(--ochre-tint); border-bottom-left-radius: 4px; border-color: var(--ochre); }
 .msg .viewer-quote { margin: 4px 0 6px; padding: 4px 8px; border-left: 4px solid var(--teal); background: var(--panel); border-radius: 6px; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
 .msg .viewer-quote code { display: block; font-size: 12px; }
@@ -666,6 +669,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
       <div class="thread-head">
         <button type="button" class="back" id="back" aria-label="Back to threads"><span aria-hidden="true">&larr;</span><span class="back-text"> Threads</span></button>
         <h2 id="title"></h2>
+        <span class="rec-mini" id="rec-mini" role="status" aria-label="Recording" title="Recording" hidden>&#9679;</span>
         <span class="flag upd" id="ro-badge" hidden>Updates</span>
         <button type="button" id="pin-thread" class="desk" aria-pressed="false"></button>
         <button type="button" id="merge-open" class="desk">Merge into…</button>

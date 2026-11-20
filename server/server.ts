@@ -544,7 +544,7 @@ async function viewerFeedback(req: Request, found: { folder: string; share: shar
   if (!limits.feedbackCaller.take(caller, now) || !limits.feedbackLink.take(share.id, now)) return shareJson({ kind: 'rate_limited', detail: 'Too many notes just now. Try again in a minute.' }, 429);
   try {
     const data = await viewerBody(req, MAX_NOTE_BODY);
-    const text = typeof data.note === 'string' ? data.note.trim() : '';
+    const text = typeof data.note === 'string' ? store.stripControls(data.note).trim() : '';
     if (!text || text.length > store.MAX_VIEWER_NOTE) throw new Invalid(`Note must be 1–${store.MAX_VIEWER_NOTE} characters`);
     const meta = await artifacts.readArtifact(folder, share.artifact);
     if (!meta) return shareMiss();
