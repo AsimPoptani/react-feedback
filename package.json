@@ -1,6 +1,6 @@
 {
   "name": "react-feedback",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "A drop-in feedback widget for React apps (region, element, section and page screenshots with a note) plus a small Bun server, inbox and CLI.",
   "license": "MIT",
   "type": "module",

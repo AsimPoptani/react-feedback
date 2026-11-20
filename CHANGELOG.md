@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2
+
+### Added
+- **The sidebar can collapse to a slim rail** (56 px) on desktop and medium widths: the project badge (opens the project menu), a New thread button, an unread count and an expand button. The « button at the top of the sidebar or the `[` key toggles it; it is remembered on this device, and the thread pane takes the freed width. Phones are unchanged.
+
+### Fixed
+- Fixed: the thread title no longer squeezes to one letter per line at medium widths. It keeps at least 260 px, truncates with an ellipsis after two lines, and the header buttons wrap onto their own row below it.
+- The service worker cache is `fb-inbox-0.10.2`.
+
 ## 0.10.1
 
 ### Added

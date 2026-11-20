@@ -34,6 +34,7 @@ function paintVersion() { const node = $('app-version'); if (node && LOADED) nod
 
 const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
+const SIDE_KEY = 'fb-inbox-sidebar';
 const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], files: [], newFiles: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
@@ -99,7 +100,7 @@ const kbd = keys => el('kbd', { 'data-keys': keys, text: keyLabel(keys) });
 const SHORTCUTS = [
   ['mod+Enter', 'Send the message (or start the thread)'], ['mod+I', 'Attach an image'], ['mod+V', 'Paste an image'], ['mod+K', 'Search threads'],
   ['J / ↓', 'Next thread'], ['K / ↑', 'Previous thread'], ['E', 'Mark the open thread done, or reopen it'], ['N', 'New thread'], ['P', 'Pin or unpin the open thread'],
-  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'], ['B', 'Ask a side question (or start a message with /btw)'],
+  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['[', 'Collapse or expand the sidebar'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'], ['B', 'Ask a side question (or start a message with /btw)'],
   ['1–9, Enter', 'Pick an option on the latest open question, then answer'], ['← / →', 'Flip images in the viewer'], ['?', 'This cheat sheet'], ['Esc', 'Close the viewer or a dialog']];
 
 // ---- Profile and avatars
@@ -496,6 +497,8 @@ function drawList() {
   $('view-you').setAttribute('aria-pressed', String(state.view === 'you'));
   $('count-agent').textContent = String(state.threads.filter(waitingAgent).length);
   $('count-you').textContent = String(state.threads.filter(waitingYou).length);
+  const unreadN = state.threads.filter(t => t.unread_for_user).length;
+  $('rail-unread').hidden = !unreadN; $('rail-unread').textContent = String(unreadN); $('rail-unread').setAttribute('aria-label', `${unreadN} unread`);
 }
 async function refreshPins() {
   try { const p = await api('pins'); if (JSON.stringify(p) !== JSON.stringify(state.pins)) { state.pins = p; drawList(); drawPinThread(); } } catch { /* keep the last pins */ }
@@ -1713,6 +1716,16 @@ function openNew() { showError($('new-error'), ''); $('new-dialog').showModal();
 // ---- Keyboard
 const typing = t => !!t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
 const anyDialog = () => [...document.querySelectorAll('dialog')].some(d => d.open);
+// The sidebar collapses to a slim rail on wide screens (the CSS ignores it on a phone); the choice is kept on this device.
+function setSidebar(collapsed, save) {
+  $('app').classList.toggle('rail', collapsed);
+  const t = $('side-toggle');
+  t.setAttribute('aria-expanded', String(!collapsed));
+  t.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  t.title = collapsed ? 'Expand sidebar ([)' : 'Collapse sidebar ([)';
+  t.firstElementChild.textContent = collapsed ? '\u00bb' : '\u00ab';
+  if (save) { try { localStorage.setItem(SIDE_KEY, collapsed ? '1' : '0'); } catch { /* storage may be blocked */ } }
+}
 function onKey(e) {
   if (e.isComposing) return;
   if (!$('popmenu').hidden) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const b = [...$('popmenu').querySelectorAll('button:not(:disabled)')], i = b.indexOf(document.activeElement); b[(i + (e.key === 'ArrowDown' ? 1 : -1) + b.length) % b.length]?.focus(); } else if (e.key === 'Tab') closeMenu(false); return; }
@@ -1738,6 +1751,7 @@ function onKey(e) {
     if (s.ids.length || s.other.trim()) { e.preventDefault(); submitAnswer(q); return; }
   }
   if (e.key === '?') { e.preventDefault(); $('help-dialog').showModal(); return; }
+  if (e.key === '[') { e.preventDefault(); setSidebar(!$('app').classList.contains('rail'), true); return; }
   if (e.shiftKey) return;
   if (e.target.classList?.contains('msg') && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) { e.preventDefault(); moveMsg(e.target, e.key === 'Home' ? 'start' : e.key === 'End' ? 'end' : e.key === 'ArrowDown' ? 1 : -1); return; }
   if (e.key === 'l' && state.detail) { e.preventDefault(); toggleChecklist(); return; }
@@ -1858,6 +1872,8 @@ $('avatar-file').addEventListener('change', async e => {
   try { profile.pending = await cropSquare(file); showError($('profile-error'), ''); paintAvatarPreview(); } catch (error) { showError($('profile-error'), error.message); }
 });
 document.addEventListener('keydown', onKey);
+$('side-toggle').addEventListener('click', () => setSidebar(!$('app').classList.contains('rail'), true));
+try { if (localStorage.getItem(SIDE_KEY) === '1') setSidebar(true, false); } catch { /* storage may be blocked */ }
 window.addEventListener('hashchange', route);
 // "Claude · active 2 min ago" and "You · last seen 10:42": quiet, and gone when there is no data. The time after an hour is in this browser's zone.
 const clockText = (iso, now) => { const d = new Date(iso), t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); return d.toDateString() === new Date(now).toDateString() ? t : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${t}`; };
