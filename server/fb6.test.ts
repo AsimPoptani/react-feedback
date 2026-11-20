@@ -144,7 +144,7 @@ test('ask: the CLI appends a question, the answer is a user message with an even
   const msg = await ok.json();
   expect(msg).toMatchObject({ author: 'user', text: 'Chose: Berry', answer: { question_id: 'q2', option_ids: ['o2'] } });
   const last = (await events()).pop();
-  expect(last).toMatchObject({ kind: 'answer', author: 'user', first_line: 'q2: Berry' });
+  expect(last).toMatchObject({ kind: 'answer', author: 'user', first_line: 'q2 (Which colour?): Berry' });
   t = await get(`threads/${id}`);
   expect(t.open_question).toBe(false);
   expect((await handle(api(`threads/${id}/answer`, { question_id: 'q2', option_ids: ['o1'] }))).status).toBe(409); // locked
@@ -156,7 +156,7 @@ test('multi questions, Other, --no-other, and ask-new', async () => {
   await run(['ask', id, 'Pick any', '--option', 'A', '--option', 'B', '--multi'], dir);
   const r = await handle(api(`threads/${id}/answer`, { question_id: 'q2', option_ids: ['o1', 'o2'], other_text: 'and C' }));
   expect((await r.json()).text).toBe('Chose: A, B, Other: and C');
-  expect((await events()).pop().first_line).toBe('q2: A, B, and C');
+  expect((await events()).pop().first_line).toBe('q2 (Pick any): A, B, and C');
   await run(['ask', id, 'Strict', '--option', 'Yes', '--no-other'], dir);
   expect((await handle(api(`threads/${id}/answer`, { question_id: 'q4', option_ids: [], other_text: 'maybe' }))).status).toBe(400);
   const out = await run(['ask-new', 'Direction', 'Left or right?', '--option', 'Left', '--option', 'Right'], dir);

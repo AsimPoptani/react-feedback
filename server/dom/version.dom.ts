@@ -70,24 +70,24 @@ describe('the update banner', () => {
   });
 
   it('shows only when the versions differ, and a dismiss holds until the next version', async () => {
-    serverVersion = '0.9.0';
+    serverVersion = '0.9.1';
     await load();
     const banner = $('update-banner');
     expect(banner.hidden).toBe(false);
-    expect($('update-text').textContent).toBe('A new version (v0.9.0) is ready. Reload to update');
+    expect($('update-text').textContent).toBe('A new version (v0.9.1) is ready. Reload to update');
     expect($('update-reload').textContent).toBe('Reload');
     expect($('update-dismiss').getAttribute('aria-label')).toBe('Dismiss');
     expect($('app-version').textContent).toBe(`react-feedback v${PAGE}`);
     $('update-dismiss').click();
     expect(banner.hidden).toBe(true);
-    expect(localStorage.getItem('fb-inbox-update-dismissed')).toBe('0.9.0');
-    serverVersion = '0.9.0';
-    await settlePoll();
-    expect(banner.hidden).toBe(true);
+    expect(localStorage.getItem('fb-inbox-update-dismissed')).toBe('0.9.1');
     serverVersion = '0.9.1';
     await settlePoll();
+    expect(banner.hidden).toBe(true);
+    serverVersion = '0.9.2';
+    await settlePoll();
     expect(banner.hidden).toBe(false);
-    expect($('update-text').textContent).toBe('A new version (v0.9.1) is ready. Reload to update');
+    expect($('update-text').textContent).toBe('A new version (v0.9.2) is ready. Reload to update');
     serverVersion = PAGE;
     await settlePoll();
     expect(banner.hidden).toBe(true);
