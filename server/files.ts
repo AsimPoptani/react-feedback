@@ -8,7 +8,7 @@
 // Nothing here ever serves a file inline except an image or a PDF preview: see `downloadHeaders`.
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, constants as fsConstants, mkdir, open, readdir, rename, rm, stat, statfs, writeFile, type FileHandle } from 'node:fs/promises';
+import { copyFile, constants as fsConstants, link, mkdir, open, readdir, rename, rm, stat, statfs, writeFile, type FileHandle } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Invalid, type Author } from './store';
 
@@ -29,6 +29,8 @@ export interface FilesOptions {
   // The free and total bytes of the volume the data lives on. Tests replace it; the default asks the operating system.
   disk?: (dir: string) => Promise<{ free: number; total: number }>;
   now?: () => number;
+  // Hard-links a file for a merge or move. Tests replace it to force the copy path; the default is fs link.
+  link?: (from: string, to: string) => Promise<void>;
 }
 
 // ---- Limits (environment)
@@ -161,8 +163,8 @@ export async function createUpload(dir: string, input: { name: unknown; size: un
     if (typeof input.sha256 !== 'string' || !SHA.test(input.sha256.toLowerCase())) throw new Invalid('sha256 must be 64 hex characters');
     sha256 = input.sha256.toLowerCase();
   }
+  await cleanStale(dir, options.now?.() ?? Date.now()); // first, so a full volume held by stale partials cannot lock new uploads out
   await checkDisk(dir, size, options);
-  await cleanStale(dir, options.now?.() ?? Date.now());
   const id = newId();
   const folder = uploadDir(dir, id);
   await mkdir(folder, { recursive: true });
@@ -354,14 +356,17 @@ export async function moveFile(from: string, to: string): Promise<void> {
   }
 }
 const present = async (path: string) => { try { await stat(path); return true; } catch { return false; } };
-// A copy in another thread (a merge or a move). Cheap on a file system that can clone. Already there means done.
-export async function cloneAttachments(fromThread: string, toThread: string, list: Attachment[]): Promise<void> {
+// A copy in another thread (a merge or a move). A claimed file never changes, so a hard link costs no space; when the link cannot be made (another volume)
+// the bytes are copied, after the same disk check an upload gets. Already there means done.
+export async function cloneAttachments(fromThread: string, toThread: string, list: Attachment[], options: FilesOptions = {}): Promise<void> {
   for (const a of list) {
     const to = attachmentPath(toThread, a);
     if (await present(to)) continue;
     const from = attachmentPath(fromThread, a);
     if (!(await present(from))) continue;
     await mkdir(attachmentDir(toThread, a.id), { recursive: true });
+    try { await (options.link ?? link)(from, to); continue; } catch { /* not linkable here: copy */ }
+    await checkDisk(attachmentDir(toThread, a.id), (await stat(from)).size, options);
     await copyFile(from, to, fsConstants.COPYFILE_FICLONE);
   }
 }

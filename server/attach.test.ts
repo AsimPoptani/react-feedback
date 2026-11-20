@@ -412,3 +412,67 @@ test('the data folder keeps working when it has files in it: thread lists skip t
   const list = await (await handle(new Request(url('api/threads')))).json();
   expect(list.map((t: { id: string }) => t.id)).toEqual([id]);
 });
+
+// ---- 0.9.4 review fixes
+test('createUpload cleans stale partials before the disk check, so a full volume cannot lock itself out', async () => {
+  const GiB = 1024 ** 3;
+  const stale = await (await handle(json('api/uploads', 'POST', { name: 'stale.dat', size: 10 }))).json();
+  const longAgo = new Date(Date.now() - 25 * 3600e3);
+  for (const f of await readdir(join(dir, '_uploads', stale.id))) await utimes(join(dir, '_uploads', stale.id, f), longAgo, longAgo);
+  // Free space sits at the floor while the stale partial is there, and is plentiful once it is gone.
+  const disk = async () => ({ free: (await readdir(join(dir, '_uploads'))).includes(stale.id) ? 20 * GiB : 60 * GiB, total: 100 * GiB });
+  const small = createHandler(dir, undefined, { files: { env: { FEEDBACK_MIN_FREE_BYTES: String(20 * GiB) }, disk } });
+  const res = await small(json('api/uploads', 'POST', { name: 'new.dat', size: 10 }));
+  expect(res.status).toBe(201);
+  expect((await readdir(join(dir, '_uploads'))).includes(stale.id)).toBe(false);
+});
+test('starting through the bin serve path sweeps a 48 hour old partial upload', async () => {
+  const old = join(dir, '_uploads', 'u0123456789abcdef');
+  await mkdir(old, { recursive: true });
+  await writeFile(join(old, 'part'), 'half'); await writeFile(join(old, 'meta.json'), '{}');
+  const longAgo = new Date(Date.now() - 48 * 3600e3);
+  for (const f of ['part', 'meta.json']) await utimes(join(old, f), longAgo, longAgo);
+  const proc = Bun.spawn(['bun', join(import.meta.dir, '..', 'bin', 'react-feedback.ts'), 'serve'], { env: { ...process.env, FEEDBACK_DIR: dir, PORT: '0', FEEDBACK_REMINDERS: '0' }, stdout: 'ignore', stderr: 'ignore' });
+  try {
+    let gone = false;
+    for (let i = 0; i < 100 && !gone; i++) { gone = !(await stat(old).then(() => true, () => false)); if (!gone) await Bun.sleep(100); }
+    expect(gone).toBe(true);
+  } finally { proc.kill(); await proc.exited; }
+});
+const inode = async (path: string) => (await stat(path)).ino;
+test('a merge and a move hard-link the files: no extra space, and no disk check', async () => {
+  const a = await thread('A'), b = await thread('B'), c = await thread('C');
+  const up = await upload(bytesOf(12), 'link.txt');
+  const sent = await (await post(a, { text: 'with file', attachments: [up.id] })).json();
+  const refuse = { env: { FEEDBACK_MIN_FREE_BYTES: '9000000000000000' } };
+  await store.mergeThreads(dir, a, b, 'agent', refuse);
+  expect(await inode(join(dir, b, 'files', up.id, 'link.txt'))).toBe(await inode(join(dir, a, 'files', up.id, 'link.txt')));
+  await store.moveMessages(dir, b, [(await store.summarise(dir, b)).messages.find(m => m.attachments?.length)!.id], c, 'agent', refuse);
+  expect(await readFile(join(dir, c, 'files', up.id, 'link.txt'))).toHaveLength(12);
+  await expect(stat(join(dir, b, 'files', up.id))).rejects.toThrow();
+  expect(sent.id).toBeTruthy();
+});
+test('when a link cannot be made, a merge copies only if the disk guard allows it', async () => {
+  const a = await thread('A'), b = await thread('B');
+  const up = await upload(bytesOf(12), 'copy.txt');
+  await post(a, { text: 'with file', attachments: [up.id] });
+  const noLink = async () => { throw Object.assign(new Error('cross-device'), { code: 'EXDEV' }); };
+  await expect(store.mergeThreads(dir, a, b, 'agent', { link: noLink, env: { FEEDBACK_MIN_FREE_BYTES: '9000000000000000' } })).rejects.toThrow('Not enough disk space on the server');
+  await expect(stat(join(dir, b, 'files', up.id, 'copy.txt'))).rejects.toThrow();
+  await store.mergeThreads(dir, a, b, 'agent', { link: noLink }); // the retry, with room
+  expect(await readFile(join(dir, b, 'files', up.id, 'copy.txt'))).toHaveLength(12);
+  expect(await inode(join(dir, b, 'files', up.id, 'copy.txt'))).not.toBe(await inode(join(dir, a, 'files', up.id, 'copy.txt')));
+});
+test('redacting a message also takes the linked copies out of the merged thread and into the vault', async () => {
+  const a = await thread('A'), b = await thread('B');
+  const up = await upload(Buffer.from('private notes'), 'private.txt');
+  const sent = await (await post(a, { text: 'sensitive', attachments: [up.id] })).json();
+  await store.mergeThreads(dir, a, b, 'agent');
+  expect(await inode(join(dir, b, 'files', up.id, 'private.txt'))).toBe(await inode(join(dir, a, 'files', up.id, 'private.txt')));
+  expect((await redactMessage(dir, a, sent.id, { by: 'user', vault })).failed).toEqual([]);
+  for (const t of [a, b]) {
+    expect((await handle(new Request(url(`api/threads/${t}/attachments/${up.id}`)))).status).toBe(404);
+    await expect(stat(join(dir, t, 'files', up.id))).rejects.toThrow();
+    expect(await readFile(join(vault, t, `${(await store.summarise(dir, t)).messages.find(m => m.redacted)!.id}.files`, up.id, 'private.txt'), 'utf8')).toBe('private notes');
+  }
+});

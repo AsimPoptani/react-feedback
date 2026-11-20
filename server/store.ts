@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { KEY } from './inbox/areas.js';
 import { asideGroups, isAside, isAsideRoot, mainMessages } from './inbox/aside.js';
 import { filterRows, groupRows } from './inbox/tracker.js';
-import { checkAttachmentIds, claimUploads, cloneAttachments, parseAttachments, removeAttachments, type Attachment } from './files';
+import { checkAttachmentIds, claimUploads, cloneAttachments, parseAttachments, removeAttachments, type Attachment, type FilesOptions } from './files';
 export type { Attachment };
 
 export const ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
@@ -1006,13 +1006,13 @@ function applyCarry(m: Message, copy: Message, messages: Map<string, string>, qu
   if (m.question) copy.question = { ...m.question, id: questions.get(m.question.id) ?? m.question.id };
   if (m.answer) copy.answer = { ...m.answer, question_id: questions.get(m.answer.question_id) ?? m.answer.question_id };
 }
-async function copyMessages(from: string, into: string, source: Message[], target: Message[], at: string, divider: string, carried: { messages: Map<string, string>; questions: Map<string, string>; items: Map<string, string> }): Promise<void> {
+async function copyMessages(from: string, into: string, source: Message[], target: Message[], at: string, divider: string, carried: { messages: Map<string, string>; questions: Map<string, string>; items: Map<string, string> }, fileOptions?: FilesOptions): Promise<void> {
   // Images are copied under new numbers (the target's msg-<n> names), then every reference is rewritten from the one map.
   const wanted = [...new Set(source.flatMap(m => m.images))];
   const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
   const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
   const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
-  for (const m of source) if (m.attachments?.length) await cloneAttachments(from, into, m.attachments); // other files are copied under the same ids
+  for (const m of source) if (m.attachments?.length) await cloneAttachments(from, into, m.attachments, fileOptions); // other files are copied under the same ids
   const lines: Message[] = [{ id: `m${target.length + 1}`, author: 'agent', text: divider, images: [], created_at: at, divider: true }];
   for (const m of source) {
     const copy: Message = { ...m, id: carried.messages.get(m.id)!, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])) };
@@ -1053,7 +1053,7 @@ async function moveChecklist(from: string, into: string, plan: ChecklistMove): P
   await writeAtomic(join(from, 'checklist.json'), JSON.stringify({ items: plan.staying }, null, 2));
 }
 // Runs with both thread locks held. Returns false when this exact merge was already completed.
-async function mergeLocked(dir: string, from: string, into: string, fromId: string, intoId: string): Promise<boolean> {
+async function mergeLocked(dir: string, from: string, into: string, fromId: string, intoId: string, fileOptions?: FilesOptions): Promise<boolean> {
   const prior = await readMerge(from);
   if (prior && prior.into !== intoId) throw new Invalid('That thread was already merged into another one', 409);
   if (prior?.state === 'done') return false;
@@ -1081,7 +1081,7 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
     note = { ...note, map: { messages: asRecord(carried.messages), questions: asRecord(carried.questions), items: asRecord(carried.items) } };
     await writeAtomic(join(from, 'merged.json'), JSON.stringify(note));
   }
-  if (!copied) await copyMessages(from, into, copying, target.slice(0, note.base), note.at, divider, carried);
+  if (!copied) await copyMessages(from, into, copying, target.slice(0, note.base), note.at, divider, carried, fileOptions);
   await moveChecklist(from, into, plan);
   // What either side had already read in the source stays read in the target (ticks), but never past a message of the target they have not read.
   await carryRead(from, into, target.slice(0, note.base), 'agent-read.json', m => m.author === 'user');
@@ -1099,11 +1099,11 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
   return true;
 }
 // Both threads are locked in id order, so two merges touching the same pair can never wait on each other.
-export async function mergeThreads(dir: string, fromId: string, intoId: string, by: Author): Promise<{ merged: boolean; into: string }> {
+export async function mergeThreads(dir: string, fromId: string, intoId: string, by: Author, fileOptions?: FilesOptions): Promise<{ merged: boolean; into: string }> {
   if (fromId === intoId) throw new Invalid('A thread cannot be merged into itself');
   const from = await itemDir(dir, fromId), into = await itemDir(dir, intoId);
   const [first, second] = fromId < intoId ? [from, into] : [into, from];
-  const merged = await withLock(first, () => withLock(second, () => mergeLocked(dir, from, into, fromId, intoId)));
+  const merged = await withLock(first, () => withLock(second, () => mergeLocked(dir, from, into, fromId, intoId, fileOptions)));
   if (merged) {
     const pins = await readPins(dir);
     if (pins.threads.includes(fromId)) { await setPin(dir, { kind: 'thread', id: fromId, pinned: false }); await setPin(dir, { kind: 'thread', id: intoId, pinned: true }); }
@@ -1449,12 +1449,12 @@ function pairsFromIds(source: Message[], target: Message[], span: RepairSpan): {
 // Each moved message leaves a divider stub with the same id and time ("Moved to <title>") so quotes of it still resolve and nothing shifts.
 // Copies in the target carry `moved_from`, so an interrupted move (copies written, stubs not) is finished by running it again.
 // Items a message added travel with it (new ids); items it ticked move only if they were added by a moved message, otherwise the reference is dropped.
-export async function moveMessages(dir: string, fromId: string, msgIds: string[], toId: string, by: Author = 'agent'): Promise<{ moved: string[]; into: string }> {
+export async function moveMessages(dir: string, fromId: string, msgIds: string[], toId: string, by: Author = 'agent', fileOptions?: FilesOptions): Promise<{ moved: string[]; into: string }> {
   if (fromId === toId) throw new Invalid('Choose a different thread to move into');
   if (!msgIds.length || new Set(msgIds).size !== msgIds.length) throw new Invalid('Name each message to move once');
   const from = await itemDir(dir, fromId), into = await itemDir(dir, toId);
   const [first, second] = fromId < toId ? [from, into] : [into, from];
-  const result = await withLock(first, () => withLock(second, () => moveLocked(from, into, fromId, toId, msgIds)));
+  const result = await withLock(first, () => withLock(second, () => moveLocked(from, into, fromId, toId, msgIds, fileOptions)));
   if (result.moved.length) await logEvent(dir, { id: fromId, kind: 'move', text: `${result.moved.join(' ')} from ${fromId} into ${toId}`, author: by });
   return { moved: result.moved, into: toId };
 }
@@ -1467,7 +1467,7 @@ function unansweredUser(source: Message[], moving: Message[]): boolean {
     return !source.slice(source.indexOf(m) + 1).some(x => x.author === 'agent' && !x.divider && !isAside(x) && !gone.has(x.id));
   });
 }
-async function moveLocked(from: string, into: string, fromId: string, toId: string, msgIds: string[]): Promise<{ moved: string[] }> {
+async function moveLocked(from: string, into: string, fromId: string, toId: string, msgIds: string[], fileOptions?: FilesOptions): Promise<{ moved: string[] }> {
   if (await readMerge(from) || await readMerge(into)) throw new Invalid('A merged thread cannot take part in a move', 409);
   const fromItem = await readItem(from), intoItem = await readItem(into);
   const source = await materialise(from, fromItem), target = await materialise(into, intoItem);
@@ -1504,7 +1504,7 @@ async function moveLocked(from: string, into: string, fromId: string, toId: stri
     const loaded = (await Promise.all(files.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
     const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
     const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
-    for (const m of fresh) if (m.attachments?.length) await cloneAttachments(from, into, m.attachments);
+    for (const m of fresh) if (m.attachments?.length) await cloneAttachments(from, into, m.attachments, fileOptions);
     let n = target.length;
     const lines: Message[] = target.some(m => m.divider && m.moved_from === `${key}`) ? [] : [{ id: `m${++n}`, author: 'agent', text: divider, images: [], created_at: new Date().toISOString(), divider: true, moved_from: key }];
     for (const m of fresh) copied.set(m.id, `m${++n}`);

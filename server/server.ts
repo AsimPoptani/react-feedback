@@ -419,7 +419,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     return json(created, store.wasDuplicate(created) ? 200 : 201); // 200: it had already arrived (a retry from the offline queue)
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
-  if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user'));
+  if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user', options.files));
   if (action === 'answer') return json(await store.appendMessage(dir, id!, { author: 'user', text: undefined, answer: await read(req) }), 201);
   if (action === 'read') {
     const data = await read(req); // JSON only, like the other writes: a sandboxed page cannot mark a thread read with a form post
@@ -491,10 +491,17 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
   files.validateLimits(env);
   const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env } });
-  if (import.meta.main) { // partial uploads and finished ones no message took are removed after 24 hours
-    const sweep = () => { for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) void files.cleanStale(folder).catch(() => undefined); };
-    sweep(); setInterval(sweep, 3600e3).unref();
-  }
   return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch };
 }
-if (import.meta.main) Bun.serve(serverOptions());
+// The data folders this server serves (one, or one per configured project).
+export function dataDirs(env: Record<string, string | undefined> = process.env): string[] {
+  return env.FEEDBACK_PROJECTS?.trim() ? loadProjects(env).map(project => project.dir) : [env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data')];
+}
+// Partial uploads and finished ones no message took are removed after 24 hours: one sweep now, then every hour. Returns a function that stops it.
+export function startUploadSweep(dirs: string[], everyMs = 3600e3): () => void {
+  const sweep = () => { for (const folder of dirs) void files.cleanStale(folder).catch(() => undefined); };
+  sweep();
+  const timer = setInterval(sweep, everyMs); timer.unref();
+  return () => clearInterval(timer);
+}
+if (import.meta.main) { startUploadSweep(dataDirs()); Bun.serve(serverOptions()); }

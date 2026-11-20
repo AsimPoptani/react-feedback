@@ -18,6 +18,15 @@
 - The server accepts request bodies of up to 33 MiB (one chunk); JSON bodies are still held to 25 MiB.
 - The MCP tool list has one more tool, `get_attachment`.
 
+### Fixed (before release)
+- The 24 hour upload sweep now runs when the server is started with `react-feedback serve` (it once ran only when `server.ts` was run directly), once at startup and then hourly. A new upload cleans stale partials before it checks free space, so a full volume cannot lock new uploads out.
+- A merge or a move links a message's files (a hard link, no extra space) instead of copying them. When a link cannot be made (another volume), the copy is checked against the same free-space floor as an upload. Redaction still moves every linked copy into the vault.
+
+### Known
+- A file name that is a lone surrogate returns a 500.
+- The name length limit counts characters, not UTF-8 bytes.
+- Finalising a huge file can take longer than a proxy's timeout; Retry recovers it.
+
 ## 0.9.3
 
 ### Added
