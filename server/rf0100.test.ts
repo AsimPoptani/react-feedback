@@ -19,6 +19,12 @@ import * as store from './store';
 let dir: string;
 let handle: ReturnType<typeof createHandler>;
 let clock = Date.parse('2026-11-20T12:00:00.000Z');
+// The rate-limit tests send a made-up caller address in X-Forwarded-For. The server believes no forwarded header unless the operator names one, so these tests name it for their own run only.
+const withClientIpHeader = (body: () => Promise<void>) => async () => {
+  const saved = process.env.FEEDBACK_CLIENT_IP_HEADER;
+  process.env.FEEDBACK_CLIENT_IP_HEADER = 'x-forwarded-for';
+  try { await body(); } finally { if (saved === undefined) delete process.env.FEEDBACK_CLIENT_IP_HEADER; else process.env.FEEDBACK_CLIENT_IP_HEADER = saved; }
+};
 const SESSION = 'AbCdEfGhIjKlMnOpQrStUvWx';
 const api = (path: string, data?: unknown, method?: string) => new Request(`http://local/__feedback/${path}`, data === undefined && !method ? {} : { method: method ?? 'POST', headers: { 'Content-Type': 'application/json' }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
 const viewer = (token: string, what: 'feedback' | 'replay', data: unknown, init: { type?: string; ua?: string; ip?: string; method?: string } = {}) => handle(new Request(`http://local/__feedback/s/${token}/${what}`, {
@@ -167,7 +173,7 @@ test('feedback and replay endpoints: a bad, revoked or expired token is the same
   expect((await textOf(`/__feedback/s/${live.token}/replays`)).status).toBe(404);
 });
 
-test('feedback: the note is capped, the type is checked, and a link is rate limited per minute and per day', async () => {
+test('feedback: the note is capped, the type is checked, and a link is rate limited per minute and per day', withClientIpHeader(async () => {
   const { thread, art } = await setup();
   const { token } = await link(art.id);
   // Every call counts against the limits, so each check below starts a minute later.
@@ -197,7 +203,7 @@ test('feedback: the note is capped, the type is checked, and a link is rate limi
   clock += 61e3;
   expect((await viewer(day.token, 'feedback', { note: 'one more' }, { ip: '10.9.9.9' })).status).toBe(429);
   expect((await store.summarise(dir, thread)).messages.filter(m => m.author === 'viewer').length).toBeGreaterThan(50);
-});
+}));
 
 test('replay uploads are refused when recording is off for the link, and nothing is written', async () => {
   const { art } = await setup();
@@ -274,7 +280,7 @@ test('replay caps: a session is at most 5 MB and 30 minutes, events must look li
   expect((await viewer(two.token, 'replay', { session: 'ZyXwVuTsRqPoNmLkJiHgFeDc', seq: 0, events: [filler(t0)], pad: 'z'.repeat(7 * 1024 * 1024) })).status).toBe(413);
 });
 
-test('replay chunk and session rates are limited per link', async () => {
+test('replay chunk and session rates are limited per link', withClientIpHeader(async () => {
   const { art } = await setup();
   const { token } = await link(art.id, { expires: 'none', record: true });
   const t0 = 1_700_000_000_000;
@@ -289,7 +295,7 @@ test('replay chunk and session rates are limited per link', async () => {
     if ((await viewer(sessions.token, 'replay', { session: id, seq: 0, events: [snap(t0)] }, { ip: `10.1.0.${i}` })).status === 429) refused++;
   }
   expect(refused).toBe(2);
-});
+}));
 
 test('retention: cleanup removes sessions older than the days kept, and FEEDBACK_REPLAY_DAYS is checked', async () => {
   const { art } = await setup();
@@ -366,4 +372,26 @@ test('metrics, the list and the transcript cope with a thread that holds only vi
   await viewer(token, 'feedback', { note: 'first' });
   expect((await store.listThreads(dir)).find(t => t.id === thread)!.waiting).toBe('you');
   expect(JSON.stringify(await computeMetrics(dir, 'all', new Date(clock + 1000)))).toContain('"velocity"');
+});
+
+test('a viewer note on an artifact whose thread was merged lands on the thread it was merged into, also along a chain, and says where it was sent', async () => {
+  const { thread, art } = await setup();
+  const { token } = await link(art.id);
+  const b = (await store.createThread(dir, { title: 'Second', text: 'Second thread', origin: 'user' })).id;
+  const c = (await store.createThread(dir, { title: 'Third', text: 'Third thread', origin: 'user' })).id;
+  await store.mergeThreads(dir, thread, b, 'user');
+  expect((await viewer(token, 'feedback', { note: 'After one merge' })).status).toBe(201);
+  const afterOne = (await store.summarise(dir, b)).messages.filter(m => m.author === 'viewer');
+  expect(afterOne.map(m => m.text)).toEqual([expect.stringContaining('After one merge')]);
+  expect(afterOne[0]!.text).toContain('Sent in Options after the merge');
+  expect(afterOne[0]!.kind).toBe('viewer_feedback');
+  expect((await store.summarise(dir, thread)).messages.filter(m => m.author === 'viewer')).toEqual([]);
+  await store.mergeThreads(dir, b, c, 'user');
+  expect((await viewer(token, 'feedback', { note: 'After two merges' })).status).toBe(201);
+  expect((await store.summarise(dir, c)).messages.filter(m => m.author === 'viewer').map(m => m.text).join('\n')).toContain('After two merges');
+  expect((await store.summarise(dir, b)).messages.filter(m => m.author === 'viewer' && m.text.includes('After two merges'))).toEqual([]);
+  // The note counts for the thread it landed on, and the answer line in the event log names that thread.
+  expect((await store.summarise(dir, c)).summary.waiting).toBe('you');
+  const events = (await readFile(join(dir, '_events.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line) as { id: string; author: string; first_line: string });
+  expect(events.find(e => e.author === 'viewer' && e.first_line.includes('After two merges'))?.id).toBe(c);
 });
