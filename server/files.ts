@@ -382,6 +382,22 @@ export async function filesToVault(threadPath: string, vault: string, key: strin
     await rm(attachmentDir(threadPath, a.id), { recursive: true, force: true });
   }
 }
+// A thread moved to another project changes the vault key of its redacted messages: their files follow, and the old copy goes when the move has committed.
+export async function copyVaultFiles(vault: string, oldKey: string, newKey: string): Promise<void> {
+  const from = vaultFiles(vault, oldKey), to = vaultFiles(vault, newKey);
+  if (from === to || !(await present(from))) return;
+  for (const id of await readdir(from)) {
+    for (const name of await readdir(join(from, id))) {
+      const target = join(to, id, name);
+      if (await present(target)) continue;
+      await mkdir(join(to, id), { recursive: true, mode: 0o700 });
+      await copyFile(join(from, id, name), target, fsConstants.COPYFILE_FICLONE);
+    }
+  }
+}
+export async function removeVaultFiles(vault: string, key: string): Promise<void> {
+  await rm(vaultFiles(vault, key), { recursive: true, force: true });
+}
 export async function filesFromVault(threadPath: string, vault: string, key: string, list: Attachment[]): Promise<void> {
   for (const a of list) {
     const from = join(vaultFiles(vault, key), a.id, a.name);

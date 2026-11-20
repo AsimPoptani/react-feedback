@@ -1231,6 +1231,7 @@ async function strandedCopy(from: string, into: string, plan: CarryPlan): Promis
   const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
   const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
   const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
+  if (src.attachments?.length) await cloneAttachments(from, into, src.attachments);
   const copy: Message = { ...src, id: plan.copyId, images: src.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])), text: quoteSent(plan.title, src.text) };
   if (plan.plain) delete copy.answer; else copy.answer = { ...src.answer!, question_id: plan.toQ };
   if (src.reply_to && plan.span.messages.has(src.reply_to)) copy.reply_to = plan.span.messages.get(src.reply_to)!;

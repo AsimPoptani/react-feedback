@@ -6,7 +6,7 @@ import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile 
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as store from './store';
-import { filesFromVault, filesToVault } from './files';
+import { copyVaultFiles, filesFromVault, filesToVault, removeVaultFiles } from './files';
 import { readStored, serialise } from './reminders';
 import { Invalid, ID, MAX_HINT, type Author, type Message, type Redaction } from './store';
 
@@ -85,11 +85,13 @@ export async function copyVaultEntry(vault: string, oldKey: string, newKey: stri
   try { data = JSON.parse(raw); } catch { throw new Invalid(`The vault entry ${oldKey} is unreadable`); }
   if (data && typeof data === 'object' && !Array.isArray(data)) (data as Record<string, unknown>).thread = thread;
   await writeVault(vault, newKey, data);
+  await copyVaultFiles(vault, oldKey, newKey); // the files of a redacted attachment follow their entry
 }
 export async function removeVaultEntry(vault: string, key: string): Promise<void> {
   if (!KEY.test(key)) return;
   const file = join(vault, `${key}.json`);
   await rm(file, { force: true });
+  await removeVaultFiles(vault, key);
   const root = resolve(vault);
   for (let dir = dirname(file); resolve(dir) !== root; dir = dirname(dir)) {
     try { await rm(dir); } catch { break; }

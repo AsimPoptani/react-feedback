@@ -21,6 +21,7 @@
 ### Fixed (before release)
 - The 24 hour upload sweep now runs when the server is started with `react-feedback serve` (it once ran only when `server.ts` was run directly), once at startup and then hourly. A new upload cleans stale partials before it checks free space, so a full volume cannot lock new uploads out.
 - A merge or a move links a message's files (a hard link, no extra space) instead of copying them. When a link cannot be made (another volume), the copy is checked against the same free-space floor as an upload. Redaction still moves every linked copy into the vault.
+- A post with files to a thread that was already merged is written on the target with its files. A move to another project carries a redacted message's vault files to the new vault key (and removes the old ones once the move is done), so Unredact still finds them; `repair-merged` links the files of a message it carries.
 
 ### Known
 - A file name that is a lone surrogate returns a 500.
