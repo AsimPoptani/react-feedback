@@ -32,7 +32,7 @@ export const validEvent = (e: unknown): e is RawEvent => !!e && typeof e === "ob
 // A list from the parent: at most MAX_EVENTS_PER_MESSAGE, and only whole events. Anything else in it is dropped.
 export const cleanEvents = (list: unknown): RawEvent[] => (Array.isArray(list) ? list.slice(0, MAX_EVENTS_PER_MESSAGE).filter(validEvent) : []);
 
-export interface Live { add(events: RawEvent[]): void; end(): void }
+export interface Live { add(events: RawEvent[]): void; end(): void; destroy(): void }
 export function createLive(target: HTMLElement, first: RawEvent[], width: number, height: number): Live {
   target.replaceChildren();
   const bar = document.createElement("div");
@@ -56,6 +56,7 @@ export function createLive(target: HTMLElement, first: RawEvent[], width: number
   let ended = false;
   return {
     add(events) { if (!ended) for (const e of events) replayer.addEvent(e as never); },
+    destroy() { ended = true; try { replayer.destroy(); } catch { /* already gone */ } },
     end() { if (ended) return; ended = true; badge.textContent = "ENDED"; badge.classList.add("rf-ended"); note.textContent = "no new activity"; },
   };
 }
@@ -73,7 +74,7 @@ if (typeof document !== "undefined" && document.getElementById("rf-player")) {
     const root = document.getElementById("rf-player") as HTMLElement;
     try {
       if (data.rf === "play" && Array.isArray(data.events)) create(root, data.events as RawEvent[], size.width, size.height);
-      else if (data.rf === "live") live = createLive(root, cleanEvents(data.events), size.width, size.height);
+      else if (data.rf === "live") { live?.destroy(); live = createLive(root, cleanEvents(data.events), size.width, size.height); }
       else if (data.rf === "more" && live) live.add(cleanEvents(data.events));
       else if (data.rf === "ended" && live) live.end();
     } catch (error) { parent.postMessage({ rf: "player-error", message: String((error as Error)?.message ?? error) }, "*"); }

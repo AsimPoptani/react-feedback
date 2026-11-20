@@ -132,37 +132,128 @@ describe('0.12.0 inbox page', () => {
       document.getElementById('artifact-capture')!.click();
       expect((document.getElementById('cap-modes') as HTMLElement).hidden).toBe(false);
       document.querySelector<HTMLButtonElement>('#cap-modes [data-capture="element"]')!.click();
-      expect(win.postMessage).toHaveBeenCalledWith({ rf: 'cap', op: 'start', mode: 'element', maxBytes: 6_000_000 }, '*');
+      expect(win.postMessage).toHaveBeenCalledWith({ rf: 'cap', op: 'start', mode: 'element', maxBytes: 6_000_000, nonce: expect.stringMatching(/^[0-9a-f]{24}$/) }, '*');
       expect((document.getElementById('artifact-capture') as HTMLElement).hidden).toBe(true);
       from(win, { rf: 'cap-closed' });
       expect((document.getElementById('artifact-capture') as HTMLElement).hidden).toBe(false);
     });
 
-    it('a capture from the page is posted to the artifact\'s thread as a message from you, with the picture', async () => {
-      const win = await open();
+    // The owner picks a mode (which arms one capture and sends a one-time word); the page's answer must carry it.
+    const arm = (win: { postMessage: ReturnType<typeof vi.fn> }, mode = 'region') => {
       from(win, { rf: 'cap-ready' });
-      from(win, shot);
-      await vi.waitFor(() => expect(posts.some(p => p.path === 'threads/20261118-100002-abcf/messages')).toBe(true));
-      const sent = posts.find(p => p.path === 'threads/20261118-100002-abcf/messages')!.body;
-      expect(sent.images).toEqual([PNG]);
-      expect(String(sent.text)).toContain('The header overlaps the form');
-      expect(String(sent.text)).toContain('Checkout page v1 · Region');
-      await vi.waitFor(() => expect(document.getElementById('toast')!.textContent).toBe('Sent to this artifact’s thread'));
+      document.getElementById('artifact-capture')!.click();
+      document.querySelector<HTMLButtonElement>(`#cap-modes [data-capture="${mode}"]`)!.click();
+      return (win.postMessage.mock.calls.at(-1)![0] as { nonce: string }).nonce;
+    };
+    const messagePosts = () => posts.filter(p => p.path.endsWith('/messages'));
+    const confirmOpen = () => (document.getElementById('cap-confirm') as HTMLDialogElement).hasAttribute('open');
+
+    it('a capture the owner asked for is shown in an inbox panel as the page sent it; nothing is posted until Send as you, and the note can be changed there', async () => {
+      const win = await open();
+      const nonce = arm(win);
+      from(win, { ...shot, nonce });
+      await vi.waitFor(() => expect(confirmOpen()).toBe(true));
+      expect(messagePosts()).toHaveLength(0); // shown, not posted
+      expect((document.getElementById('cap-confirm-note') as HTMLTextAreaElement).value).toBe('The header overlaps the form');
+      expect((document.getElementById('cap-confirm-img') as HTMLImageElement).getAttribute('src')).toBe(PNG);
+      expect(document.getElementById('cap-confirm-where')!.textContent).toContain('Checkout page v1 \u00b7 Region');
+      (document.getElementById('cap-confirm-note') as HTMLTextAreaElement).value = 'My own words instead';
+      document.getElementById('cap-confirm-send')!.click();
+      await vi.waitFor(() => expect(messagePosts()).toHaveLength(1));
+      const sent = messagePosts()[0]!;
+      expect(sent.path).toBe('threads/20261118-100002-abcf/messages');
+      expect(sent.body.images).toEqual([PNG]);
+      expect(String(sent.body.text)).toContain('My own words instead');
+      expect(String(sent.body.text)).not.toContain('The header overlaps');
+      expect(String(sent.body.text)).toContain('Checkout page v1 \u00b7 Region');
+      await vi.waitFor(() => expect(document.getElementById('toast')!.textContent).toBe('Sent to this artifact\u2019s thread'));
     });
 
-    it('a message from any other window posts nothing, and bad fields are dropped before anything is posted', async () => {
+    it('Cancel posts nothing', async () => {
       const win = await open();
-      from({}, shot);
-      from(window, shot);
-      from(win, { ...shot, mode: 'bogus' });
-      from(win, { ...shot, note: '' });
+      from(win, { ...shot, nonce: arm(win) });
+      await vi.waitFor(() => expect(confirmOpen()).toBe(true));
+      document.getElementById('cap-confirm-cancel')!.click();
       await new Promise(r => setTimeout(r, 30));
-      expect(posts.filter(p => p.path.endsWith('/messages'))).toHaveLength(0);
-      from(win, { ...shot, mode: 'element', selector: 'button#pay', image: 'javascript:alert(1)', rect: { x: Number.NaN, y: 0, width: 1, height: 1 } });
-      await vi.waitFor(() => expect(posts.filter(p => p.path.endsWith('/messages'))).toHaveLength(1));
-      const sent = posts.find(p => p.path.endsWith('/messages'))!.body;
-      expect(sent.images).toEqual([]);
-      expect(String(sent.text)).toContain('Element · `button#pay`');
+      expect(messagePosts()).toHaveLength(0);
+      expect(confirmOpen()).toBe(false);
+    });
+
+    it('a page that forges captures with no click posts nothing and shows nothing (the artifact is the source of these messages, and is not trusted)', async () => {
+      const win = await open();
+      for (let i = 0; i < 5; i++) from(win, { ...shot, nonce: 'anything' });
+      from(win, shot);
+      from(win, { ...shot, nonce: '' });
+      from(win, { rf: 'cap-ready' });
+      for (let i = 0; i < 5; i++) from(win, { ...shot, nonce: 'anything' });
+      await new Promise(r => setTimeout(r, 40));
+      expect(messagePosts()).toHaveLength(0);
+      expect(confirmOpen()).toBe(false);
+    });
+
+    it('a stale or wrong word is ignored, and a word works once', async () => {
+      const win = await open();
+      const first = arm(win);
+      from(win, { ...shot, nonce: 'not-the-word' });
+      expect(confirmOpen()).toBe(false);
+      from(win, { ...shot, nonce: first });
+      await vi.waitFor(() => expect(confirmOpen()).toBe(true));
+      document.getElementById('cap-confirm-cancel')!.click();
+      from(win, { ...shot, nonce: first }); // used: not armed any more
+      expect(confirmOpen()).toBe(false);
+      const second = arm(win, 'page');
+      expect(second).not.toBe(first);
+      from(win, { ...shot, nonce: first }); // the old word, while a new capture is armed
+      expect(confirmOpen()).toBe(false);
+      expect(messagePosts()).toHaveLength(0);
+    });
+
+    it('closing the capture leaves a short grace for its shot, but the arm ends after two minutes', async () => {
+      const win = await open();
+      const nonce = arm(win);
+      from(win, { rf: 'cap-closed' }); // the picture is fitted after the capture closes: the shot follows
+      from(win, { ...shot, nonce });
+      await vi.waitFor(() => expect(confirmOpen()).toBe(true));
+      document.getElementById('cap-confirm-cancel')!.click();
+      const late = arm(win);
+      const now = Date.now();
+      const spy = vi.spyOn(Date, 'now').mockReturnValue(now + 121_000);
+      from(win, { ...shot, nonce: late });
+      expect(confirmOpen()).toBe(false);
+      spy.mockRestore();
+    });
+
+    it('a shot that arrives after the frame has switched to another version is ignored', async () => {
+      const win = await open();
+      const nonce = arm(win);
+      location.hash = `#/artifact/${artId}/v2`;
+      await vi.waitFor(() => expect(document.getElementById('artifact-frame')!.getAttribute('src')).toContain('/v2?'));
+      from(win, { ...shot, nonce });
+      expect(confirmOpen()).toBe(false);
+      expect(messagePosts()).toHaveLength(0);
+    });
+
+    it('at most 6 captures a minute can be sent from here', async () => {
+      const win = await open();
+      for (let i = 0; i < 7; i++) {
+        from(win, { ...shot, nonce: arm(win) });
+        await vi.waitFor(() => expect(confirmOpen()).toBe(true));
+        document.getElementById('cap-confirm-send')!.click();
+        await new Promise(r => setTimeout(r, 10));
+        if (i === 6) expect(document.getElementById('toast')!.textContent).toContain('Too many captures');
+      }
+      expect(messagePosts()).toHaveLength(6);
+    });
+
+    it('a message from any other window posts nothing, and a bad capture is not shown', async () => {
+      const win = await open();
+      const nonce = arm(win);
+      from({}, { ...shot, nonce });
+      from(window, { ...shot, nonce });
+      from(win, { ...shot, nonce, mode: 'bogus' });
+      from(win, { ...shot, nonce, note: '' });
+      expect(confirmOpen()).toBe(false);
+      expect(messagePosts()).toHaveLength(0);
     });
   });
 

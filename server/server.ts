@@ -170,7 +170,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   const target = join(path, file);
   try {
     if (!(await lstat(target)).isFile()) return json({ kind: 'not_found' }, 404);
-    return new Response(await readFile(target), { headers: { 'Content-Type': file.endsWith('.md') ? 'text/markdown; charset=utf-8' : MIME[file.slice(file.lastIndexOf('.') + 1) as keyof typeof MIME], 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+    return new Response(await readFile(target), { headers: { 'Content-Type': file.endsWith('.md') ? 'text/markdown; charset=utf-8' : MIME[file.slice(file.lastIndexOf('.') + 1) as keyof typeof MIME], 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'" } });
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
@@ -256,7 +256,7 @@ async function profileRoute(req: Request, dir: string, path: string, read: (req:
   if (!match || req.method !== 'GET') return null;
   const found = await store.avatarBytes(dir, match[1]!);
   if (!found) return json({ kind: 'not_found' }, 404);
-  return new Response(found.bytes, { headers: { 'Content-Type': MIME[found.ext], 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+  return new Response(found.bytes, { headers: { 'Content-Type': MIME[found.ext], 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'" } });
 }
 // Checklist: the inbox speaks as the user, so it can add, edit its own items, claim and delete its own. It can never tick.
 async function checklistRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
@@ -306,6 +306,7 @@ const SHARE_MISS = { ...SANDBOX, ...CORS, 'Content-Type': 'text/plain; charset=u
 const shareMiss = () => new Response('Not found\n', { status: 404, headers: SHARE_MISS });
 const shareHit = (html: string) => new Response(html, { headers: { ...SANDBOX, 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex' } });
 const shareJson = (body: unknown, status = 200) => Response.json(body, { status, headers: { ...SANDBOX, ...CORS, 'X-Robots-Tag': 'noindex' } });
+const userImageBytes = new ByteBudget(48 * 1024 * 1024, 60e3); // decoded picture bytes posted as the user, per thread a minute
 const MAX_NOTE_BODY = 16 * 1024;
 // A note that carries a screenshot (the client says so with ?image=1 on the same path, so a note without one keeps its small cap): 2 MB of image is about 2.8 MB as base64.
 const MAX_IMAGE_BODY = Math.ceil(store.VIEWER_IMAGE_BYTES / 3) * 4 + 64 * 1024;
@@ -533,6 +534,11 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (req.method !== 'POST') return null;
   if (action === 'messages') {
     const data = await read(req);
+    // Pictures posted as the user (an artifact's capture, once confirmed) are limited per thread, so no page can fill the disk through the owner's session.
+    if (Array.isArray(data.images) && data.images.length) {
+      const bytes = data.images.reduce((sum: number, image) => sum + (typeof image === 'string' ? Math.floor(image.length * 3 / 4) : 0), 0);
+      if (!userImageBytes.take(`${dir}|${id}`, bytes, options.now?.() ?? Date.now())) throw new Invalid('Too many pictures posted to this thread this minute. Try again shortly.', 429);
+    }
     // `aside: true` is a side question; `todo` (a list of texts, `for`: "user" by default or "agent") adds checklist items with the message. Only the agent ticks (`check`), so the user's API refuses it.
     const add = Array.isArray(data.todo) ? data.todo.map(text => ({ owner: data.for ?? 'user', text })) : data.todo;
     const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, reply_to: data.reply_to, quote: data.quote, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
@@ -570,7 +576,8 @@ async function viewerFeedback(req: Request, found: { folder: string; share: shar
     // The picture is checked before anything is stored, and counted against the link's daily bytes once it is known to be a real image.
     const image = data.image === undefined || data.image === null ? undefined : store.viewerImage(data.image);
     if (image && !limits.feedbackImages.take(share.id, image.bytes.length, now)) return shareJson({ kind: 'rate_limited', detail: 'Too many screenshots today for this link. Send the note without one.' }, 429);
-    await store.appendViewerFeedback(folder, meta.thread, { text, shareId: share.id, artifactId: meta.id, label: shares.shareLabel(share, meta.title), ...(quote ? { quote } : {}), ...(image ? { image } : {}) });
+    try { await store.appendViewerFeedback(folder, meta.thread, { text, shareId: share.id, artifactId: meta.id, label: shares.shareLabel(share, meta.title), ...(quote ? { quote } : {}), ...(image ? { image } : {}) }); }
+    catch (error) { if (image) limits.feedbackImages.release(share.id, image.bytes.length); throw error; } // a failed write does not use up the day's bytes
     await shares.countFeedback(folder, share.id);
     return shareJson({ ok: true }, 201);
   } catch (error) {

@@ -11,7 +11,7 @@ export interface ShotPayload {
   selector: string; text: string; components: string[]; source?: ElementSource; tag?: string; role?: string; name?: string;
 }
 /** What the parent asks of the iframe. */
-export type Command = { op: 'start'; mode: CaptureMode | null; note: string } | { op: 'cancel' };
+export type Command = { op: 'start'; mode: CaptureMode | null; note: string; nonce: string } | { op: 'cancel' };
 export interface CaptureBridge {
   send(shot: ShotPayload): void;
   closed(): void;
@@ -63,10 +63,10 @@ const asMode = (value: unknown): CaptureMode | null => (typeof value === 'string
 // The parent's command, believed only when it came from the page that framed this one.
 export function parseCommand(event: Pick<MessageEvent, 'source' | 'data'>, parentWindow: unknown): Command | null {
   if (event.source !== parentWindow) return null;
-  const data = event.data as { rf?: unknown; op?: unknown; mode?: unknown; note?: unknown } | null;
+  const data = event.data as { rf?: unknown; op?: unknown; mode?: unknown; note?: unknown; nonce?: unknown } | null;
   if (!data || typeof data !== 'object' || data.rf !== 'cap') return null;
   if (data.op === 'cancel') return { op: 'cancel' };
-  if (data.op === 'start') return { op: 'start', mode: asMode(data.mode), note: typeof data.note === 'string' ? data.note.slice(0, 4000) : '' };
+  if (data.op === 'start') return { op: 'start', mode: asMode(data.mode), note: typeof data.note === 'string' ? data.note.slice(0, 4000) : '', nonce: typeof data.nonce === 'string' ? data.nonce.slice(0, 64) : '' };
   return null;
 }
 const clampBytes = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? Math.max(100_000, Math.min(8_000_000, Math.floor(value))) : DEFAULT_MAX_BYTES);
@@ -74,12 +74,13 @@ const clampBytes = (value: unknown) => (typeof value === 'number' && Number.isFi
 // Wires a window to the widget: the commands in, the finished shot out.
 export function createBridge(win: Window = window): CaptureBridge {
   let maxBytes = DEFAULT_MAX_BYTES;
+  let nonce = ''; // the page's one-time word for the capture it asked for, echoed on what comes back
   const handlers = new Set<(command: Command) => void>();
   const tell = (message: object) => { try { (win.parent as Window).postMessage(message, '*'); } catch { /* the page is gone */ } };
   win.addEventListener('message', event => {
     const command = parseCommand(event, win.parent);
     if (!command) return;
-    if (command.op === 'start') maxBytes = clampBytes((event.data as { maxBytes?: unknown }).maxBytes);
+    if (command.op === 'start') { maxBytes = clampBytes((event.data as { maxBytes?: unknown }).maxBytes); nonce = command.nonce; }
     for (const handler of handlers) handler(command);
   });
   return {
@@ -88,7 +89,7 @@ export function createBridge(win: Window = window): CaptureBridge {
         let image: string | null = null;
         try { image = shot.image ? await fitImage(shot.image, maxBytes) : null; } catch { image = null; }
         const note = shot.image && !image ? `${shot.note}\n\nThe screenshot was too large to send.` : shot.note;
-        tell({ rf: 'shot', ...shot, note, image });
+        tell({ rf: 'shot', ...shot, note, image, nonce });
       })();
     },
     closed() { tell({ rf: 'cap-closed' }); },

@@ -145,6 +145,11 @@ async function walk(width, tap) {
   await oframe.getByRole('textbox', { name: 'Note' }).fill(`Make the Pay now button stand out (${tag})`);
   await preview(oframe, owner, `owner-${tag}`);
   await oframe.getByRole('button', { name: 'Send' })[act]();
+  await owner.locator('#cap-confirm[open]').waitFor();
+  check(`${tag}: the inbox shows the capture in its own panel and nothing is posted yet`, (await owner.locator('#cap-confirm-note').inputValue()).includes(`stand out (${tag})`) && await owner.locator('#cap-confirm-img').isVisible() && !(await get(`threads/${thread}`)).messages.some(m => m.author === 'user' && m.text.includes(`stand out (${tag})`)));
+  await shot(owner, `owner-confirm-${tag}`);
+  check(`${tag}: no sideways scroll with the confirm panel open`, await noSideways(owner));
+  await owner.locator('#cap-confirm-send')[act]();
   const mine = await until(async () => (await get(`threads/${thread}`)).messages.find(m => m.author === 'user' && m.text.includes(`stand out (${tag})`)));
   check(`${tag}: the owner's capture is a message from you, with a picture, naming the artifact and the element`, !!mine && mine.images.length === 1 && mine.text.includes('Checkout page v1 · Element') && mine.text.includes('#go'));
   await owner.waitForFunction(() => document.getElementById('toast') && !document.getElementById('toast').hidden && document.getElementById('toast').textContent.startsWith('Sent to this artifact'));

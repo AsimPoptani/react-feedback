@@ -366,3 +366,49 @@ test('the shell script declares each name once (a function and a variable of one
   const clashes = declared.filter(name => vars.includes(name)).concat(declared.filter((name, i) => declared.indexOf(name) !== i));
   expect(clashes).toEqual([]);
 });
+
+// ---- Security review fixes
+test('the total number of pixels is capped (a small file can decode to a huge bitmap), and an animated PNG is refused', async () => {
+  const { art } = await setup();
+  const { token } = await link(art.id);
+  const status = async (image: string, n: number) => { clock += 61e3; return (await withShot(token, { note: 'x', image }, `10.7.0.${n}`)).status; };
+  expect(await status(dataUrl(png(3000, 12000)), 1)).toBe(201); // exactly the page's own downscale limit
+  expect(await status(dataUrl(png(4096, 9000)), 2)).toBe(400); // each side is allowed, the area (36.9 million) is not
+  expect(await status(dataUrl(png(4096, 16384)), 3)).toBe(400); // the reviewer's 268 MB bitmap
+  const plain = png(4, 4);
+  const insert = (type: string) => Buffer.concat([plain.subarray(0, 33), chunk(type, Buffer.alloc(8)), plain.subarray(33)]); // after IHDR
+  for (const [i, type] of ['acTL', 'fcTL', 'fdAT'].entries()) expect(await status(dataUrl(insert(type)), 10 + i)).toBe(400);
+  const noData = Buffer.concat([plain.subarray(0, 33), chunk('IEND', Buffer.alloc(0))]);
+  expect(await status(dataUrl(noData), 30)).toBe(400); // a header and an end, no picture
+  expect(await status(dataUrl(plain), 20)).toBe(201);
+});
+
+test('stored pictures are served with a sandbox policy and nosniff', async () => {
+  const { thread, art } = await setup();
+  const { token } = await link(art.id);
+  await withShot(token, { note: 'x', image: dataUrl(png()) });
+  const res = await textOf(`/__feedback/api/items/${thread}/msg-1.png`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-security-policy')).toBe("sandbox; default-src 'none'");
+  expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  expect(res.headers.get('content-type')).toBe('image/png');
+});
+
+test('a screenshot the server could not store does not use up the link\'s daily bytes, and pictures posted as the user are limited per thread', async () => {
+  const { ByteBudget } = await import('./limits');
+  const budget = new ByteBudget(100, 1000);
+  expect(budget.take('k', 80, 0)).toBe(true);
+  expect(budget.take('k', 80, 1)).toBe(false);
+  budget.release('k', 80);
+  expect(budget.take('k', 80, 2)).toBe(true);
+  const { thread } = await setup();
+  const big = dataUrl(png(8, 8, 4 * 1024 * 1024)); // 4 MB each: 48 MB a minute per thread
+  const post = async () => (await handle(api(`api/threads/${thread}/messages`, { text: 'pic', images: [big] }))).status;
+  const codes: number[] = [];
+  for (let i = 0; i < 13; i++) codes.push(await post());
+  expect(codes.filter(c => c === 201)).toHaveLength(11);
+  expect(codes.filter(c => c === 429)).toHaveLength(2);
+  expect((await handle(api(`api/threads/${thread}/messages`, { text: 'no picture' }))).status).toBe(201); // words are not limited
+  clock += 61e3;
+  expect(await post()).toBe(201);
+});

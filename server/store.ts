@@ -126,18 +126,21 @@ export function dataUrlImages(value: unknown): Image[] {
 export const VIEWER_IMAGE_BYTES = 2 * 1024 * 1024;
 export const VIEWER_IMAGE_MAX_WIDTH = 4096;
 export const VIEWER_IMAGE_MAX_HEIGHT = 16384;
+export const VIEWER_IMAGE_MAX_PIXELS = 3000 * 12000; // what the page's own downscale produces at most: a small file can still decode to a huge bitmap
+const ANIMATED_PNG = ['acTL', 'fcTL', 'fdAT'];
 const VIEWER_DATA_URL = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/;
 function pngSize(bytes: Buffer): { width: number; height: number } | null {
   if (!sniffIs(bytes, 'png') || bytes.length < 33) return null;
-  let at = 8, size: { width: number; height: number } | null = null;
+  let at = 8, size: { width: number; height: number } | null = null, data = false;
   for (let chunk = 0; at + 12 <= bytes.length && chunk < 5000; chunk++) {
     const length = bytes.readUInt32BE(at);
     const type = bytes.subarray(at + 4, at + 8).toString('latin1');
     if (chunk === 0) { if (type !== 'IHDR' || length !== 13) return null; size = { width: bytes.readUInt32BE(at + 8), height: bytes.readUInt32BE(at + 12) }; }
-    else if (type === 'IHDR') return null;
+    else if (type === 'IHDR' || ANIMATED_PNG.includes(type)) return null; // a second header, or an animated PNG
+    if (type === 'IDAT') data = true;
     at += 12 + length;
     if (at > bytes.length) return null;
-    if (type === 'IEND') return at === bytes.length && length === 0 ? size : null;
+    if (type === 'IEND') return at === bytes.length && length === 0 && data ? size : null; // and some picture data in between
   }
   return null;
 }
@@ -172,6 +175,7 @@ export function viewerImage(value: unknown): Image {
   const size = ext === 'png' ? pngSize(bytes) : jpegSize(bytes);
   if (!size || size.width < 1 || size.height < 1) throw new Invalid('The image could not be read');
   if (size.width > VIEWER_IMAGE_MAX_WIDTH || size.height > VIEWER_IMAGE_MAX_HEIGHT) throw new Invalid(`The image is larger than ${VIEWER_IMAGE_MAX_WIDTH} x ${VIEWER_IMAGE_MAX_HEIGHT}`);
+  if (size.width * size.height > VIEWER_IMAGE_MAX_PIXELS) throw new Invalid('The image has too many pixels (at most 36 million)');
   return { bytes, ext };
 }
 export function messageText(value: unknown, hasImages: boolean): string { // hasImages: true when the message carries images or files instead of words

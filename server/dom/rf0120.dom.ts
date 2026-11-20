@@ -51,6 +51,8 @@ describe('the share shell', () => {
     Object.defineProperty(document.getElementById('art')!, 'contentWindow', { value: frameWindow, configurable: true });
     new Function(shellScript())();
   }
+  // The viewer asks for a capture in the shell (that arms it and sends a one-time word); the artifact's answer must carry that word.
+  const arm = () => { from(frameWindow, { rf: 'cap-ready' }); document.querySelector<HTMLButtonElement>('[data-capture="region"]')!.click(); return (frameWindow.postMessage.mock.calls.at(-1)![0] as { nonce: string }).nonce; };
   const from = (source: unknown, data: unknown) => { const event = new Event('message') as Event & { source: unknown; data: unknown }; event.source = source; event.data = data; window.dispatchEvent(event); };
   const sentBody = (call = 0) => JSON.parse(fetchMock.mock.calls[call]![1].body as string) as Record<string, unknown>;
   beforeEach(async () => {
@@ -63,13 +65,32 @@ describe('the share shell', () => {
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
   it('ignores a message from any window but the artifact\'s own', async () => {
-    from({}, good);
-    from(window, good);
-    from(null, { rf: 'cap-ready' });
+    const nonce = arm();
+    from({}, { ...good, nonce });
+    from(window, { ...good, nonce });
     await new Promise(r => setTimeout(r, 20));
     expect(fetchMock).not.toHaveBeenCalled();
-    expect((document.getElementById('fb-capture') as HTMLElement).hidden).toBe(true);
     expect((document.getElementById('fb-toast') as HTMLElement).hidden).toBe(true);
+  });
+
+  it('a forged capture with no click, a wrong word, a used word or one after the time is not sent (the artifact is the page\'s own code)', async () => {
+    from(frameWindow, good); from(frameWindow, { ...good, nonce: '' }); from(frameWindow, { ...good, nonce: 'guess' });
+    const nonce = arm();
+    from(frameWindow, { ...good, nonce: 'guess' }); // armed, but the wrong word
+    await new Promise(r => setTimeout(r, 20));
+    expect(fetchMock).not.toHaveBeenCalled();
+    from(frameWindow, { ...good, nonce });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    from(frameWindow, { ...good, nonce }); // one capture, one shot
+    from(frameWindow, { ...good, nonce });
+    await new Promise(r => setTimeout(r, 30));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const late = arm();
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 121_000);
+    from(frameWindow, { ...good, nonce: late });
+    vi.useRealTimers();
+    await new Promise(r => setTimeout(r, 30));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('shows the capture buttons only once the artifact says its capture script is there, and a click starts that capture', () => {
@@ -78,14 +99,15 @@ describe('the share shell', () => {
     expect((document.getElementById('fb-capture') as HTMLElement).hidden).toBe(false);
     (document.getElementById('fb-note') as HTMLTextAreaElement).value = 'Typed first';
     document.querySelector<HTMLButtonElement>('[data-capture="region"]')!.click();
-    expect(frameWindow.postMessage).toHaveBeenCalledWith({ rf: 'cap', op: 'start', mode: 'region', note: 'Typed first', maxBytes: 1_900_000 }, '*');
+    expect(frameWindow.postMessage).toHaveBeenCalledWith({ rf: 'cap', op: 'start', mode: 'region', note: 'Typed first', maxBytes: 1_900_000, nonce: expect.stringMatching(/^[0-9a-f]{24}$/) }, '*');
     expect((document.getElementById('fb-open') as HTMLElement).hidden).toBe(true); // out of the way while capturing
     from(frameWindow, { rf: 'cap-closed' });
     expect((document.getElementById('fb-open') as HTMLElement).hidden).toBe(false);
   });
 
   it('sends a good capture to the same feedback path, with the image flag, the picture and what it pointed at', async () => {
-    from(frameWindow, good);
+    const nonce = arm();
+    from(frameWindow, { ...good, nonce });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toMatch(/\/feedback\?image=1$/);
@@ -97,12 +119,12 @@ describe('the share shell', () => {
   });
 
   it('drops bad fields: a note with a bad picture goes alone, to the plain path; one with no valid mode is not sent at all', async () => {
-    from(frameWindow, { ...good, image: 'data:text/html;base64,AAAA', rect: { x: Number.NaN, y: 0, width: 1, height: 1 }, components: 'x' });
+    from(frameWindow, { ...good, nonce: arm(), image: 'data:text/html;base64,AAAA', rect: { x: Number.NaN, y: 0, width: 1, height: 1 }, components: 'x' });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(String(fetchMock.mock.calls[0]![0])).toMatch(/\/feedback$/);
     expect(sentBody()).toEqual({ note: 'The button is cut off', quote: { text: 'Pay', path: 'button#pay', mode: 'element', source: { file: 'src/Pay.tsx', line: 4, column: 2, component: 'PayButton' } } });
     await vi.waitFor(() => expect(document.getElementById('fb-toast')!.textContent).toBe('Thanks, your note was sent.'));
-    from(frameWindow, { ...good, mode: 'whole' });
+    from(frameWindow, { ...good, nonce: arm(), mode: 'whole' });
     await new Promise(r => setTimeout(r, 20));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(document.getElementById('fb-toast')!.textContent).toBe('That capture could not be read.');
@@ -110,7 +132,7 @@ describe('the share shell', () => {
 
   it('when the send fails the note and its picture come back in the dialog, so nothing is lost, and Send tries again', async () => {
     status = 429;
-    from(frameWindow, good);
+    from(frameWindow, { ...good, nonce: arm() });
     await vi.waitFor(() => expect((document.getElementById('fb-dialog') as HTMLDialogElement).hasAttribute('open')).toBe(true));
     expect((document.getElementById('fb-note') as HTMLTextAreaElement).value).toBe('The button is cut off');
     expect((document.getElementById('fb-held') as HTMLElement).hidden).toBe(false);
@@ -139,16 +161,19 @@ describe('the live player page', () => {
     const e = new Event('message') as Event & { source: unknown; data: unknown; origin: string };
     e.source = 'source' in over ? over.source : window.parent; e.data = data; e.origin = over.origin ?? location.origin; window.dispatchEvent(e);
   };
+  const added: [string, EventListenerOrEventListenerObject][] = [];
   beforeEach(async () => {
-    instances.length = 0;
+    instances.length = 0; added.length = 0;
+    const real = window.addEventListener.bind(window);
+    vi.spyOn(window, 'addEventListener').mockImplementation((type: string, fn: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) => { added.push([type, fn]); real(type, fn, opts); });
     vi.resetModules();
     vi.doMock('rrweb-player', () => ({ default: vi.fn() }));
-    vi.doMock('@rrweb/replay', () => ({ Replayer: class { handlers: Record<string, (d: unknown) => void> = {}; wrapper = document.createElement('div'); startLive = vi.fn(); addEvent = vi.fn(); constructor(_events: unknown[], public config: { root: HTMLElement }) { instances.push(this as never); (this as unknown as { root: HTMLElement }).root = config.root; } on(name: string, h: (d: unknown) => void) { this.handlers[name] = h; } } }));
+    vi.doMock('@rrweb/replay', () => ({ Replayer: class { handlers: Record<string, (d: unknown) => void> = {}; wrapper = document.createElement('div'); startLive = vi.fn(); addEvent = vi.fn(); destroy = vi.fn(); constructor(_events: unknown[], public config: { root: HTMLElement }) { instances.push(this as never); (this as unknown as { root: HTMLElement }).root = config.root; } on(name: string, h: (d: unknown) => void) { this.handlers[name] = h; } } }));
     document.body.innerHTML = '<div id="rf-player"></div>';
     vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {});
     await import('../../src/replay/player.ts');
   });
-  afterEach(() => { vi.restoreAllMocks(); vi.doUnmock('@rrweb/replay'); vi.doUnmock('rrweb-player'); document.body.innerHTML = ''; });
+  afterEach(() => { for (const [type, fn] of added) window.removeEventListener(type, fn); vi.restoreAllMocks(); vi.doUnmock('@rrweb/replay'); vi.doUnmock('rrweb-player'); document.body.innerHTML = ''; });
 
   it('tells its parent it is ready, and believes only a message from its parent, from its own origin', () => {
     expect(window.parent.postMessage).toHaveBeenCalledWith({ rf: 'player-ready' }, '*');
@@ -178,6 +203,16 @@ describe('the live player page', () => {
     expect(instances).toHaveLength(0);
     send({ rf: 'live', events: Array.from({ length: 6500 }, (_, i) => event(1000 + i)) });
     expect(instances[0]!.addEvent).toHaveBeenCalledTimes(5000);
+  });
+
+  it('a second "live" destroys the first player instead of leaving it running', () => {
+    send({ rf: 'live', events: [event(1000)] });
+    send({ rf: 'live', events: [event(2000)] });
+    expect(instances).toHaveLength(2);
+    expect((instances[0] as unknown as { destroy: ReturnType<typeof vi.fn> }).destroy).toHaveBeenCalledTimes(1);
+    send({ rf: 'more', events: [event(3000)] });
+    expect(instances[0]!.addEvent).toHaveBeenCalledTimes(1);
+    expect(instances[1]!.addEvent).toHaveBeenCalledTimes(2);
   });
 
   it('shows ENDED when told, and then takes nothing more', () => {

@@ -862,6 +862,14 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <div class="bar"><span class="grow"></span><button type="button" id="profile-cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
   </form>
 </dialog>
+<dialog id="cap-confirm" data-rf-private aria-labelledby="cap-confirm-h">
+  <h2 id="cap-confirm-h">Send this as you?</h2>
+  <p class="hint" id="cap-confirm-where"></p>
+  <img id="cap-confirm-img" alt="The screenshot that will be sent" hidden style="max-width:100%;max-height:40dvh;display:block;margin:8px auto">
+  <label for="cap-confirm-note">Note (you can change it here)</label>
+  <textarea id="cap-confirm-note" maxlength="4000" rows="4" style="width:100%"></textarea>
+  <div class="bar"><span class="grow"></span><button type="button" id="cap-confirm-cancel">Cancel</button><button type="button" class="primary" id="cap-confirm-send">Send as you</button></div>
+</dialog>
 <dialog id="replay-dialog" data-rf-private class="replay" aria-labelledby="replay-h">
   <h2 id="replay-h">Replay</h2>
   <p class="hint" id="replay-meta"></p>

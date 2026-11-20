@@ -191,7 +191,7 @@ export const SHELL_SCRIPT = `(function () {
   });
 
   // ---- The capture script inside the artifact: region, element, section and full page, with a screenshot. It starts when asked and answers by message.
-  var capReady = false;
+  var capReady = false, armed = null;
   var MODES = ['region', 'element', 'section', 'page'];
   var SHOT_CHARS = 2900000; // about 2 MB decoded, as base64
   var parseShot = __PARSE_SHOT__;
@@ -200,11 +200,16 @@ export const SHELL_SCRIPT = `(function () {
     if (!button) return;
     button.addEventListener('click', function () {
       dialog.close(); $('fb-open').hidden = true;
-      tell({ rf: 'cap', op: 'start', mode: mode, note: note.value.slice(0, 4000), maxBytes: 1900000 });
+      // The artifact is the page's own code, so a capture counts only when the viewer asked for one here: one arm, a one-time word the capture script must echo, two minutes.
+      var rnd = new Uint8Array(12); crypto.getRandomValues(rnd);
+      armed = { nonce: Array.prototype.map.call(rnd, function (x) { return ('0' + x.toString(16)).slice(-2); }).join(''), until: Date.now() + 120000 };
+      tell({ rf: 'cap', op: 'start', mode: mode, note: note.value.slice(0, 4000), maxBytes: 1900000, nonce: armed.nonce });
     });
   });
   function arrived(data) {
     $('fb-open').hidden = false;
+    if (!armed || typeof data.nonce !== 'string' || data.nonce !== armed.nonce || Date.now() > armed.until) return; // not asked for: nothing is sent
+    armed = null;
     var shot = parseShot(data, SHOT_CHARS);
     if (!shot) { toast('That capture could not be read.'); return; }
     toast('Sending…');
@@ -228,6 +233,7 @@ export const SHELL_SCRIPT = `(function () {
       capReady = true; $('fb-capture').hidden = false;
     } else if (data.rf === 'cap-closed') {
       $('fb-open').hidden = false;
+      if (armed) armed.until = Math.min(armed.until, Date.now() + 20000); // the picture is fitted after the capture closes: a short grace
     } else if (data.rf === 'shot') {
       arrived(data);
     } else if (data.rf === 'ready') {

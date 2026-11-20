@@ -24,6 +24,7 @@ export type Command = {
     op: 'start';
     mode: CaptureMode | null;
     note: string;
+    nonce: string;
 } | {
     op: 'cancel';
 };

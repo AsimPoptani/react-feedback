@@ -40,6 +40,12 @@ export class ByteBudget {
     if (this.spent.size > MAX_KEYS) for (const [k, list] of this.spent) { if (!list.some(([at]) => at > now - this.windowMs)) this.spent.delete(k); if (this.spent.size <= MAX_KEYS) break; }
     return true;
   }
+  // Gives back what take() counted, when the thing it was for did not happen.
+  release(key: string, bytes: number): void {
+    const list = this.spent.get(key); if (!list) return;
+    const at = list.findLastIndex(([, n]) => n === bytes);
+    if (at >= 0) list.splice(at, 1);
+  }
   get size() { return this.spent.size; }
 }
 

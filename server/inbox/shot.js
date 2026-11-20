@@ -22,5 +22,5 @@ export function parseShot(data, maxImageChars) {
   if (s && typeof s === 'object' && typeof s.file === 'string' && s.file && Number.isInteger(s.line) && s.line > 0 && s.line < 1e7) {
     source = { file: text(s.file, 300), line: s.line, column: Number.isInteger(s.column) && s.column >= 0 && s.column < 1e7 ? s.column : 0, component: text(s.component, 80) };
   }
-  return { note: note, mode: data.mode, image: image, rect: rect, viewport: viewport, box: box, selector: text(data.selector, 300), text: text(data.text, 200), components: components, source: source };
+  return { nonce: text(data.nonce, 64), note: note, mode: data.mode, image: image, rect: rect, viewport: viewport, box: box, selector: text(data.selector, 300), text: text(data.text, 200), components: components, source: source };
 }

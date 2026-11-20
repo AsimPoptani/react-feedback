@@ -2181,6 +2181,7 @@ async function revokeShare(id) {
   if ($('manage-dialog')?.open && state.manageFor) { const meta = await api(`artifacts/${state.manageFor}`); drawManage(meta.shares || []); }
 }
 function removeArtifactFrame() {
+  state.capArmed = null; state.capPending = null;
   const frame = $('artifact-frame');
   if (!frame) return;
   frame.removeAttribute('src');
@@ -2194,7 +2195,7 @@ function artifactFrame(src) {
     frame = el('iframe', { id: 'artifact-frame', sandbox: 'allow-scripts allow-popups', referrerpolicy: 'no-referrer', title: 'Artifact' });
     host.append(frame);
   }
-  if (frame.getAttribute('src') !== src) { state.capReady = false; paintCapture(); frame.setAttribute('src', src); }
+  if (frame.getAttribute('src') !== src) { state.capReady = false; state.capArmed = null; state.capPending = null; if ($('cap-confirm')?.open) $('cap-confirm').close(); paintCapture(); frame.setAttribute('src', src); }
 }
 function drawVersionPicker(meta, version) {
   const select = $('artifact-version');
@@ -2373,14 +2374,45 @@ function paintCapture() {
   if ($('artifact-capture')) $('artifact-capture').hidden = !on;
   if ($('cap-modes') && !on) $('cap-modes').hidden = true;
 }
-async function sendArtifactShot(shot) {
+// An artifact is someone else's code and can post any message it likes, so nothing it sends is believed on its own. A capture is taken only after the owner picked a mode in this page
+// (one armed capture, for this artifact and version, with a one-time word the capture script must echo, for 2 minutes); what comes back is shown HERE, as the page sent it, with the note
+// editable, and nothing is posted as you until Send as you is pressed.
+const CAP_ARM_MS = 120000, CAP_GRACE_MS = 20000, CAP_PER_MINUTE = 6;
+const capSent = [];
+const capNonce = () => { const b = new Uint8Array(12); crypto.getRandomValues(b); return [...b].map(x => x.toString(16).padStart(2, '0')).join(''); };
+const disarmCapture = () => { state.capArmed = null; };
+// The arm still stands for the shot that follows the capture closing (the picture is fitted after it closes), for a short grace.
+function armedFor(nonce, now = Date.now()) {
+  const a = state.capArmed;
+  return !!a && a.nonce === nonce && nonce !== '' && a.artifact === state.artifactId && a.version === (state.artifactVer || state.artifact?.latest) && now < a.until;
+}
+function confirmArtifactShot(shot) {
   const meta = state.artifact, version = state.artifactVer || meta?.latest;
   if (!shot || !meta?.thread) { showToast('That capture could not be read.'); return; }
   const where = [`${meta.title} v${version}`, CAP_NAMES[shot.mode], shot.selector ? `\`${shot.selector}\`` : '', shot.source ? `${shot.source.file}:${shot.source.line}` : ''].filter(Boolean).join(' · ');
-  const text = `${shot.note}\n\n\u2014 ${where}`.slice(0, 10000);
-  try { await post(`threads/${meta.thread}/messages`, { text, images: shot.image ? [shot.image] : [] }); showToast('Sent to this artifact\u2019s thread'); void refreshList(); }
+  state.capPending = { shot, where, thread: meta.thread };
+  $('cap-confirm-where').textContent = `${where}. This is what the page sent. It is not posted until you send it.`;
+  $('cap-confirm-note').value = shot.note;
+  const img = $('cap-confirm-img');
+  if (shot.image) { img.src = shot.image; img.hidden = false; } else { img.removeAttribute('src'); img.hidden = true; }
+  if (!$('cap-confirm').open) $('cap-confirm').showModal();
+  $('cap-confirm-note').focus();
+}
+async function sendArtifactShot() {
+  const pending = state.capPending; if (!pending) return;
+  const now = Date.now();
+  while (capSent.length && now - capSent[0] > 60000) capSent.shift();
+  if (capSent.length >= CAP_PER_MINUTE) { showToast('Too many captures this minute. Try again shortly.'); return; }
+  const note = $('cap-confirm-note').value.trim();
+  if (!note) { showToast('Write a note first.'); return; }
+  const text = `${note}\n\n\u2014 ${pending.where}`.slice(0, 10000);
+  capSent.push(now); state.capPending = null; $('cap-confirm').close();
+  try { await post(`threads/${pending.thread}/messages`, { text, images: pending.shot.image ? [pending.shot.image] : [] }); showToast('Sent to this artifact\u2019s thread'); void refreshList(); }
   catch (error) { showToast(`Could not send that: ${error.message}`); }
 }
+$('cap-confirm-send')?.addEventListener('click', () => { void sendArtifactShot(); });
+$('cap-confirm-cancel')?.addEventListener('click', () => { state.capPending = null; $('cap-confirm').close(); });
+$('cap-confirm')?.addEventListener('close', () => { state.capPending = null; });
 $('artifact-capture')?.addEventListener('click', () => {
   const modes = $('cap-modes'); modes.hidden = !modes.hidden;
   $('artifact-capture').setAttribute('aria-expanded', String(!modes.hidden));
@@ -2388,18 +2420,26 @@ $('artifact-capture')?.addEventListener('click', () => {
 });
 for (const button of document.querySelectorAll('#cap-modes [data-capture]')) {
   button.addEventListener('click', () => {
-    const win = $('artifact-frame')?.contentWindow; if (!win) return;
+    const win = $('artifact-frame')?.contentWindow; if (!win || !state.artifactId) return;
     $('cap-modes').hidden = true; $('artifact-capture').hidden = true; $('artifact-capture').setAttribute('aria-expanded', 'false');
-    win.postMessage({ rf: 'cap', op: 'start', mode: button.dataset.capture, maxBytes: 6000000 }, '*');
+    const nonce = capNonce();
+    state.capArmed = { artifact: state.artifactId, version: state.artifactVer || state.artifact?.latest, nonce, until: Date.now() + CAP_ARM_MS };
+    win.postMessage({ rf: 'cap', op: 'start', mode: button.dataset.capture, maxBytes: 6000000, nonce }, '*');
   });
 }
-// Only the artifact's own window is believed, and every field of what it sends is checked (parseShot) before anything is posted.
+// The artifact's window is the source of these messages, which proves nothing about who wrote them: a shot counts only while armed (above), once, and then only as a proposal.
 window.addEventListener('message', event => {
   const win = $('artifact-frame')?.contentWindow;
   if (!win || event.source !== win || !event.data || typeof event.data !== 'object') return;
   if (event.data.rf === 'cap-ready') { state.capReady = true; paintCapture(); }
-  else if (event.data.rf === 'cap-closed') paintCapture();
-  else if (event.data.rf === 'shot') { paintCapture(); void sendArtifactShot(parseShot(event.data, CAP_CHARS)); }
+  else if (event.data.rf === 'cap-closed') { if (state.capArmed) state.capArmed.until = Math.min(state.capArmed.until, Date.now() + CAP_GRACE_MS); paintCapture(); }
+  else if (event.data.rf === 'shot') {
+    paintCapture();
+    const shot = parseShot(event.data, CAP_CHARS);
+    if (!shot || !armedFor(shot.nonce)) return;
+    disarmCapture(); // one capture, one shot
+    confirmArtifactShot(shot);
+  }
 });
 function closeReplay() {
   stopLive();

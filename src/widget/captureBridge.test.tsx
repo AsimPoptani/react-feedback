@@ -41,7 +41,7 @@ describe('the widget with a bridge (inside an artifact)', () => {
     const bridge = fakeBridge();
     const { container } = render(<FeedbackWidget bridge={bridge} />);
     expect((container.querySelector('.fb-launchers') as HTMLElement).style.display).toBe('none');
-    await bridge.run({ op: 'start', mode: null, note: '' });
+    await bridge.run({ op: 'start', mode: null, note: '', nonce: '' });
     expect(await screen.findByLabelText('Feedback toolbar')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'My feedback' })).toBeNull();
     expect(window.fetch).toBe(stubbed);
@@ -53,7 +53,7 @@ describe('the widget with a bridge (inside an artifact)', () => {
     const bridge = fakeBridge();
     const fetchSpy = vi.fn(); vi.stubGlobal('fetch', fetchSpy);
     render(<FeedbackWidget bridge={bridge} />);
-    await bridge.run({ op: 'start', mode: 'page', note: 'Already typed' });
+    await bridge.run({ op: 'start', mode: 'page', note: 'Already typed', nonce: 'n1' });
     const note = await screen.findByLabelText('Note') as HTMLTextAreaElement;
     expect(note.value).toBe('Already typed');
     fireEvent.change(note, { target: { value: 'Already typed, and more' } });
@@ -72,7 +72,7 @@ describe('the widget with a bridge (inside an artifact)', () => {
   it('a cancel from the page closes it, and says so', async () => {
     const bridge = fakeBridge();
     render(<FeedbackWidget bridge={bridge} />);
-    await bridge.run({ op: 'start', mode: null, note: '' });
+    await bridge.run({ op: 'start', mode: null, note: '', nonce: '' });
     await screen.findByLabelText('Feedback toolbar');
     await bridge.run({ op: 'cancel' });
     await waitFor(() => expect(screen.queryByLabelText('Feedback toolbar')).toBeNull());
@@ -133,8 +133,8 @@ describe('the bridge believes only the page that framed it', () => {
     expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'other', op: 'start' } }, parent)).toBeNull();
     expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'cap', op: 'steal' } }, parent)).toBeNull();
     expect(parseCommand({ source: parent as unknown as MessageEventSource, data: null }, parent)).toBeNull();
-    expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'cap', op: 'start', mode: 'both', note: 5 } }, parent)).toEqual({ op: 'start', mode: null, note: '' });
-    expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'cap', op: 'start', mode: 'element', note: 'x'.repeat(5000) } }, parent)).toEqual({ op: 'start', mode: 'element', note: 'x'.repeat(4000) });
+    expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'cap', op: 'start', mode: 'both', note: 5 } }, parent)).toEqual({ op: 'start', mode: null, note: '', nonce: '' });
+    expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'cap', op: 'start', mode: 'element', note: 'x'.repeat(5000) } }, parent)).toEqual({ op: 'start', mode: 'element', note: 'x'.repeat(4000), nonce: '' });
     expect(parseCommand({ source: parent as unknown as MessageEventSource, data: { rf: 'cap', op: 'cancel' } }, parent)).toEqual({ op: 'cancel' });
   });
 
@@ -147,11 +147,11 @@ describe('the bridge believes only the page that framed it', () => {
     const message = (source: unknown, data: unknown) => { const event = new Event('message') as Event & { source: unknown; data: unknown }; event.source = source; event.data = data; framed.dispatchEvent(event); };
     message({}, { rf: 'cap', op: 'start', mode: 'region' });
     expect(seen).toEqual([]);
-    message((framed as unknown as { parent: unknown }).parent, { rf: 'cap', op: 'start', mode: 'region', note: 'hi' });
-    expect(seen).toEqual([{ op: 'start', mode: 'region', note: 'hi' }]);
+    message((framed as unknown as { parent: unknown }).parent, { rf: 'cap', op: 'start', mode: 'region', note: 'hi', nonce: 'abc' });
+    expect(seen).toEqual([{ op: 'start', mode: 'region', note: 'hi', nonce: 'abc' }]);
     bridge.send({ note: 'n', mode: 'region', image: PNG, rect: null, viewport: { width: 1, height: 1 }, selector: '', text: '', components: [] });
     await waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0]).toMatchObject({ rf: 'shot', note: 'n', image: PNG });
+    expect(posted[0]).toMatchObject({ rf: 'shot', note: 'n', image: PNG, nonce: 'abc' }); // the page's one-time word comes back
     bridge.closed();
     expect(posted[1]).toEqual({ rf: 'cap-closed' });
   });
