@@ -215,6 +215,7 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
       lines.add(firstLine(`${m.answer.question_id}: ${parts.join(', ')}`)); // lines written before the prompt was included
       lines.add(firstLine(store.answerLine(m.answer.question_id, asked?.prompt ?? '', parts)));
     }
+    if (m.question) lines.add(firstLine(`${m.question.id} expired: ${m.question.prompt}`)); // an expired question's event repeats its prompt
     await scrubEvents(dir, id, lines, m.answer ? [`${m.answer.question_id}: `, `${m.answer.question_id} (`] : undefined);
     await scrubReminders(dir, path, id, m.text);
     return { done: true, original: m, oldTitle };

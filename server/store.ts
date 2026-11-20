@@ -817,7 +817,7 @@ export async function bumpQuestion(dir: string, id: string, qid: string): Promis
     });
     const n = stored.length + 1;
     const question = buildQuestion(`q${n}`, { prompt: q.prompt, options: q.options.map(o => ({ label: o.label, ...(o.description ? { description: o.description } : {}) })), multi: q.multi, allow_other: q.allow_other });
-    const created: Message = { id: `m${n}`, author: 'agent', text: q.prompt, images: [], created_at: new Date().toISOString(), flag: 'needs_you', question };
+    const created: Message = { id: `m${n}`, author: 'agent', text: q.prompt, images: [], created_at: new Date().toISOString(), flag: 'needs_you', question, ...(message.agent_name ? { agent_name: message.agent_name } : {}) };
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
     return { id: created.id, question_id: question.id };
   });

@@ -11,6 +11,8 @@
 ### Changed
 - MCP tool list: one more tool, `expire_questions`. `read_thread` messages carry `quote`, and a question's `expires_at` and `expired`.
 - The service worker cache is `fb-inbox-0.11.0`.
+- The CLI's `ask` and `ask-new` post under `FEEDBACK_AGENT_NAME` when it is set (they were always unnamed), and a re-asked question keeps its agent, so `ask-expire --all-mine` expires only that agent's questions.
+- Redacting a question also removes its prompt from the `expired` event in the event feed.
 
 ## 0.10.2
 

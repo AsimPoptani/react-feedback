@@ -433,11 +433,11 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   }
   if (command === 'artifact') return artifactCommand(dir, words, named, flags, me);
   if (command === 'ask' && words.length === 2) {
-    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags, named.expires), flag: flagOf(flags), reply_to: to ?? undefined });
+    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags, named.expires), flag: flagOf(flags), reply_to: to ?? undefined, ...(me ? { agent_name: me } : {}) });
     return `Asked on ${words[0]} (${message.id}, question ${message.question!.id})`;
   }
   if (command === 'ask-new' && words.length === 2) {
-    const { id } = await store.createThread(dir, { title: words[0], text: words[1], origin: 'agent', question: question(words[1]!, options, flags, named.expires), flag: flagOf(flags) });
+    const { id } = await store.createThread(dir, { title: words[0], text: words[1], origin: 'agent', question: question(words[1]!, options, flags, named.expires), flag: flagOf(flags), ...(me ? { agent_name: me } : {}) });
     return `Started ${id} (question q1)`;
   }
   if (command === 'profile' && words.length === 1 && words[0] === 'agent' && avatar) {

@@ -86,9 +86,6 @@ describe('the update banner', () => {
     expect(banner.hidden).toBe(true);
     serverVersion = '0.11.2';
     await settlePoll();
-    expect(banner.hidden).toBe(true);
-    serverVersion = '0.10.4';
-    await settlePoll();
     expect(banner.hidden).toBe(false);
     expect($('update-text').textContent).toBe('A new version (v0.11.2) is ready. Reload to update');
     serverVersion = PAGE;

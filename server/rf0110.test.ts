@@ -369,3 +369,31 @@ test('an offline-queued message keeps its quote through a reload', async () => {
   const b = createOutbox({ store: store0(), post: async () => ({ status: 201 }), canSend: () => false }); await b.ready();
   expect(b.entries()[0]).toMatchObject({ cid: kept.cid, quote: { message_id: 'm2', text: 'words' } });
 });
+
+// Review fixes (0.11.0): redaction scrubs an expired question's event; the CLI asks under its agent name, so --all-mine is scoped.
+test('redacting an expired question removes its prompt from the event feed', async () => {
+  const id = await start();
+  await cli('ask', id, 'Is SECRETPROMPTx right?', '--option', 'Yes', '--option', 'No');
+  const q = (await store.summarise(dir, id)).messages.find(m => m.question)!;
+  await cli('ask-expire', id, q.question!.id);
+  await store.summarise(dir, id); // the first read writes the expired event
+  expect((await events()).some(e => e.kind === 'expired' && e.first_line.includes('SECRETPROMPTx'))).toBe(true);
+  await redactMessage(dir, id, q.id, { by: 'agent', vault });
+  expect(JSON.stringify(await events())).not.toContain('SECRETPROMPTx');
+});
+
+test('CLI ask and ask-new carry FEEDBACK_AGENT_NAME, a bump keeps it, and --all-mine only expires that agent\'s questions', async () => {
+  const as = (name: string | undefined, ...args: string[]) => run(args, dir, undefined, { FEEDBACK_VAULT_DIR: vault, ...(name ? { FEEDBACK_AGENT_NAME: name } : {}) }, () => {});
+  const id = await start();
+  await as('Codex', 'ask', id, 'Codex asks', '--option', 'Yes', '--option', 'No');
+  await as(undefined, 'ask', id, 'Default asks', '--option', 'Yes', '--option', 'No');
+  const started = await as('Codex', 'ask-new', 'New one', 'Codex starts', '--option', 'A', '--option', 'B');
+  const newId = started.match(/Started (\S+)/)![1]!;
+  const qs = (await store.summarise(dir, id)).messages.filter(m => m.question);
+  expect(qs.map(m => m.agent_name ?? null)).toEqual(['Codex', null]);
+  expect((await store.summarise(dir, newId)).messages.find(m => m.question)!.agent_name).toBe('Codex');
+  const bumped = await store.bumpQuestion(dir, id, qs[0]!.question!.id);
+  expect((await store.summarise(dir, id)).messages.find(m => m.question?.id === bumped.question_id)!.agent_name).toBe('Codex');
+  expect(await as(undefined, 'ask-expire', id, '--all-mine')).toBe(`Expired ${qs[1]!.question!.id} on ${id}`);
+  expect(await as('Codex', 'ask-expire', id, '--all-mine')).toBe(`Expired ${bumped.question_id} on ${id}`);
+});
