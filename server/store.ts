@@ -6,6 +6,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { KEY } from './inbox/areas.js';
 import { asideGroups, isAside, isAsideRoot, mainMessages } from './inbox/aside.js';
 import { filterRows, groupRows } from './inbox/tracker.js';
+import { checkAttachmentIds, claimUploads, cloneAttachments, parseAttachments, removeAttachments, type Attachment } from './files';
+export type { Attachment };
 
 export const ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
 export const STATUSES = ['open', 'done'] as const;
@@ -37,7 +39,7 @@ export const checkFlag = (value: unknown): Flag => {
   return value as Flag;
 };
 // `reply_to` is the id of an earlier message in the same thread that this one quotes. It is only metadata: it changes nothing about who is waiting or what is unread.
-export interface Message { id: string; author: Author; text: string; images: string[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string;
+export interface Message { id: string; author: Author; text: string; images: string[]; attachments?: Attachment[]; created_at: string; flag?: Flag; divider?: boolean; question?: Question; answer?: Answer; reply_to?: string;
   // A side question (`/btw`): `aside` marks it and its answers; an answer's `reply_to` is the aside's id. `added_items` and `ticked_items` are the checklist items this message added or ticked.
   aside?: true; added_items?: string[]; ticked_items?: string[];
   // `moved_to` (a thread id) marks the stub left where a message was moved away; `moved_from` (`<thread>/<message>`) marks a copy that arrived by a move, so an interrupted move can tell what it already did.
@@ -104,7 +106,7 @@ export function dataUrlImages(value: unknown): Image[] {
   if (!Array.isArray(value) || value.length > MAX_IMAGES) throw new Invalid(`At most ${MAX_IMAGES} images per message`);
   return value.map(dataUrlImage);
 }
-export function messageText(value: unknown, hasImages: boolean): string {
+export function messageText(value: unknown, hasImages: boolean): string { // hasImages: true when the message carries images or files instead of words
   if (value == null && hasImages) return '';
   if (typeof value !== 'string' || value.length > MAX_TEXT || (!value.trim() && !hasImages)) throw new Invalid('Text must be 1–10000 characters');
   return value;
@@ -253,6 +255,7 @@ function parseMessages(raw: string | null): Message[] {
         const answer = m.author === 'user' ? parseAnswer(m.answer) : undefined;
         const flag: Flag | undefined = m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
         out.push({ id: m.id, author: m.author, text: m.text, images: m.images.filter((f): f is string => typeof f === 'string' && MESSAGE_IMAGE.test(f)), created_at: m.created_at,
+          ...(parseAttachments(m.attachments).length ? { attachments: parseAttachments(m.attachments) } : {}),
           ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}),
           ...(typeof m.reply_to === 'string' && m.reply_to ? { reply_to: m.reply_to } : {}), ...(m.aside === true ? { aside: true as const } : {}),
           ...(typeof m.moved_to === 'string' && ID.test(m.moved_to) ? { moved_to: m.moved_to } : {}), ...(typeof m.moved_from === 'string' && m.moved_from ? { moved_from: m.moved_from } : {}),
@@ -410,7 +413,7 @@ const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
 // `aside`: a side question (user) or its answer (agent, with `reply_to` naming the aside). `add_items` and `check_items` ride on the message:
 // new checklist items (`owner` says who has to do them) and ids of items the agent ticks.
-export interface NewMessage { author: Author; text: unknown; images?: Image[]; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown; agent_name?: unknown }
+export interface NewMessage { author: Author; text: unknown; images?: Image[]; attachments?: unknown; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown; agent_name?: unknown }
 // A message that arrived again with the same client_id is the one already stored: it is returned, not written twice.
 const duplicates = new WeakSet<Message>();
 export const wasDuplicate = (m: Message) => duplicates.has(m);
@@ -476,10 +479,10 @@ function quoteSent(title: string, text: string): string {
   return text ? `${line}\n\n${text}` : line;
 }
 interface Composed { message: Message; eventKind: 'message' | 'answer'; eventText: string; addedItems: ChecklistItem[] }
-interface Prepared { flag: Flag | undefined; attached: { add: ItemToAdd[]; check: string[] }; agentName: string | undefined; sentIn?: string }
+interface Prepared { flag: Flag | undefined; attached: { add: ItemToAdd[]; check: string[] }; agentName: string | undefined; dir: string; fileIds: string[]; sentIn?: string }
 // Writes one message. The caller holds the thread lock. `sentIn` prefixes a post that was aimed at a thread already merged into this one.
 async function compose(path: string, input: NewMessage, prep: Prepared): Promise<Composed> {
-  const { flag, attached, agentName, sentIn } = prep;
+  const { flag, attached, agentName, sentIn, dir, fileIds } = prep;
   const images = input.images ?? [];
   const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
   const item = await readItem(path);
@@ -491,7 +494,7 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
   const quoted = checkReplyTo(stored, replyTo);
   const n = stored.length + 1;
   const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
-  let text = input.answer !== undefined || input.question ? '' : secret ? messageText(input.text ?? `Please add ${secret.label}. Paste it in the secure box below; it goes straight to the app and is never saved in this thread.`, false) : messageText(input.text, images.length > 0);
+  let text = input.answer !== undefined || input.question ? '' : secret ? messageText(input.text ?? `Please add ${secret.label}. Paste it in the secure box below; it goes straight to the app and is never saved in this thread.`, false) : messageText(input.text, images.length > 0 || fileIds.length > 0);
   let extra: Partial<Message> = secret ? { kind: 'secret_request', secret } : {};
   let eventKind: 'message' | 'answer' = 'message';
   let eventText = '';
@@ -510,9 +513,10 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
     ticked = attached.check.filter(c => tickItem(items, c));
     await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
   }
-  const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+  const taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.author) : null;
+  const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), ...(taken ? { attachments: taken.attachments } : {}), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
     ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
-  await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
+  try { await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`); } catch (error) { await taken?.undo(); throw error; }
   if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
   if (flag === 'done') await closeForDone(path);
   if (input.author === 'user') await writeStatus(path, 'open');
@@ -521,7 +525,7 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
 async function recordSide(dir: string, id: string, author: Author, composed: Composed): Promise<void> {
   if (author !== 'user') return;
   const { message, eventKind, eventText, addedItems } = composed;
-  await logEvent(dir, { id, kind: eventKind, text: eventKind === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}), ...(message.aside ? { aside: true } : {}) });
+  await logEvent(dir, { id, kind: eventKind, text: eventKind === 'answer' ? eventText : message.text || (message.attachments?.length && !message.images.length ? '[file]' : ''), ...(message.reply_to ? { reply_to: message.reply_to } : {}), ...(message.aside ? { aside: true } : {}) });
   for (const i of addedItems) await userEvent(dir, id, 'checklist', `add (${i.owner === 'user' ? 'for you' : 'for the agent'}): ${i.text}`);
 }
 // A post aimed at a thread that has already been merged is written on the target. An ask is refused: a new question has no id there.
@@ -568,13 +572,15 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   if (input.question && input.author !== 'agent') throw new Invalid('Only the agent can ask questions', 403);
   if (input.answer && input.author !== 'user') throw new Invalid('Only the user can answer', 403);
   if (input.secret !== undefined && input.author !== 'agent') throw new Invalid('Only the agent can ask for a key', 403);
-  if (input.secret !== undefined && (input.question || input.answer !== undefined || input.aside || (input.images ?? []).length)) throw new Invalid('A key request is a message of its own: no question, side question or images');
+  const fileIds = checkAttachmentIds(input.attachments);
+  if (input.secret !== undefined && (input.question || input.answer !== undefined || input.aside || (input.images ?? []).length || fileIds.length)) throw new Invalid('A key request is a message of its own: no question, side question, images or files');
+  if (fileIds.length && (input.question || input.answer !== undefined)) throw new Invalid('A question or an answer cannot carry files');
   const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
   if (input.client_id !== undefined && (typeof input.client_id !== 'string' || !CLIENT_ID.test(input.client_id))) throw new Invalid('Invalid client_id');
   if (input.agent_name !== undefined && input.agent_name !== null && input.agent_name !== '' && input.author !== 'agent') throw new Invalid('Only the agent has an agent name', 403);
   const agentName = checkAgentName(input.agent_name);
   await notTheUser(dir, agentName);
-  const prep: Prepared = { flag: messageFlag(input.author, input.flag, !!input.question || !!secret), attached: checkAttached(input.author, input), agentName };
+  const prep: Prepared = { flag: messageFlag(input.author, input.flag, !!input.question || !!secret), attached: checkAttached(input.author, input), agentName, dir, fileIds };
   const noted = await readMerge(path);
   if (noted?.state === 'done') return deliverForward(dir, id, input, prep);
   const composed = await withLock(path, async () => {
@@ -586,12 +592,14 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   if (!wasDuplicate(composed.message)) await recordSide(dir, id, input.author, composed);
   return composed.message;
 }
-export interface NewThread { title: unknown; text: unknown; images?: Image[]; origin: Author; question?: QuestionInput; flag?: unknown; readOnly?: boolean; agent_name?: unknown }
+export interface NewThread { title: unknown; text: unknown; images?: Image[]; attachments?: unknown; origin: Author; question?: QuestionInput; flag?: unknown; readOnly?: boolean; agent_name?: unknown }
 export async function createThread(dir: string, input: NewThread): Promise<{ id: string }> {
   const images = input.images ?? [];
   const title = threadTitle(input.title);
   if (input.question && input.origin !== 'agent') throw new Invalid('Only the agent can ask questions', 403);
-  const text = input.question ? messageText(input.text ?? input.question.prompt, false) : messageText(input.text, images.length > 0);
+  const fileIds = checkAttachmentIds(input.attachments);
+  if (fileIds.length && (input.question || input.readOnly)) throw new Invalid('That kind of thread cannot start with files');
+  const text = input.question ? messageText(input.text ?? input.question.prompt, false) : messageText(input.text, images.length > 0 || fileIds.length > 0);
   if (input.readOnly && input.origin !== 'agent') throw new Invalid('Only the agent can start a read-only thread', 403);
   if (input.readOnly && input.question) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it');
   const flag = messageFlag(input.origin, input.flag, !input.readOnly); // a thread the agent starts wants attention, unless it only carries updates
@@ -600,7 +608,8 @@ export async function createThread(dir: string, input: NewThread): Promise<{ id:
   await notTheUser(dir, agentName);
   const { id, path, created_at } = await makeItemFolder(dir);
   try {
-    const message: Message = { id: 'm1', author: input.origin, text, images: await saveImages(path, images), created_at, ...(agentName ? { agent_name: agentName } : {}),
+    const taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.origin) : null;
+    const message: Message = { id: 'm1', author: input.origin, text, images: await saveImages(path, images), ...(taken ? { attachments: taken.attachments } : {}), created_at, ...(agentName ? { agent_name: agentName } : {}),
       ...(flag ? { flag } : {}), ...(input.question ? { question: buildQuestion('q1', input.question) } : {}) };
     await writeFile(join(path, 'item.json'), JSON.stringify({ id, created_at, mode: 'thread', title, origin: input.origin, note: text, ...(input.readOnly ? { read_only: true } : {}) }, null, 2));
     await writeStatus(path, 'open');
@@ -1003,6 +1012,7 @@ async function copyMessages(from: string, into: string, source: Message[], targe
   const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
   const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
   const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
+  for (const m of source) if (m.attachments?.length) await cloneAttachments(from, into, m.attachments); // other files are copied under the same ids
   const lines: Message[] = [{ id: `m${target.length + 1}`, author: 'agent', text: divider, images: [], created_at: at, divider: true }];
   for (const m of source) {
     const copy: Message = { ...m, id: carried.messages.get(m.id)!, images: m.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])) };
@@ -1494,6 +1504,7 @@ async function moveLocked(from: string, into: string, fromId: string, toId: stri
     const loaded = (await Promise.all(files.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
     const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
     const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
+    for (const m of fresh) if (m.attachments?.length) await cloneAttachments(from, into, m.attachments);
     let n = target.length;
     const lines: Message[] = target.some(m => m.divider && m.moved_from === `${key}`) ? [] : [{ id: `m${++n}`, author: 'agent', text: divider, images: [], created_at: new Date().toISOString(), divider: true, moved_from: key }];
     for (const m of fresh) copied.set(m.id, `m${++n}`);
@@ -1511,6 +1522,7 @@ async function moveLocked(from: string, into: string, fromId: string, toId: stri
   const stubText = `Moved to [${titleOf(intoItem, toId)}](#/${toId})`;
   const stubbed = source.map(m => (ids.has(m.id) ? { id: m.id, author: 'agent' as const, text: stubText, images: [], created_at: m.created_at, divider: true as const, moved_to: toId } : m));
   await writeAtomic(join(from, 'thread.jsonl'), stubbed.map(m => `${JSON.stringify(m)}\n`).join(''));
+  for (const m of moving) if (m.attachments?.length) await removeAttachments(from, m.attachments); // the copies are in the target now
   // A moved message keeps its old time, so an acknowledgement of the target can wrongly cover it: like a merge, wait for the agent until it answers.
   if (unansweredUser(source, moving)) await writeAtomic(join(into, 'awaiting-agent.json'), JSON.stringify({ at: new Date().toISOString(), from: fromId }));
   if (moving.some(m => m.author === 'user')) await writeStatus(into, 'open');

@@ -12,6 +12,7 @@ import * as artifacts from './artifacts';
 import * as shares from './shares';
 import { loadProjects, projectById, type Project } from './projects';
 import { moveThreadToProject } from './move-project';
+import * as files from './files';
 
 const PREFIX = '/__feedback';
 const FILE = /^(image\.png|annotated\.png|context\.png|feedback\.md)$/;
@@ -170,7 +171,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -267,7 +268,9 @@ async function pinsRoute(req: Request, dir: string, path: string, read: (req: Re
   const data = await read(req);
   return json(await store.setPin(dir, { kind: data.kind, id: data.id, pinned: data.pinned }));
 }
-export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number; projects?: Project[] }
+export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number; projects?: Project[]; files?: files.FilesOptions }
+// A chunk is at most 32 MiB; the server accepts that and a little more, and a JSON body is held to LIMIT by body() itself.
+const CHUNK_REQUEST = files.CHUNK_BYTES + 1024 * 1024;
 const SANDBOX = { 'Content-Security-Policy': 'sandbox allow-scripts allow-popups', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' };
 const SHARE_MISS = { ...SANDBOX, 'Content-Type': 'text/plain; charset=utf-8', 'X-Robots-Tag': 'noindex' };
 // Revoked, expired and unknown tokens are this one response: same status, same body, same headers.
@@ -288,6 +291,40 @@ async function projectList(projects: Project[], fallback: string): Promise<{ id:
     out.push({ id: project.id, name: project.name, unread });
   }
   return out;
+}
+// Uploads: any file, in chunks of at most 32 MiB, resumable. The bytes go to disk as they arrive.
+async function uploadsRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, options: HandlerOptions): Promise<Response | null> {
+  const opts = { ...options.files, ...(options.now ? { now: options.now } : {}) };
+  if (path === `${PREFIX}/api/uploads` && req.method === 'POST') {
+    const data = await read(req);
+    return json(await files.createUpload(dir, { name: data.name, size: data.size, sha256: data.sha256, by: 'user' }, opts), 201);
+  }
+  const match = path.match(/^\/__feedback\/api\/uploads\/([^/]+)(?:\/(finalise))?$/);
+  if (!match) return null;
+  const [, id, action] = match;
+  if (!action && req.method === 'GET') return json(await files.uploadStatus(dir, id));
+  if (!action && req.method === 'DELETE') { await files.cancelUpload(dir, id); return json({ ok: true }); }
+  if (!action && req.method === 'PUT') {
+    if (req.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/octet-stream') throw new Invalid('A chunk is sent as application/octet-stream', 415);
+    const offset = Number(new URL(req.url).searchParams.get('offset'));
+    const length = req.headers.get('content-length');
+    return json(await files.appendChunk(dir, id, offset, req.body, length === null ? undefined : Number(length), opts));
+  }
+  if (action === 'finalise' && req.method === 'POST') { const data = await read(req); return json(await files.finaliseUpload(dir, id, data.sha256)); }
+  return null;
+}
+// A file in a thread. Only a file that a message in that thread still lists is served: a redacted message's files are in the vault. See files.downloadHeaders.
+async function attachmentRoute(req: Request, dir: string, path: string): Promise<Response | null> {
+  const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/attachments\/(u[0-9a-f]{16})$/);
+  if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) return null;
+  const folder = await itemDir(dir, match[1]!);
+  const found = (await store.readMessages(folder, await store.readItem(folder))).flatMap(m => (m.redacted ? [] : m.attachments ?? [])).find(a => a.id === match[2]);
+  const target = found ? files.attachmentPath(folder, found) : null;
+  if (!found || !target) return json({ kind: 'not_found' }, 404);
+  try { if (!(await lstat(target)).isFile()) return json({ kind: 'not_found' }, 404); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
+  const headers = files.downloadHeaders(found, new URL(req.url).searchParams.get('inline') === '1');
+  return new Response(req.method === 'HEAD' ? null : Bun.file(target), { headers }); // streamed from disk, never read into memory
 }
 async function artifactRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, now: number): Promise<Response | null> {
   if (path === `${PREFIX}/api/artifacts` && req.method === 'GET') {
@@ -353,8 +390,10 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (remind) return remind;
   if (path === base && req.method === 'POST') {
     const data = await read(req);
-    return json(await store.createThread(dir, { title: data.title, text: data.text, images: store.dataUrlImages(data.images), origin: 'user' }), 201);
+    return json(await store.createThread(dir, { title: data.title, text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, origin: 'user' }), 201);
   }
+  const downloaded = await attachmentRoute(req, dir, path);
+  if (downloaded) return downloaded;
   const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)(?:\/(messages|status|read|answer|merge|move-project))?$/);
   if (!match) return null;
   const [, id, action] = match;
@@ -376,7 +415,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     const data = await read(req);
     // `aside: true` is a side question; `todo` (a list of texts, `for`: "user" by default or "agent") adds checklist items with the message. Only the agent ticks (`check`), so the user's API refuses it.
     const add = Array.isArray(data.todo) ? data.todo.map(text => ({ owner: data.for ?? 'user', text })) : data.todo;
-    const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), reply_to: data.reply_to, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
+    const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, reply_to: data.reply_to, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
     return json(created, store.wasDuplicate(created) ? 200 : 201); // 200: it had already arrived (a retry from the offline queue)
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
@@ -418,12 +457,14 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
         catch (error) { if (error instanceof Invalid && error.status === 404) return new Response('Not found\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' } }); throw error; }
       }
       // The user is here when the inbox page loads, polls or sends: the widget's own captures (api/items) and the health check do not count.
-      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
+      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares|uploads)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
       if (req.method === 'GET' && path === `${PREFIX}/healthz`) return json({ status: 'ok' });
       if (path === `${PREFIX}/api/items` && req.method === 'POST') return await create(dataDir, await body(req));
       if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dataDir);
       const match = path.match(/^\/__feedback\/api\/items\/([^/]+)\/([^/]+)$/);
       if (match) return await itemRoute(req, dataDir, match[1]!, match[2]!);
+      const uploaded = await uploadsRoute(req, dataDir, path, body, options);
+      if (uploaded) return uploaded;
       const threads = await threadRoute(req, dataDir, path, body, areas, options);
       if (threads) return threads;
       const published = await artifactRoute(req, dataDir, path, body, now);
@@ -448,7 +489,12 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   const configured = env.FEEDBACK_PROJECTS?.trim() ? loadProjects(env) : null;
   const feedbackDir = configured?.[0]?.dir ?? env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
-  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}) });
-  return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: LIMIT, fetch };
+  files.validateLimits(env);
+  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env } });
+  if (import.meta.main) { // partial uploads and finished ones no message took are removed after 24 hours
+    const sweep = () => { for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) void files.cleanStale(folder).catch(() => undefined); };
+    sweep(); setInterval(sweep, 3600e3).unref();
+  }
+  return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch };
 }
 if (import.meta.main) Bun.serve(serverOptions());

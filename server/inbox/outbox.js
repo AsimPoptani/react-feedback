@@ -54,7 +54,8 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
   let entries = [], loaded = false, persistent = true, running = false, timer, last = 0, idle = 0;
   const emit = () => onChange();
   const save = entry => { if (entries.includes(entry)) void store.put(snapshotOf(entry)).catch(() => {}); };
-  const snapshotOf = ({ cid, seq, thread, text, images, reply_to, aside, written_at, state, reason }) => ({ cid, seq, thread, text, images, ...(reply_to ? { reply_to } : {}), ...(aside ? { aside: true } : {}), written_at, state, ...(reason ? { reason } : {}) });
+  // `files` are the files that go with the message: { name, size, type, blob } until each is uploaded (a Blob is kept in IndexedDB as it is), then also { id } (the server's upload id). `uploadId` keeps a half-finished upload resumable.
+  const snapshotOf = ({ cid, seq, thread, text, images, files, reply_to, aside, written_at, state, reason }) => ({ cid, seq, thread, text, images, ...(files?.length ? { files } : {}), ...(reply_to ? { reply_to } : {}), ...(aside ? { aside: true } : {}), written_at, state, ...(reason ? { reason } : {}) });
   const loading = (async () => {
     persistent = await store.ready;
     const records = await store.load().catch(() => []);
@@ -97,13 +98,15 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
     async add(input) {
       await loading;
       last = Math.max(now(), last + 1);
-      const entry = { cid: input.cid || newCid(), seq: last, thread: input.thread, text: input.text ?? '', images: input.images ?? [], ...(input.reply_to ? { reply_to: input.reply_to } : {}), ...(input.aside ? { aside: true } : {}),
+      const entry = { cid: input.cid || newCid(), seq: last, thread: input.thread, text: input.text ?? '', images: input.images ?? [], ...(input.files?.length ? { files: input.files } : {}), ...(input.reply_to ? { reply_to: input.reply_to } : {}), ...(input.aside ? { aside: true } : {}),
         written_at: input.written_at || new Date(now()).toISOString(), state: 'queued', attempts: 0, nextAt: 0, sending: false };
       entries.push(entry);
       await store.put(snapshotOf(entry)).catch(() => {});
       emit(); void pump();
       return entry;
     },
+    // The caller changed an entry while sending it (an upload id, progress): save it, and say so to the page.
+    touch(entry, persist = false) { if (persist) save(entry); emit(); },
     // Delete a message before it sends (also clears a failed one).
     async remove(cid) {
       await loading;

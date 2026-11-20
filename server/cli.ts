@@ -1,5 +1,5 @@
 // Agent CLI (react-feedback <command>). Writes straight into FEEDBACK_DIR through the same store the server uses.
-//   react-feedback reply <id> "text" [--image path ...] [--to <message-id>]   (quote one of the thread's messages)
+//   react-feedback reply <id> "text" [--image path ...] [--file path ...] [--to <message-id>]   (quote one of the thread's messages; --file attaches any file, repeatable)
 //   react-feedback reply <id> "text" --aside --to <aside-id>   (answer a side question)
 //   react-feedback reply <id> "text" --todo "item" ... [--for agent|user] [--check c3 ...]   (checklist changes ride on the reply)
 //   react-feedback new "title" "text" [--image path ...]
@@ -45,16 +45,17 @@ import { formatOfName, listArtifacts, publishArtifact, suggestShare } from './ar
 import { createShare, readShares, revokeShare, sharePill, statsFor, type Expiry } from './shares';
 import { loadProjects, projectById } from './projects';
 import { describeMove, moveThreadToProject } from './move-project';
+import { attachmentPath, cancelUpload, checkAttachmentIds, MAX_ATTACHMENTS, stagePath } from './files';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
   react-feedback serve   (FEEDBACK_DIR, FEEDBACK_HOST, PORT, FEEDBACK_AREAS or FEEDBACK_AREAS_JSON, FEEDBACK_SECRET_TARGET, FEEDBACK_VAULT_DIR)
   react-feedback --help
   react-feedback --version
-  react-feedback reply <id> "text" [--image path ...] [--to <message-id>]
+  react-feedback reply <id> "text" [--image path ...] [--file path ...] [--to <message-id>]   (--file: any file, no size cap unless FEEDBACK_MAX_UPLOAD_BYTES)
   react-feedback reply <id> "text" --aside --to <aside-id>   (answer a side question the user sent with /btw)
   react-feedback reply <id> "text" --todo "item" [--todo "item" ...] [--for agent|user] [--check c3 ...]
-  react-feedback new "title" "text" [--image path ...]
+  react-feedback new "title" "text" [--image path ...] [--file path ...]
   react-feedback status <id> open|done   (seen is an alias for open)
   react-feedback list [--waiting]   (--unread is an alias)
   react-feedback read <id>   (marks it read and prints the thread)
@@ -89,14 +90,19 @@ const USAGE = `Usage:
   react-feedback mcp   (an MCP server on stdio; FEEDBACK_AGENT_NAME names the agent)
   --project <id> or FEEDBACK_PROJECT selects a project (FEEDBACK_PROJECTS); the default is the first`;
 
-function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string> } {
-  const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
+function split(args: string[]): { words: string[]; images: string[]; files: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string> } {
+  const words: string[] = [], images: string[] = [], files: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
   let avatar: string | null = null, window: string | null = null, to: string | null = null, owner: string | null = null;
   const named: Record<string, string> = {};
   let collecting = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--image') { collecting = true; continue; }
+    if (arg === '--file') {
+      const value = args[++i];
+      if (value === undefined) throw new store.Invalid('--file needs a path');
+      files.push(value); collecting = false; continue;
+    }
     if (arg === '--option' || arg === '--avatar' || arg === '--window' || arg === '--to' || arg === '--todo' || arg === '--check' || arg === '--for') {
       const value = args[++i];
       if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
@@ -111,7 +117,7 @@ function split(args: string[]): { words: string[]; images: string[]; flags: stri
     if (arg.startsWith('--')) { flags.push(arg); collecting = false; continue; }
     (collecting ? images : words).push(arg);
   }
-  return { words, images, flags, options, avatar, window, to, todos, checks, owner, named };
+  return { words, images, files, flags, options, avatar, window, to, todos, checks, owner, named };
 }
 function question(prompt: string, options: string[], flags: string[]): store.QuestionInput {
   return { prompt, multi: flags.includes('--multi'), allow_other: !flags.includes('--no-other'),
@@ -123,6 +129,16 @@ async function load(paths: string[]): Promise<store.Image[]> {
     try { return store.checkedImage(Buffer.from(await readFile(path))); }
     catch (error) { throw error instanceof store.Invalid ? new store.Invalid(`${path}: ${error.message}`) : new store.Invalid(`Cannot read image ${path}`); }
   }));
+}
+// Each --file is streamed into the server's staging (a checksum, a sniffed type, the same disk guard) and named by its upload id; a failure removes what was staged.
+async function stageFiles(dir: string, paths: string[], env: Record<string, string | undefined>): Promise<{ ids: string[]; names: string[]; drop: () => Promise<void> }> {
+  if (paths.length > MAX_ATTACHMENTS) throw new store.Invalid(`At most ${MAX_ATTACHMENTS} files per message`);
+  const ids: string[] = [], names: string[] = [];
+  const drop = async () => { await Promise.all(ids.map(id => cancelUpload(dir, id).catch(() => undefined))); };
+  try { for (const path of paths) { const ready = await stagePath(dir, path, 'agent', { env }); ids.push(ready.id); names.push(ready.name); } }
+  catch (error) { await drop(); throw error; }
+  checkAttachmentIds(ids);
+  return { ids, names, drop };
 }
 function flagOf(flags: string[]): store.Flag | undefined {
   const named = flags.flatMap(f => (f === '--needs-you' ? ['needs_you' as const] : f === '--done' ? ['done' as const] : f === '--fyi' ? ['fyi' as const] : []));
@@ -180,7 +196,8 @@ async function todos(dir: string, flags: string[]): Promise<string> {
 }
 // What `read` prints for one message: who, when, the quoted message if it quotes one, then the text, then any checklist items it added or ticked.
 // A side question prints indented under "Side question", with its answers beneath it.
-const firstLine = (m: store.Message) => m.redacted ? '🔒 Redacted' : (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : '')).slice(0, 120);
+const firstLine = (m: store.Message) => m.redacted ? '🔒 Redacted' : (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : m.attachments?.length ? '[file]' : '')).slice(0, 120);
+export const humanSize = (bytes: number): string => (bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${(bytes / 1024 ** 3).toFixed(2)} GB`);
 function answerReadLine(messages: store.Message[], m: store.Message): string {
   const answer = m.answer;
   if (!answer) return '';
@@ -205,7 +222,8 @@ function takeProject(args: string[]): { args: string[]; project?: string } {
   }
   return { args: out, project };
 }
-export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null }
+// `path` is the thread's folder: with it, each attachment is listed with the absolute path of its file.
+export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null; path?: string }
 export function transcript(messages: store.Message[], names: Record<store.Author, string> = { user: 'user', agent: 'agent' }, extra: TranscriptExtra = {}): string {
   const byId = new Map(messages.map(m => [m.id, m]));
   const itemText = (id: string) => `${id}${extra.items?.find(i => i.id === id) ? ` ${extra.items.find(i => i.id === id)!.text}` : ''}`;
@@ -214,10 +232,11 @@ export function transcript(messages: store.Message[], names: Record<store.Author
     const quote = m.reply_to && !m.aside ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
     const lead = m.answer && !m.redacted && !m.divider ? answerReadLine(messages, m) : '';
     const body = m.divider ? `--- ${m.text} ---` : m.redacted ? `  🔒 Redacted (sensitive) by ${m.redacted.by === 'user' ? names.user : names.agent}, ${m.redacted.at.slice(0, 16)}${m.redacted.reason ? `: ${m.redacted.reason}` : ''}`
-      : `${lead ? `  ${lead}\n` : ''}${(m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n')}`;
+      : `${lead ? `  ${lead}\n` : ''}${(m.text || (m.images.length ? '[image]' : m.attachments?.length ? '[file]' : '')).split('\n').map(l => `  ${l}`).join('\n')}`;
+    const attachments = (m.redacted ? [] : m.attachments ?? []).map(a => `  [file] ${a.name} (${humanSize(a.size)}, ${a.type}, from ${a.by === 'user' ? names.user : names.agent})${extra.path ? ` ${attachmentPath(resolve(extra.path), a)}` : ''}`);
     const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}${m.secret.check === 'rejected' ? ', but the provider rejected it' : ''}` : 'not saved yet'}]`] : [];
     const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
-    const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[body, ...secret, ...attached].join('\n')}`;
+    const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[body, ...attachments, ...secret, ...attached].join('\n')}`;
     return pad ? text.split('\n').map(l => `${pad}${l}`).join('\n') : text;
   };
   const groups = asideGroups(messages, extra.acked ?? null);
@@ -290,7 +309,7 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     const id = env.FEEDBACK_PROJECT?.trim();
     dir = id ? projectById(projects, id).dir : projects[0]!.dir;
   }
-  const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
+  const { words, images, files, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
   let me: string | undefined;
   try { me = store.checkAgentName(env.FEEDBACK_AGENT_NAME); } catch { /* an unusable name: the unnamed agent */ }
   if (!(command === 'move-project' && flags.includes('--dry-run'))) await store.touchPresence(dir, { agent: me }); // any command is the agent being here, under its own name. A dry run must not write.
@@ -348,8 +367,12 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   if (command === 'reply' && words.length === 2) {
     const aside = flags.includes('--aside');
     if (owner !== null && !addTodos.length) throw new store.Invalid('--for goes with --todo');
-    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), flag: flagOf(flags), reply_to: to ?? undefined, ...(aside ? { aside: true } : {}),
-      ...(addTodos.length ? { add_items: addTodos.map(text => ({ owner: owner ?? 'agent', text })) } : {}), ...(checks.length ? { check_items: checks } : {}) });
+    const staged = await stageFiles(dir, files, env);
+    let message: store.Message;
+    try {
+      message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), ...(staged.ids.length ? { attachments: staged.ids } : {}), flag: flagOf(flags), reply_to: to ?? undefined, ...(aside ? { aside: true } : {}),
+        ...(addTodos.length ? { add_items: addTodos.map(text => ({ owner: owner ?? 'agent', text })) } : {}), ...(checks.length ? { check_items: checks } : {}) });
+    } catch (error) { await staged.drop(); throw error; }
     const thread = message.forwarded_to ?? words[0]!;
     const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, thread))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
     const extras = `${aside ? `, side answer to ${message.reply_to}` : ''}${message.added_items ? `, added ${message.added_items.join(' ')}` : ''}${message.ticked_items ? `, ticked ${message.ticked_items.join(' ')}` : ''}`;
@@ -357,13 +380,13 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     await reminders.checkAfterReply(dir, thread);
     const open = !aside && !addTodos.length && !checks.length ? await reminders.openAgentItems(dir, thread) : [];
     if (open.length) notice(`${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with --check cN (open: ${open.map(i => i.id).join(' ')})`);
-    return `Replied to ${thread} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed}${via})`;
+    return `Replied to ${thread} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${staged.names.length ? `, files ${staged.names.join(', ')}` : ''}${extras}${closed}${via})`;
   }
   if (command === 'read' && words.length === 1) {
     await store.markAgentRead(dir, words[0]!);
     const { messages, summary, path } = await store.summarise(dir, words[0]!);
     for (const line of (await presenceText(dir, me)).split('\n').filter(Boolean)) notice(line);
-    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through })}` : ''}`;
+    return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through, path })}` : ''}`;
   }
   if (command === 'ask-cancel' && words.length === 2) {
     const result = await store.cancelQuestion(dir, words[0]!, words[1]!, named.reason);
@@ -388,7 +411,10 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     return 'Set the agent avatar';
   }
   if (command === 'new' && words.length === 2) {
-    const { id } = await store.createThread(dir, { title: words[0], text: words[1], images: await load(images), origin: 'agent', flag: flagOf(flags), readOnly: flags.includes('--read-only') });
+    const staged = await stageFiles(dir, files, env);
+    let id: string;
+    try { ({ id } = await store.createThread(dir, { title: words[0], text: words[1], images: await load(images), ...(staged.ids.length ? { attachments: staged.ids } : {}), origin: 'agent', flag: flagOf(flags), readOnly: flags.includes('--read-only') })); }
+    catch (error) { await staged.drop(); throw error; }
     return `Started ${id}${flags.includes('--read-only') ? ' (read-only)' : ''}`;
   }
   throw new store.Invalid(USAGE);

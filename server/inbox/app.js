@@ -7,6 +7,7 @@ import { ageOf, filterRows, stateOf } from './tracker.js';
 import { firstPlainLine, inline, markdown, plainText } from './markdown.js';
 import { secretStatusLine, secretUrl } from './secret.js';
 import { createOutbox, newCid } from './outbox.js';
+import { UploadError, cancelRemote, uploadFile } from './uploader.js';
 import { presenceLines } from './presence.js';
 import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
 export { inline, markdown };
@@ -16,6 +17,9 @@ const POLL_MS = 10000;
 const MAX_IMAGES = 5;
 const MAX_BYTES = 10 * 1024 * 1024;
 const TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+const MAX_FILES = 10;
+const FILE_OFFLINE_MAX = 50 * 1024 * 1024; // a bigger file needs a connection: it is not kept in the offline queue
+const SHOWN_IMAGES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const $ = id => document.getElementById(id);
 // The version baked into this page (the shell that loaded). The server's live version arrives later, on api/config.
 function readLoaded() {
@@ -30,7 +34,7 @@ function paintVersion() { const node = $('app-version'); if (node && LOADED) nod
 const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
 const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
-  view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
+  view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], files: [], newFiles: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, qopen: new Set(), keptShown: new Set(), folds: loadFolds(),
   projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
@@ -101,13 +105,28 @@ const SHORTCUTS = [
 // ---- Offline: messages written with no signal wait in an outbox and go out in order, each once (the server dedupes by client id).
 async function postQueued(e) {
   try {
+    const attachments = [];
+    for (const f of e.files || []) { // a file that waited in the queue goes up first (resuming a half-finished upload), then the message names it
+      if (!f.id) {
+        const r = await uploadFile({ file: queuedFile(f), route: routeOf, uploadId: f.uploadId || null,
+          onId: id => { if (f.uploadId !== id) { f.uploadId = id; outbox.touch(e, true); } }, onProgress: sent => { e.progress = f.size ? Math.min(99, Math.floor((sent / f.size) * 100)) : 0; outbox.touch(e); } });
+        f.id = r.id; delete f.uploadId; outbox.touch(e, true);
+      }
+      attachments.push(f.id);
+    }
     const r = await fetch(`${API}threads/${e.thread}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: e.text, images: e.images, ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : {}), client_id: e.cid, written_at: e.written_at }) });
+      body: JSON.stringify({ text: e.text, images: e.images, ...(attachments.length ? { attachments } : {}), ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : {}), client_id: e.cid, written_at: e.written_at }) });
+    if (r.status === 404 && attachments.length) { for (const f of e.files) { delete f.id; delete f.uploadId; } outbox.touch(e, true); return { status: 503 }; } // the server dropped a file we had sent (a day old): send it again
     if (r.ok || r.status < 500) setOffline(false);
     let body = {}; try { body = await r.json(); } catch { /* no body */ }
     return { status: r.status, reason: r.ok ? undefined : body.detail, forwarded_to: typeof body.forwarded_to === 'string' ? body.forwarded_to : undefined };
-  } catch { setOffline(true); return { network: true }; }
+  } catch (error) {
+    if (error instanceof UploadError && !error.network) return { status: error.status || 400, reason: error.message };
+    setOffline(true); return { network: true };
+  }
 }
+// A file read back from the offline queue is a Blob; the uploader wants a name and a size too.
+const queuedFile = f => ({ name: f.name, size: f.size, slice: (a, b) => f.blob.slice(a, b) });
 const outbox = createOutbox({ post: postQueued, canSend: () => !isOffline(),
   onChange: () => { drawOffline(); if (state.detail) drawMessages(state.detail); },
   onSent: (e, result) => { state.echo.set(e.cid, e); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast('Sent in the merged thread'); if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
@@ -230,6 +249,117 @@ function drawPreviews(host, list, redraw) {
 function pastedImages(event) {
   return [...(event.clipboardData?.items ?? [])].filter(i => i.kind === 'file' && TYPES.includes(i.type)).map(i => i.getAsFile()).filter(Boolean);
 }
+function pastedFiles(event) {
+  return [...(event.clipboardData?.items ?? [])].filter(i => i.kind === 'file' && !TYPES.includes(i.type)).map(i => i.getAsFile()).filter(Boolean);
+}
+
+// ---- Files of any type. Each one is a chip with a progress bar; it goes up in chunks as soon as it is attached (or when the message is sent, if it could not before).
+const humanSize = n => (n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`);
+const routeOf = path => API + withProject(path);
+const attachUrl = (thread, id, inline = false) => API + withProject(`threads/${thread}/attachments/${id}${inline ? '?inline=1' : ''}`);
+const isShownImage = type => SHOWN_IMAGES.includes(type);
+const percentOf = e => (e.size ? Math.min(100, Math.floor((e.sent / e.size) * 100)) : 100);
+function makeEntry(file) { return { key: newCid(), file, name: file.name || 'file', size: file.size, type: file.type, status: 'idle', sent: 0, id: null, uploadId: null, error: '', controller: null, promise: null }; }
+function addFiles(list, files, errorEl, redraw) {
+  showError(errorEl, '');
+  for (const file of files) {
+    if (list.length >= MAX_FILES) { showError(errorEl, `At most ${MAX_FILES} files per message.`); break; }
+    const e = makeEntry(file); list.push(e);
+    if (isOffline()) {
+      if (file.size > FILE_OFFLINE_MAX) { e.status = 'error'; e.error = `Needs a connection: a file over ${humanSize(FILE_OFFLINE_MAX)} cannot wait offline. Remove it, or retry when you are online.`; } else e.status = 'local';
+    } else void beginUpload(e, redraw);
+  }
+  redraw();
+}
+function beginUpload(e, redraw) {
+  if (e.promise) return e.promise;
+  e.status = 'uploading'; e.error = ''; e.controller = new AbortController();
+  e.promise = (async () => {
+    try {
+      const r = await uploadFile({ file: e.file, route: routeOf, signal: e.controller.signal, uploadId: e.uploadId, onId: id => { e.uploadId = id; }, onProgress: sent => { e.sent = sent; paintProgress(e); } });
+      e.id = r.id; e.status = 'done'; e.sent = e.size;
+    } catch (error) {
+      if (error.cancelled) { e.status = 'idle'; return; }
+      if (error.network) { setOffline(true); e.status = e.size <= FILE_OFFLINE_MAX ? 'local' : 'error'; e.error = e.size <= FILE_OFFLINE_MAX ? '' : `Needs a connection: a file over ${humanSize(FILE_OFFLINE_MAX)} cannot wait offline. Retry when you are online.`; }
+      else { e.status = 'error'; e.error = error.message || 'The upload failed.'; }
+    } finally { e.controller = null; e.promise = null; redraw(); }
+  })();
+  redraw();
+  return e.promise;
+}
+// Makes sure every file is on the server. Resolves { ok: true } when they all are; otherwise says why in `reason`.
+async function ensureUploaded(list, redraw) {
+  await Promise.all(list.filter(e => e.status !== 'done').map(e => beginUpload(e, redraw)));
+  const bad = list.find(e => e.status === 'error');
+  if (bad) return { ok: false, reason: `${bad.name}: ${bad.error}` };
+  if (list.some(e => e.status !== 'done')) return { ok: false, network: true, reason: "You're offline. The message will wait with its files." };
+  return { ok: true };
+}
+function removeEntry(list, e, redraw) {
+  e.controller?.abort();
+  if (e.uploadId) void cancelRemote(routeOf, e.uploadId);
+  const at = list.indexOf(e); if (at >= 0) list.splice(at, 1);
+  redraw();
+}
+const dropAll = list => { for (const e of list.splice(0)) { e.controller?.abort(); if (e.uploadId) void cancelRemote(routeOf, e.uploadId); } };
+function paintProgress(e) {
+  const node = document.querySelector(`[data-fkey="${e.key}"]`); if (!node) return;
+  const bar = node.querySelector('.fbar span'), meta = node.querySelector('.fmeta'), pct = percentOf(e);
+  if (bar) { bar.style.width = `${pct}%`; bar.parentNode.setAttribute('aria-valuenow', String(pct)); }
+  if (meta) meta.textContent = `${humanSize(e.sent)} of ${humanSize(e.size)} · ${pct}%`;
+}
+function chipNode(list, e, redraw) {
+  const pct = percentOf(e);
+  const meta = e.status === 'uploading' ? `${humanSize(e.sent)} of ${humanSize(e.size)} · ${pct}%` : e.status === 'done' ? `${humanSize(e.size)} · ready to send`
+    : e.status === 'local' ? `${humanSize(e.size)} · uploads with the message when you are online` : e.status === 'error' ? e.error : humanSize(e.size);
+  const buttons = e.status === 'uploading' ? [el('button', { type: 'button', 'aria-label': `Cancel the upload of ${e.name}`, onclick: () => removeEntry(list, e, redraw) }, 'Cancel')]
+    : [...(e.status === 'error' ? [el('button', { type: 'button', 'aria-label': `Retry ${e.name}`, onclick: () => { if (isOffline() && e.size > FILE_OFFLINE_MAX) { e.error = 'Still offline: this file needs a connection.'; redraw(); } else void beginUpload(e, redraw); } }, 'Retry')] : []),
+      el('button', { type: 'button', 'aria-label': `Remove ${e.name}`, onclick: () => removeEntry(list, e, redraw) }, 'Remove')];
+  return el('div', { class: 'fchip', 'data-fkey': e.key, 'data-state': e.status, role: 'group', 'aria-label': `File ${e.name}` },
+    el('span', { class: 'fname', title: e.name, text: e.name }), el('span', { class: 'fmeta', ...(e.status === 'error' ? { role: 'alert' } : {}), text: meta }), el('div', { class: 'fbtns' }, ...buttons),
+    ...(e.status === 'uploading' || e.status === 'done' ? [el('div', { class: 'fbar', role: 'progressbar', 'aria-label': `Upload of ${e.name}`, 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(e.status === 'done' ? 100 : pct) }, el('span', { style: `width:${e.status === 'done' ? 100 : pct}%` }))] : []));
+}
+function drawChips(host, list, redraw) { host.replaceChildren(...list.map(e => chipNode(list, e, redraw))); }
+// A file already in a thread: an image shows as a picture; a PDF can be previewed in a sandboxed frame; everything else is a name, a size and Download.
+function fileCard(d, a) {
+  const pdf = a.type === 'application/pdf';
+  const card = el('div', { class: `file-card${pdf ? ' pdf' : ''}`, 'data-attachment': a.id }, el('span', { class: 'fname', title: a.name, text: a.name }), el('span', { class: 'fmeta', text: humanSize(a.size) }));
+  if (pdf) {
+    const button = el('button', { type: 'button', 'aria-expanded': 'false', 'aria-label': `Preview ${a.name}` }, 'Preview');
+    button.addEventListener('click', () => {
+      const frame = card.querySelector('iframe');
+      if (frame) { frame.remove(); card.querySelector('.nopreview')?.remove(); button.textContent = 'Preview'; button.setAttribute('aria-expanded', 'false'); return; }
+      const created = el('iframe', { title: `Preview of ${a.name}`, src: attachUrl(d.id, a.id, true), loading: 'lazy', referrerpolicy: 'no-referrer' });
+      created.setAttribute('sandbox', ''); // nothing allowed: no scripts, no same-origin access
+      card.append(created, el('p', { class: 'nopreview', text: 'If the preview stays blank, this browser cannot show a PDF here: use Download.' }));
+      button.textContent = 'Hide preview'; button.setAttribute('aria-expanded', 'true');
+    });
+    card.append(button);
+  }
+  card.append(el('a', { class: 'fdl', href: attachUrl(d.id, a.id), download: a.name, rel: 'noopener', 'aria-label': `Download ${a.name}` }, 'Download'));
+  return card;
+}
+function appendFiles(node, d, m, who) {
+  const list = m.attachments || [];
+  const pictures = list.filter(a => isShownImage(a.type)), rest = list.filter(a => !isShownImage(a.type));
+  if (pictures.length) node.append(el('div', { class: 'imgs' }, ...pictures.map(a => imageButton(a.id, `${a.name} from ${who.name}`, attachUrl(d.id, a.id)))));
+  if (rest.length) node.append(el('div', { class: 'files' }, ...rest.map(a => fileCard(d, a))));
+}
+// Drag a file onto the thread or the new-thread box: a small picture is attached as an image, anything else as a file.
+function takeDropped(files, target) {
+  const images = [], others = [];
+  for (const f of files) (TYPES.includes(f.type) && f.size <= MAX_BYTES ? images : others).push(f);
+  if (target === 'new') { if (images.length) addImages(state.newImages, images, $('new-error'), redrawNew); if (others.length) addFiles(state.newFiles, others, $('new-error'), redrawNew); }
+  else { if (images.length) addImages(state.images, images, $('error'), redrawComposer); if (others.length) addFiles(state.files, others, $('error'), redrawComposer); }
+}
+function dragHooks(zone, target, allowed = () => true) {
+  const has = e => [...(e.dataTransfer?.types ?? [])].includes('Files');
+  let depth = 0;
+  zone.addEventListener('dragenter', e => { if (has(e) && allowed()) { e.preventDefault(); depth++; zone.classList.add('dropping'); } });
+  zone.addEventListener('dragover', e => { if (has(e) && allowed()) e.preventDefault(); });
+  zone.addEventListener('dragleave', e => { if (has(e) && --depth <= 0) { depth = 0; zone.classList.remove('dropping'); } });
+  zone.addEventListener('drop', e => { if (!has(e)) return; e.preventDefault(); depth = 0; zone.classList.remove('dropping'); if (allowed()) takeDropped([...e.dataTransfer.files], target); });
+}
 
 // ---- Lightbox: every image of the open thread, in order.
 function buildGallery(d) {
@@ -240,6 +370,7 @@ function buildGallery(d) {
   if (d.files.context) g.push({ key: 'context.png', src: fileUrl(d.id, 'context.png'), caption: 'Capture · context' });
   d.messages.forEach((m, mi) => m.images.forEach((f, i) => g.push({ key: f, src: fileUrl(d.id, f),
     caption: `Message ${mi + 1} from ${m.author === 'user' ? state.profile.user.name : state.profile.agent.name}${m.images.length > 1 ? ` · image ${i + 1} of ${m.images.length}` : ''}` })));
+  d.messages.forEach(m => (m.attachments || []).filter(a => isShownImage(a.type)).forEach(a => g.push({ key: a.id, src: attachUrl(d.id, a.id), caption: `${a.name} (${humanSize(a.size)})` })));
   return g;
 }
 const lightOpen = () => $('lightbox').open;
@@ -629,7 +760,7 @@ function messageNode(d, m) {
   const folded = quiet(d, m) && !farewell && !state.expanded.has(expandKey(d, m));
   const badge = m.author === 'agent' ? flagBadge(m.flag) : null;
   if (folded) {
-    const first = (m.redacted ? '🔒 Redacted' : firstPlainLine(m.text) || (m.images.length ? '[image]' : '')).slice(0, 160);
+    const first = (m.redacted ? '🔒 Redacted' : firstPlainLine(m.text) || (m.images.length ? '[image]' : m.attachments?.length ? '[file]' : '')).slice(0, 160);
     return el('article', { class: 'msg agent collapsed', 'data-mid': m.id, 'aria-label': `${who.name}, ${when(m.created_at)}, ${FLAG[m.flag][0]}` },
       avatar(m.author, false, m.agent_name), ...(badge ? [badge] : []), el('span', { class: 'peek', text: first }), el('time', { datetime: m.created_at, text: when(m.created_at) }),
       el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Show'));
@@ -650,6 +781,7 @@ function messageNode(d, m) {
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
   if (m.kind === 'secret_request' && m.secret) node.append(secretNode(d, m));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
+  appendFiles(node, d, m, who);
   const attached = attachedNode(d, m); if (attached) node.append(attached);
   return node;
 }
@@ -748,12 +880,13 @@ function asideMsgNode(d, m) {
   if (m.redacted) { node.append(el('p', { class: 'locked', text: lockedText(m) })); return node; }
   if (m.text) node.append(markdown(m.text));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
+  appendFiles(node, d, m, who);
   const attached = attachedNode(d, m); if (attached) node.append(attached);
   return node;
 }
 function asideNode(d, g) {
   const open = asideIsOpen(d, g), agent = state.profile.agent.name;
-  const first = (g.root.redacted ? '🔒 Redacted' : firstPlainLine(g.root.text) || (g.root.images.length ? '[image]' : '')).slice(0, 120);
+  const first = (g.root.redacted ? '🔒 Redacted' : firstPlainLine(g.root.text) || (g.root.images.length ? '[image]' : g.root.attachments?.length ? '[file]' : '')).slice(0, 120);
   const id = `aside-${g.root.id}`;
   const head = el('button', { type: 'button', class: 'aside-head', 'aria-expanded': String(open), 'aria-controls': id, onclick: () => toggleAside(d, g) },
     el('span', { class: 'chev', 'aria-hidden': 'true', text: '▾' }), el('strong', { text: 'Side question' }),
@@ -790,9 +923,10 @@ function queuedNode(d, e) {
   const quoted = e.reply_to ? quoteNode(d, { reply_to: e.reply_to }) : null; if (quoted) node.append(quoted);
   if (e.text) node.append(markdown(e.text));
   if (e.images.length) node.append(el('div', { class: 'imgs' }, ...e.images.map((src, i) => el('span', {}, el('img', { src, alt: `Picture ${i + 1}, waiting to send` })))));
+  if (e.files?.length) node.append(el('div', { class: 'files' }, ...e.files.map(f => el('div', { class: 'file-card' }, el('span', { class: 'fname', title: f.name, text: f.name }), el('span', { class: 'fmeta', text: `${humanSize(f.size)} · ${f.id ? 'uploaded' : 'waiting to upload'}` })))));
   if (sent) { node.classList.remove('queued'); return node; }
   if (failed) node.append(el('div', { class: 'qstate bad', role: 'note' }, el('span', { text: `Couldn't send: ${e.reason}` }), el('button', { type: 'button', onclick: () => outbox.retry(e.cid) }, 'Try again'), el('button', { type: 'button', onclick: () => outbox.remove(e.cid) }, 'Delete')));
-  else node.append(el('div', { class: 'qstate', 'data-state': e.sending ? 'sending' : 'waiting' }, clockIcon(), el('span', { text: e.sending ? 'Sending…' : e.attempts ? 'Waiting to send · will retry' : 'Waiting to send' }),
+  else node.append(el('div', { class: 'qstate', 'data-state': e.sending ? 'sending' : 'waiting' }, clockIcon(), el('span', { text: e.sending ? (e.progress && e.files?.some(f => !f.id) ? `Sending… files ${e.progress}%` : 'Sending…') : e.attempts ? 'Waiting to send · will retry' : 'Waiting to send' }),
     ...(e.sending ? [] : [el('button', { type: 'button', 'aria-label': 'Delete this message before it sends', onclick: () => outbox.remove(e.cid) }, 'Delete')])));
   return node;
 }
@@ -1217,8 +1351,8 @@ function route() {
   harvestDrafts(); // keep what was typed in the thread being left, under its own id
   for (const stale of document.querySelectorAll('.qother')) stale.remove(); // a redraw for the next thread must not read the old thread's boxes as its own
   const waitingBar = $('waiting-bar'); if (waitingBar) { waitingBar.dataset.key = ''; delete waitingBar.dataset.question; }
-  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); closeMenu(false);
-  $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
+  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; dropAll(state.files); state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); closeMenu(false);
+  $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); drawChips($('fchips'), state.files, redrawComposer); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
   if (id) loadThread(id);
@@ -1399,29 +1533,43 @@ async function send(event, forceAside = false) {
   const id = state.openId, parsed = parseBtw($('text').value), aside = forceAside || parsed.aside, text = aside ? parsed.text : $('text').value;
   if (state.busy || !id) return;
   if (state.detail?.merged_into) return;
-  if (aside && !text.trim() && !state.images.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
-  if (!text.trim() && !state.images.length) return;
+  if (aside && !text.trim() && !state.images.length && !state.files.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
+  if (!text.trim() && !state.images.length && !state.files.length) return;
   if (state.detail?.read_only) { showError($('error'), 'This thread is read-only, so nothing can be sent or queued.'); return; }
-  const cid = newCid(), written_at = new Date().toISOString(), reply_to = !aside && state.replyTo ? state.replyTo : undefined, images = [...state.images];
+  const cid = newCid(), written_at = new Date().toISOString(), reply_to = !aside && state.replyTo ? state.replyTo : undefined, images = [...state.images], files = [...state.files];
   state.busy = true; $('send').disabled = true; $('btw').disabled = true; showError($('error'), '');
-  const cleared = () => { if (id === state.openId) { if (!aside) state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); growText(); } };
+  const cleared = () => { if (id === state.openId) { if (!aside) state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); state.files.length = 0; drawChips($('fchips'), state.files, redrawComposer); growText(); } };
   const queue = async () => { // the composer is emptied first, so anything typed while it is stored is not wiped
     const before = $('text').value, replying = state.replyTo; cleared();
-    try { await outbox.add({ cid, thread: id, text, images, reply_to, aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.replyTo = replying; redrawComposer(); throw error; }
+    // A file still on its way is stopped (its upload id is kept, so the queue carries on from there); a file already on the server is named by its id.
+    for (const f of files) { f.controller?.abort(); }
+    const held = files.map(f => ({ name: f.name, size: f.size, type: f.type, blob: f.file, ...(f.id ? { id: f.id } : {}), ...(f.uploadId && !f.id ? { uploadId: f.uploadId } : {}) }));
+    try { await outbox.add({ cid, thread: id, text, images, files: held, reply_to, aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.files.push(...files); state.replyTo = replying; redrawComposer(); throw error; }
     drawReplyBar();
   };
   try {
     // With no signal, or messages already waiting (they go first, to keep the order), the message joins the outbox.
-    if (isOffline() || outbox.pending()) { await queue(); return; }
+    const offlineFiles = () => files.some(f => f.status !== 'done' && f.size > FILE_OFFLINE_MAX);
+    if (isOffline() || outbox.pending()) {
+      if (offlineFiles()) { showError($('error'), `A file over ${humanSize(FILE_OFFLINE_MAX)} needs a connection. Remove it, or send when you are online.`); return; }
+      await queue(); return;
+    }
+    if (files.length) { // the message names its files once they are all on the server
+      const ready = await ensureUploaded(files, redrawComposer);
+      if (!ready.ok) {
+        if (ready.network && !offlineFiles()) { await queue(); return; }
+        showError($('error'), ready.reason); return;
+      }
+    }
     try {
-      const sent = await post(`threads/${id}/messages`, { text, images, ...(aside ? { aside: true } : reply_to ? { reply_to } : {}), client_id: cid, written_at });
+      const sent = await post(`threads/${id}/messages`, { text, images, ...(files.length ? { attachments: files.map(f => f.id) } : {}), ...(aside ? { aside: true } : reply_to ? { reply_to } : {}), client_id: cid, written_at });
       if (sent?.forwarded_to) {
         cleared();
         showToast('Sent in the merged thread');
         location.hash = `#/${sent.forwarded_to}`;
         return;
       }
-    } catch (error) { if (error.network) { await queue(); return; } throw error; }
+    } catch (error) { if (error.network && !offlineFiles()) { await queue(); return; } throw error; }
     cleared();
     await Promise.all([loadThread(id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
@@ -1432,7 +1580,7 @@ async function send(event, forceAside = false) {
     if (!merged) $('text').focus();
   }
 }
-const redrawComposer = () => drawPreviews($('previews'), state.images, redrawComposer);
+const redrawComposer = () => { drawPreviews($('previews'), state.images, redrawComposer); drawChips($('fchips'), state.files, redrawComposer); };
 async function toggleDone() {
   const d = state.detail; if (!d) return;
   try { await post(`threads/${d.id}/status`, { status: d.status === 'done' ? 'open' : 'done' }); await Promise.all([loadThread(d.id), refreshList()]); }
@@ -1533,13 +1681,17 @@ function fitViewport() {
 }
 
 // ---- New thread dialog
-const redrawNew = () => drawPreviews($('new-previews'), state.newImages, redrawNew);
+const redrawNew = () => { drawPreviews($('new-previews'), state.newImages, redrawNew); drawChips($('new-fchips'), state.newFiles, redrawNew); };
 async function startThread(event) {
   event.preventDefault();
   showError($('new-error'), '');
   try {
-    const { id } = await post('threads', { title: $('new-title').value, text: $('new-text').value, images: state.newImages });
-    $('new-dialog').close(); $('new-form').reset(); state.newImages.length = 0; redrawNew();
+    if (state.newFiles.length) {
+      const ready = await ensureUploaded(state.newFiles, redrawNew);
+      if (!ready.ok) { showError($('new-error'), ready.network ? 'Starting a thread with files needs a connection.' : ready.reason); return; }
+    }
+    const { id } = await post('threads', { title: $('new-title').value, text: $('new-text').value, images: state.newImages, ...(state.newFiles.length ? { attachments: state.newFiles.map(f => f.id) } : {}) });
+    $('new-dialog').close(); $('new-form').reset(); state.newImages.length = 0; state.newFiles.length = 0; redrawNew();
     await refreshList(); location.hash = `#/${id}`;
   } catch (error) { showError($('new-error'), error.message); }
 }
@@ -1615,9 +1767,12 @@ $('msgs').addEventListener('touchstart', swipeStart, { passive: true });
 $('msgs').addEventListener('touchmove', swipeMove, { passive: true });
 $('msgs').addEventListener('touchend', swipeEnd);
 $('msgs').addEventListener('touchcancel', () => { if (swipe.node) { swipe.node.classList.remove('swiping'); swipe.node.style.transform = ''; swipe.node = null; } });
-$('text').addEventListener('paste', e => { const files = pastedImages(e); if (files.length) { e.preventDefault(); addImages(state.images, files, $('error'), redrawComposer); } });
+$('text').addEventListener('paste', e => { const pics = pastedImages(e), others = pastedFiles(e); if (pics.length || others.length) { e.preventDefault(); if (pics.length) addImages(state.images, pics, $('error'), redrawComposer); if (others.length) addFiles(state.files, others, $('error'), redrawComposer); } });
 $('attach').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', e => { addImages(state.images, [...e.target.files], $('error'), redrawComposer); e.target.value = ''; });
+$('attach-file').addEventListener('click', () => $('file-any').click());
+$('file-any').addEventListener('change', e => { addFiles(state.files, [...e.target.files], $('error'), redrawComposer); e.target.value = ''; });
+dragHooks($('thread-main'), 'thread', () => !!state.openId && !state.detail?.read_only);
 $('toggle-done').addEventListener('click', toggleDone);
 $('pin-thread').addEventListener('click', () => { if (state.openId) togglePin('thread', state.openId); });
 $('merge-open').addEventListener('click', openMerge);
@@ -1658,9 +1813,12 @@ $('new-thread').addEventListener('click', openNew);
 $('new-cancel').addEventListener('click', () => $('new-dialog').close());
 $('new-form').addEventListener('submit', startThread);
 $('new-text').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('new-form').requestSubmit(); } });
-$('new-text').addEventListener('paste', e => { const files = pastedImages(e); if (files.length) { e.preventDefault(); addImages(state.newImages, files, $('new-error'), redrawNew); } });
+$('new-text').addEventListener('paste', e => { const pics = pastedImages(e), others = pastedFiles(e); if (pics.length || others.length) { e.preventDefault(); if (pics.length) addImages(state.newImages, pics, $('new-error'), redrawNew); if (others.length) addFiles(state.newFiles, others, $('new-error'), redrawNew); } });
 $('new-attach').addEventListener('click', () => $('new-file').click());
 $('new-file').addEventListener('change', e => { addImages(state.newImages, [...e.target.files], $('new-error'), redrawNew); e.target.value = ''; });
+$('new-attach-file').addEventListener('click', () => $('new-file-any').click());
+$('new-file-any').addEventListener('change', e => { addFiles(state.newFiles, [...e.target.files], $('new-error'), redrawNew); e.target.value = ''; });
+dragHooks($('new-dialog'), 'new');
 for (const b of document.querySelectorAll('[data-filter]')) b.addEventListener('click', () => { state.filter = b.dataset.filter; state.view = null; state.q = ''; $('search').value = ''; refreshList(); });
 for (const [id, v] of [['view-agent', 'agent'], ['view-you', 'you']]) $(id).addEventListener('click', () => { state.view = state.view === v ? null : v; drawList(); });
 let searchTimer;

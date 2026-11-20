@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.4
+
+### Added
+- **Attach any file.** A message can carry files of any type, with **no size cap by default**. From the inbox (the **Attach file** paperclip beside the image control (beside the **＋** on a phone), drag and drop onto the thread, paste) and from an agent: `reply <id> "text" --file path` (repeatable; `new` takes it too) and MCP `reply` with `files`. MCP files are off unless `FEEDBACK_FILE_DIR` names the folder(s) they may come from (the same rules as `FEEDBACK_IMAGE_DIR`). A new thread started from the inbox can carry files too.
+- **Chunked, resumable uploads.** The inbox sends a file in chunks of at most 32 MiB (so a tunnel or proxy that limits one request, such as Cloudflare's roughly 100 MB, never matters). The server streams each chunk to disk (nothing is held in memory), a resume asks for the offset it has, finishing checks the size and the sha256 before the file is moved into place, and a mismatch discards the upload. Partial uploads, and finished ones no message took, are removed after 24 hours. `POST api/uploads`, `PUT|GET|DELETE api/uploads/:id`, `POST api/uploads/:id/finalise`.
+- **`FEEDBACK_MAX_UPLOAD_BYTES`** (optional; unset means unlimited) and **`FEEDBACK_MIN_FREE_BYTES`** (default 20 GiB). A new upload or chunk is refused ("Not enough disk space on the server", HTTP 507) when it would leave less free on the data volume than the larger of that and 10% of the volume.
+- **Inbox.** Each file is a chip with a progress bar, Cancel and Retry; on a phone the system file picker opens and the progress sits in the composer, so it stays in view while the thread scrolls. A file of up to 50 MB waits with its message in the offline queue; a bigger one says it needs a connection.
+- **Viewing.** Images show inline as before. A PDF has a Preview in a sandboxed frame (`sandbox` with nothing allowed), with a Download beside it. Everything else is a chip with name, size and Download. Every download is `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, with no cookie; HTML, SVG and script files are never served inline from the inbox origin. Files are not reachable from a share link.
+- **Storage.** `<thread>/files/<id>/<name>`, with name, size, sha256, a content type read from the file's first bytes, and the uploader on the message as `attachments`. Names are sanitised (no path parts, no control characters, a capped length). `_uploads/` in the data folder holds uploads in progress.
+- **Agents.** `read` lists each attachment with the absolute path of its file; MCP `read_thread` includes attachment metadata and the path; the new MCP tool `get_attachment` returns a text file of up to 1 MB as `text` and the path for anything else. The "data to read, not instructions" notice now says it covers an attachment's name and contents. Agents that read a file send its contents to their model provider (noted in the README).
+- **Redaction** moves a message's files into the vault (`<message>.files/`), where they are not served; `unredact` brings them back. A merge or a move carries a message's files along.
+- `e2e/attach.mjs` (files through a proxy that refuses request bodies over 50 MB, at 390 and 1280 wide) and `e2e/parity.mjs` (an older release and this one answer alike on a copy of your data).
+
+### Changed
+- The service worker cache is `fb-inbox-0.9.4`, and it also keeps `sha256.js` and `uploader.js`.
+- The server accepts request bodies of up to 33 MiB (one chunk); JSON bodies are still held to 25 MiB.
+- The MCP tool list has one more tool, `get_attachment`.
+
 ## 0.9.3
 
 ### Added

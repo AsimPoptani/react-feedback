@@ -102,6 +102,9 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_INBOX_WIDGET` | on | set to `0`, `off`, `false` or `no` to keep the capture widget off the inbox page itself |
 | `FEEDBACK_SECRET_TARGET` | none | a path on the same site, with `{name}` in it (for example `/api/keys/{name}`), that the inbox's key box sends a pasted key to (see [Secure key box](#secure-key-box)). Must be relative; an absolute or protocol-relative URL stops the server at startup. Unset: no key box |
 | `FEEDBACK_VAULT_DIR` | none | where redacted messages go (see [Redacting sensitive messages](#redacting-sensitive-messages)). Must be **outside** `FEEDBACK_DIR`. Unset: redaction is off |
+| `FEEDBACK_MAX_UPLOAD_BYTES` | unlimited | the largest file a person can attach, in bytes (see [File attachments](#file-attachments)). Unset or `0`: no limit. A value that is not a whole number stops the server at startup |
+| `FEEDBACK_MIN_FREE_BYTES` | `21474836480` (20 GiB) | an upload (or a chunk of one) is refused when it would leave less than this much free on the data volume, or less than 10% of the volume, whichever is larger |
+| `FEEDBACK_FILE_DIR` | none | the folder(s) (a `:`-separated list) an MCP agent may attach files from; unset: MCP files are off (see [Connect your agents](#connect-your-agents-mcp)) |
 | `FEEDBACK_PROJECTS` | none | a JSON list of `{id, name, dir}` when one server hosts several projects (see [Projects](#projects)). Unset: one project, `FEEDBACK_DIR`, and `?project=` is ignored |
 | `FEEDBACK_PROJECT` | the first project | which project the CLI and `react-feedback mcp` use. `--project <id>` overrides it |
 
@@ -128,9 +131,11 @@ The widget talks to the same origin as your app, so forward `/__feedback` unchan
 location /__feedback/ {
   proxy_pass http://127.0.0.1:8099;
   proxy_set_header Host $host;
-  client_max_body_size 30m;   # screenshots are sent as data URLs, up to 25 MiB
+  client_max_body_size 40m;   # screenshots are sent as data URLs, up to 25 MiB; a file chunk is at most 32 MiB
 }
 ```
+
+Files are uploaded in chunks of at most 32 MiB, so a proxy only ever needs to allow a request body of about 33 MiB, however large the file is. That matters for a tunnel with a per-request cap (Cloudflare's is about 100 MB on most plans) or a proxy with a small default (nginx's is 1 MB without `client_max_body_size`): nothing else needs raising, and `proxy_request_buffering off;` keeps nginx from holding each chunk in memory.
 
 With Vite in development:
 
@@ -153,6 +158,7 @@ feedback-data/
     context.png     the viewport with the target outlined (not for full page)
     thread.jsonl    the conversation, one JSON message per line, append-only
     msg-<n>.<ext>   images attached to messages (png, jpg, webp)
+    files/<id>/<name>  files of any type attached to messages (the name is a sanitised label; the id is generated)
     read.json       when the user last opened the thread
     agent-read.json when the agent last read it
     checklist.json  the thread's checklist, written atomically
@@ -161,6 +167,7 @@ feedback-data/
   _events.jsonl     one line per user message or new thread: watch it to know when to look
   _profile/         names, avatars and pins.json
   _artifacts/       published pages: <id>/meta.json and <id>/v<n>/{body.html, source.md|source.html, meta.json}
+  _uploads/         uploads in progress, and finished ones no message has taken yet (removed after 24 hours)
   _shares.json      share links, with the sha256 of each token (the token itself is not stored)
 ```
 
@@ -251,12 +258,13 @@ react-feedback --help                                           # print the usag
 react-feedback --version                                        # print the version
 react-feedback list [--waiting]                                 # threads waiting for the agent
 react-feedback reply <id> "text" [--image a.png --image b.jpg] [--to <message-id>]   # --to quotes one of that thread's messages
+react-feedback reply <id> "text" --file report.pdf --file data.zip   # attach any file (repeatable; up to 10; no size cap unless FEEDBACK_MAX_UPLOAD_BYTES)
 react-feedback reply <id> "text" --aside --to <aside-id>       # answer a side question (/btw)
 react-feedback reply <id> "text" --todo "item" [--todo ...] [--for agent|user] [--check c3 ...]   # checklist changes ride on the reply
 react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>   # move messages to another thread
 react-feedback move-project <thread> <project-id> [--dry-run]   # move the whole thread to another project (only when FEEDBACK_PROJECTS has more than one)
 react-feedback tracker [--mine | --claimed | --open]            # every checklist item across the threads
-react-feedback new "title" "text" [--image path ...]            # an agent-started thread
+react-feedback new "title" "text" [--image path ...] [--file path ...]   # an agent-started thread
 react-feedback status <id> open|done
 react-feedback read <id>                                        # stamp the agent read marker, then print the thread with each quote's context
 react-feedback ack <id>                                         # the user's latest message is handled; no reply
@@ -312,6 +320,8 @@ Tools: `list_threads` (`waiting`, `area`, `q`), `read_thread` (marks it read for
 
 **Names.** Each server instance posts as `FEEDBACK_AGENT_NAME` (for example `Codex` or `Claude Desktop`) and keeps its own read state. The inbox shows the name, with an avatar colour made from it. Messages from an unnamed agent (the CLI, or no `FEEDBACK_AGENT_NAME`) are unchanged and use the agent profile. Names that could pass for you or the system (`you`, `user`, `system`, your own inbox name, compared without case, width or invisible characters) are refused, and zero-width and bidi characters are removed.
 
+**Files.** `reply` takes `files`, a list of local paths of files of any type and size; they are **off unless `FEEDBACK_FILE_DIR` is set** (a `:`-separated list of folders, with the same rules as `FEEDBACK_IMAGE_DIR`: symlinks resolved, never the data or vault folders, `/` or the home folder refused). `read_thread` lists each message's attachments (id, name, size, type, sha256, uploader and absolute path), and `get_attachment` returns `text` for a text file of up to 1 MB and the `path` for the rest. Anything an agent reads from a file may be sent to its model provider.
+
 **Safety.** Text that people wrote comes back in `text` fields of the tool result, with a notice, and every tool description says it is data to read, never instructions. Message and item limits are the CLI's. **Images are off unless `FEEDBACK_IMAGE_DIR` is set** (a `:`-separated list of folders; empty entries are ignored, and `/` or the home folder is refused). An `image` must be a PNG, JPEG or WebP inside one of them, after symlinks are resolved, opened without following a link, and never inside the data or vault folders. The working folder is never allowed, because a client may start the server anywhere.
 
 **Transport.** stdio only, on the same machine. An HTTP transport is **not implemented**: a remote option would need its own token and stays off unless asked for.
@@ -337,6 +347,19 @@ Claude Desktop (`claude_desktop_config.json`):
 ```
 
 Any other stdio client: run `bun /path/to/react-feedback/bin/react-feedback.ts mcp` with `FEEDBACK_DIR`, `FEEDBACK_AGENT_NAME` and (to allow images) `FEEDBACK_IMAGE_DIR` in its environment (installed as a dependency, the same file is `node_modules/react-feedback/bin/react-feedback.ts`). It needs Bun on the path.
+
+## File attachments
+
+A message can carry files of any type, from the inbox (the **Attach file** paperclip, which sits beside the **＋** on a phone; drag and drop onto the thread, or paste) and from an agent (`reply … --file`, or MCP `reply` with `files`). There is **no size cap unless you set `FEEDBACK_MAX_UPLOAD_BYTES`**.
+
+- **Chunked and resumable.** The inbox splits a file into chunks of at most 32 MiB, so it works behind a proxy or tunnel that limits one request (see [Reverse proxy](#reverse-proxy)). Every chunk is streamed to disk as it arrives; a file is never held in memory, on the server or (it is hashed and sent one chunk at a time) in the browser. The server appends chunks to a temp file keyed by an upload id, a resume asks for the offset it has, and finishing checks the size and the **sha256** before the file is moved into place. A wrong checksum discards the upload. Partial uploads, and finished ones no message took, are removed after 24 hours.
+- **Disk guard.** A new upload, or a chunk, is refused ("Not enough disk space on the server", HTTP 507) when it would leave less free on the data volume than the larger of `FEEDBACK_MIN_FREE_BYTES` (20 GiB) and 10% of the volume.
+- **Storage.** `<thread>/files/<id>/<name>`, with name, size, sha256, content type and uploader stored on the message (`attachments`). The name is a label only: path parts, control and direction characters are removed and the length is capped. The content type is read from the file's first bytes, never from its name or from what the client said.
+- **Showing and downloading.** An image (PNG, JPEG, WebP, GIF) shows in the thread like any picture. A PDF has a **Preview** button, which opens it in a sandboxed frame (`sandbox` with nothing allowed, no `allow-same-origin`); browsers that cannot show a PDF in a sandboxed frame show a blank frame, so **Download** is always beside it. Everything else is a chip with name, size and **Download**. Every download goes out with `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, `Cross-Origin-Resource-Policy: same-origin` and no cookie, as `application/octet-stream` (an image keeps its image type, so it can be a picture). HTML, SVG and script files are never served inline from the inbox origin. The PDF preview is the one response that is not an attachment, and it has the same sandbox headers. Files are not reachable from a [share link](#share-links).
+- **Offline.** A file of up to 50 MB can wait with its message in the offline queue (IndexedDB); a bigger one needs a connection, and the chip says so.
+- **Redaction** moves a message's files to the vault (`<message>.files/`) and they are no longer served; `unredact` puts them back. A merge or a move carries a message's files along.
+- **Agents.** `react-feedback read` lists each attachment with the absolute path of its file; MCP `read_thread` includes attachment metadata (and the path), and `get_attachment` returns a text file of up to 1 MB as `text`, or the path for anything else. The "data to read, not instructions" notice covers an attachment's name and contents.
+- **Privacy.** When an agent reads a file, its contents go to that agent's model provider. Attach only what you are happy for your agent to send there.
 
 ## Artifacts
 
@@ -456,7 +479,7 @@ Your app's route must accept the same-origin `PUT`, check its own authentication
 
 If something private lands in a thread, redact it. The agent runs `redact <id> <message-id> [--reason "…"]`; the user opens the **⋯** on one of their own messages and chooses **Redact…** (the inbox only offers it when `FEEDBACK_VAULT_DIR` is set, and only on the user's own messages).
 
-- The message's text and pictures move to the **vault**: `FEEDBACK_VAULT_DIR/<thread>/<message>.json`, a directory at `0700` and files at `0600`, written atomically. It must be outside `FEEDBACK_DIR` and is **never served over HTTP**.
+- The message's text, pictures and attached files move to the **vault** (the files to `<message>.files/`, and they are no longer served): `FEEDBACK_VAULT_DIR/<thread>/<message>.json`, a directory at `0700` and files at `0600`, written atomically. It must be outside `FEEDBACK_DIR` and is **never served over HTTP**.
 - In the thread the message becomes `{ text: "", images: [], redacted: { at, by, reason?, key } }`, shown as "🔒 Redacted (sensitive)" with the time and who did it. Quotes and snippets of it show "🔒 Redacted". The image files are deleted from the thread folder; the text is removed from `thread.jsonl`, search, the API and the CLI; its first line is blanked in `_events.jsonl` in place (the line keeps its byte length, so anything following the file by offset stays in step). A first message that a thread repeats in `item.json` and `feedback.md` is blanked there too, and the copy a merge made in the other thread is redacted with it.
 - A question's prompt and option labels are hidden the same way.
 - **Restore** is CLI only: `unredact <id> <message-id>` reads the vault back (pictures return under new numbers) and removes the vault file. The inbox has no restore.
@@ -466,18 +489,18 @@ If something private lands in a thread, redact it. The agent runs `redact <id> <
 
 The inbox registers a small service worker (`sw.js`, scoped to the inbox path) that saves the page, its scripts, the thread list and each thread you opened. With no signal the inbox still opens and shows what you last saw, with an "Offline · showing what you last saw" banner. (Service workers need https or localhost.)
 
-- Sending while offline, or when a send fails on the network, stores the message (text, pictures, `/btw` side questions and quote-replies) in an **IndexedDB outbox** and shows it in the thread with a clock and "Waiting to send". You can delete it before it sends.
+- Sending while offline, or when a send fails on the network, stores the message (text, pictures, files of up to 50 MB, `/btw` side questions and quote-replies) in an **IndexedDB outbox** and shows it in the thread with a clock and "Waiting to send". You can delete it before it sends.
 - When the connection returns (the `online` event, or a retry with backoff) queued messages go out **in order**, one at a time; a failed one holds the ones behind it. Each carries a `client_id`, and the server stores a message with a given `client_id` once however often it arrives (a repeat answers 200 with the stored message). A message the server refuses (a thread that became read-only, say) is marked "Couldn't send" with Try again and Delete.
 - The message keeps the time you wrote it as `written_at`, shown in the thread. `created_at` stays the time it arrived, so read ticks and acknowledgements stay right; a bad `written_at` (in the future, over 30 days old) is ignored.
 - Read-only threads refuse to queue anything. Secret key entry is never queued. Nothing but ordinary messages is stored, and no pictures or secrets are cached by the service worker; a browser without IndexedDB keeps the queue in memory and says so. The saved copy of a thread is replaced the next time you are online and open it, so a message redacted since then disappears from it too.
 
 ## Phone layout
 
-At 760 px and narrower the thread view is one slim header (← title, the checklist donut, **⋯** with Pin, Merge into…, Move to project… when there is more than one project, Mark done or Reopen, the version, and the read-only note), and a one-line composer: **＋** (Attach image, Side question), an auto-growing text box (about five lines at most) and a send arrow. Enter adds a new line; Send is the button. Keyboard hints are hidden on touch screens (`(hover: none) and (pointer: coarse)`), the Feedback launcher hides while the composer has focus, and the page follows `visualViewport` so an open keyboard leaves the message list the remaining height, scrolled to the newest message. Wide screens keep the old layout.
+At 760 px and narrower the thread view is one slim header (← title, the checklist donut, **⋯** with Pin, Merge into…, Move to project… when there is more than one project, Mark done or Reopen, the version, and the read-only note), and a one-line composer: **＋** (Attach image, Side question), a paperclip (Attach file), an auto-growing text box (about five lines at most) and a send arrow. Enter adds a new line; Send is the button. Keyboard hints are hidden on touch screens (`(hover: none) and (pointer: coarse)`), the Feedback launcher hides while the composer has focus, and the page follows `visualViewport` so an open keyboard leaves the message list the remaining height, scrolled to the newest message. Wide screens keep the old layout.
 
 ## HTTP API
 
-All under `/__feedback/`. With `FEEDBACK_PROJECTS` set, add `?project=<id>` (omit it for the first project). `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id` (includes `artifacts`), `POST api/threads/:id/messages|status|read|answer|merge|move-project` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400; `move-project` takes `{project}` and answers `{moved, id, project, from}`, and needs more than one project); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`; `GET api/projects` (`[{id, name, unread}]`, never a directory); `GET api/artifacts` and `GET api/artifacts/:id`; `POST api/artifacts/:id/share` (`{expires: "1d"|"7d"|"30d"|"none", latest?, confirm?}`); `GET api/shares`; `POST api/shares/:id/revoke`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only). `GET /__feedback/a/:id/v:n` is the sandboxed page. `GET /__feedback/s/:token` is a share link. `POST api/threads/:id/read` requires `Content-Type: application/json`, the same as the other writes.
+All under `/__feedback/`. With `FEEDBACK_PROJECTS` set, add `?project=<id>` (omit it for the first project). `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id` (includes `artifacts`), `POST api/threads/:id/messages|status|read|answer|merge|move-project` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400; `move-project` takes `{project}` and answers `{moved, id, project, from}`, and needs more than one project); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`; `GET api/projects` (`[{id, name, unread}]`, never a directory); `GET api/artifacts` and `GET api/artifacts/:id`; `POST api/artifacts/:id/share` (`{expires: "1d"|"7d"|"30d"|"none", latest?, confirm?}`); `GET api/shares`; `POST api/shares/:id/revoke`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only). `GET /__feedback/a/:id/v:n` is the sandboxed page. `GET /__feedback/s/:token` is a share link. `POST api/threads/:id/read` requires `Content-Type: application/json`, the same as the other writes. Files: `POST api/uploads` (`{name, size}`, answers `{id, offset, chunk}`), `PUT api/uploads/:id?offset=N` (a chunk of at most 32 MiB as `application/octet-stream`; `offset` must be what the server has, else 409), `GET api/uploads/:id` (`{offset, size, state}`, for a resume), `POST api/uploads/:id/finalise` (`{sha256}`), `DELETE api/uploads/:id`; a message or a new thread names finished uploads in `attachments: [id, ...]`; `GET api/threads/:id/attachments/:attachment` downloads one (`?inline=1` for a PDF preview).
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
@@ -498,6 +521,8 @@ bun e2e/rf8.mjs     # optional browser test: reminders only in the sheet, last s
 bun e2e/rf9.mjs     # optional browser test: version footer and the update banner (same needs)
 bun e2e/v09.mjs     # optional browser test: artifacts, share links, the sandbox, projects and pinned questions (same needs)
 bun e2e/rf093.mjs   # optional browser test: a withdrawn or re-asked question keeps the answer being typed (same needs)
+bun e2e/attach.mjs  # optional browser test: files in chunks through a proxy that refuses over 50 MB, progress, cancel, retry, PDF and zip chips, offline queue (same needs)
+bun e2e/parity.mjs <older-source-tree> <data-folder>   # an older release and this one must say the same about a copy of your data
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

@@ -6,6 +6,7 @@ import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, writeFile 
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as store from './store';
+import { filesFromVault, filesToVault } from './files';
 import { readStored, serialise } from './reminders';
 import { Invalid, ID, MAX_HINT, type Author, type Message, type Redaction } from './store';
 
@@ -188,11 +189,12 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
     for (const name of m.images) { try { images.push({ name, data: (await readFile(join(path, name))).toString('base64') }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
     const note = typeof item.note === 'string' && item.note === m.text && m.text !== '' ? item.note : undefined;
     await writeVault(vault, key, { thread: id, message: m, images, reason, by, at: new Date().toISOString(), ...(note !== undefined ? { item_note: note } : {}) });
+    if (m.attachments?.length) await filesToVault(path, vault, key, m.attachments); // the files leave the thread: they are not served from the inbox again
     const redacted: Redaction = { at: new Date().toISOString(), by, key, ...(reason ? { reason: reason.slice(0, 200) } : {}) };
     const blank: Message = { ...m, text: '', images: [], redacted };
     if (m.question) blank.question = { ...m.question, prompt: REDACTED, options: m.question.options.map(o => ({ id: o.id, label: REDACTED })) };
     if (m.answer?.other_text) blank.answer = { ...m.answer, other_text: REDACTED };
-    delete blank.secret; delete blank.kind;
+    delete blank.secret; delete blank.kind; delete blank.attachments;
     await store.writeAtomic(join(path, 'thread.jsonl'), stored.map(x => `${JSON.stringify(x === m ? blank : x)}\n`).join(''));
     for (const name of m.images) await rm(join(path, name), { force: true });
     let oldTitle: string | undefined;
@@ -310,6 +312,7 @@ export async function unredactMessage(dir: string, id: string, msgId: string, va
     const names = await store.saveImages(path, saved.images.map(i => ({ bytes: Buffer.from(i.data, 'base64'), ext: i.name.slice(i.name.lastIndexOf('.') + 1) as store.Extension })));
     const back: Message = { ...m, text: saved.message.text, images: names };
     delete back.redacted;
+    if (saved.message.attachments?.length) { await filesFromVault(path, vault, m.redacted.key, saved.message.attachments); back.attachments = saved.message.attachments; }
     if (saved.message.question && m.question) back.question = { ...saved.message.question, id: m.question.id };
     if (saved.message.answer && m.answer) back.answer = { ...saved.message.answer, question_id: m.answer.question_id };
     if (saved.message.secret) { back.kind = 'secret_request'; back.secret = saved.message.secret; }
