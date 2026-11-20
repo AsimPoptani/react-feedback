@@ -802,7 +802,7 @@ function secretNode(d, m) {
   let s = state.secrets.get(key);
   if (!s) {
     const input = el('input', { type: 'password', id: `secret-${d.id}-${m.id}`, autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', 'aria-label': m.secret.label, placeholder: 'Paste it here', 'data-lpignore': 'true', 'data-1p-ignore': 'true', 'data-bwignore': 'true' });
-    s = { box: el('div', { class: 'secret', 'data-secret': m.secret.name }), input, error: '', busy: false };
+    s = { box: el('div', { class: 'secret', 'data-secret': m.secret.name, 'data-rf-private': '' }), input, error: '', busy: false };
     state.secrets.set(key, s);
   }
   paintSecret(s, d, m, key);
@@ -2209,7 +2209,7 @@ function drawMySessions() {
   redraw.reload = () => loadMySessions();
   host.replaceChildren(...rows.map(r => sessionRow(r, { artifact: null, onDelete: redraw })));
 }
-// Recording the inbox itself: off until switched on in the profile. Inputs are masked, and the page shows "Recording" while it runs.
+// Recording the inbox itself: off until switched on in the profile. All text and inputs are masked (inbox mode), and the page shows "Recording" while it runs.
 function loadRecorder() {
   return new Promise((resolve, reject) => {
     if (window.RFRecorder) { resolve(window.RFRecorder); return; }
@@ -2238,7 +2238,7 @@ async function startRecording() {
   try { recorder = await loadRecorder(); } catch { return; }
   if (state.recorder || !state.recordInbox) return;
   const r = { session: newSessionId(), seq: 0, buf: [], sending: false, stopped: false, stop: null, timer: null, query: projectQuery() };
-  r.stop = recorder.start({ emit: event => { r.buf.push(event); if (r.buf.length >= 400) void flushRecording(r); } });
+  r.stop = recorder.start({ inbox: true, emit: event => { r.buf.push(event); if (r.buf.length >= 400) void flushRecording(r); } });
   r.timer = setInterval(() => { void flushRecording(r); }, 5000);
   state.recorder = r;
   $('rec-dot').hidden = false;

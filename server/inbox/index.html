@@ -747,7 +747,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <label><input type="checkbox" id="share-record"> Record interactions</label>
     <p class="hint" style="margin:0">Off by default. When on, anyone with the link is told the page records clicks and mouse movement, and can choose not to be recorded. Inputs are masked.</p>
     <p class="error" id="share-error" role="alert" hidden></p>
-    <p id="share-url" hidden></p>
+    <p id="share-url" data-rf-private hidden></p>
     <div class="bar"><button type="button" id="share-cancel">Close</button><button type="submit" class="primary" id="share-create">Create link</button><button type="button" id="share-copy" hidden>Copy</button></div>
   </form>
 </dialog>
@@ -762,7 +762,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
   <div id="manage-list"></div>
   <div class="bar"><span class="grow"></span><button type="button" id="manage-close">Close</button></div>
 </dialog>
-<dialog id="redact-dialog" aria-labelledby="redact-h">
+<dialog id="redact-dialog" data-rf-private aria-labelledby="redact-h">
   <h2 id="redact-h">Redact this message?</h2>
   <p>Its text and pictures move to a private vault on the server and are removed from this thread. You will see "Redacted (sensitive)" instead. You cannot bring it back from here.</p>
   <p class="error" id="redact-error" role="alert" hidden></p>
@@ -803,7 +803,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <div class="bar"><span class="grow"></span><button type="button" id="profile-cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
   </form>
 </dialog>
-<dialog id="replay-dialog" class="replay" aria-labelledby="replay-h">
+<dialog id="replay-dialog" data-rf-private class="replay" aria-labelledby="replay-h">
   <h2 id="replay-h">Replay</h2>
   <p class="hint" id="replay-meta"></p>
   <iframe id="replay-frame" title="Session replay" referrerpolicy="no-referrer"></iframe>

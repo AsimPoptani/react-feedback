@@ -1,12 +1,14 @@
 // Browser test for 0.10: feedback on a shared page, session replay (opt-in per link, notice and opt-out), the Replays tab, the heatmap, and the inbox recording itself.
 // Needs Playwright (PLAYWRIGHT=/path/to/playwright/index.mjs). Run: bun e2e/rf0100.mjs   (SHOTS=/some/dir also saves screenshots)
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { gunzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const root = await mkdtemp(join(tmpdir(), 'rf0100-e2e-'));
 const data = join(root, 'data');
 process.env.FEEDBACK_DIR = data;
+process.env.FEEDBACK_VAULT_DIR = join(root, 'vault'); // redaction needs a vault (the inbox privacy check redacts a message)
 delete process.env.FEEDBACK_PROJECTS;
 delete process.env.FEEDBACK_PROJECT;
 const SHOTS = process.env.SHOTS ?? join(root, 'shots');
@@ -254,7 +256,87 @@ async function inboxRecording(width, tap) {
   await context.close();
 }
 
+// Review fix: the owner's inbox recording keeps no text. A key-like message, a share link and a redaction leave no key and no token in _replays/_inbox.
+async function inboxPrivacy(width, tap) {
+  const KEY = `sk-live-${width}-9f8e7d6c5b4a39281706`;
+  const { id: t2 } = await store.createThread(data, { title: 'Privacy walk', text: 'Here is the thing.', origin: 'agent' });
+  await store.appendMessage(data, t2, { author: 'user', text: `Use ${KEY} for the build` });
+  await post('replay-settings', { record_inbox: false });
+  const context = await browser.newContext({ viewport: { width, height: width < 600 ? 844 : 800 }, hasTouch: tap, isMobile: tap });
+  const page = await context.newPage();
+  const act = tap ? 'tap' : 'click';
+  await page.goto(`${origin}/__feedback/inbox/#/`);
+  await page.waitForSelector('#me');
+  await page.locator('#me')[act]();
+  await page.waitForSelector('#profile-dialog[open]');
+  await page.locator('#profile-record').check();
+  await page.locator('#profile-form button.primary')[act]();
+  await page.waitForSelector('#rec-dot:not([hidden])');
+  await page.goto(`${origin}/__feedback/inbox/#/${t2}`);
+  await page.getByText(KEY).first().waitFor();
+  check(`${width}: the key-like message is on screen while recording`, true);
+  await page.goto(`${origin}/__feedback/inbox/#/artifact/${art.id}`);
+  await page.waitForSelector('#artifact-frame');
+  await page.locator('#artifact-share')[act]();
+  await page.waitForSelector('#share-dialog[open]');
+  await page.locator('#share-create')[act]();
+  await page.waitForSelector('#share-url:not([hidden])');
+  const token = (await page.locator('#share-url').innerText()).split('/').pop().trim();
+  check(`${width}: a share link was made (token ${token.length} characters)`, token.length >= 40);
+  await page.locator('#share-cancel')[act]();
+  await page.goto(`${origin}/__feedback/inbox/#/${t2}`);
+  await page.getByText(KEY).first().waitFor();
+  await page.locator('.msg-more').first()[act]();
+  await page.getByRole('menuitem', { name: /Redact/ }).first()[act]();
+  await page.waitForSelector('#redact-dialog[open]');
+  await page.locator('#redact-go')[act]();
+  await page.waitForSelector('#redact-dialog:not([open])', { state: 'attached' });
+  check(`${width}: the message was redacted`, (await page.getByText(KEY).count()) === 0);
+  await page.mouse.move(120, 220); await page.mouse.move(220, 320, { steps: 4 });
+  await page.waitForTimeout(5600); // one upload tick (the inbox sends every 5 s)
+  await page.evaluate(() => { location.hash = '#/'; });
+  await page.waitForSelector('#me', { state: 'visible' });
+  await page.locator('#me')[act]();
+  await page.waitForSelector('#profile-dialog[open]');
+  await page.locator('#profile-record').uncheck();
+  await page.locator('#profile-form button.primary')[act]();
+  await page.waitForSelector('#rec-dot', { state: 'hidden' });
+  await page.waitForTimeout(1500); // the last chunk goes out when recording stops
+  const folder = join(data, '_replays', '_inbox');
+  const files = await readdir(folder);
+  let all = '';
+  for (const name of files) all += name.endsWith('.gz') ? gunzipSync(await readFile(join(folder, name))).toString('utf8') : await readFile(join(folder, name), 'utf8');
+  check(`${width}: inbox sessions were stored (${files.length} files)`, files.some(n => n.endsWith('.gz')) && all.length > 1000);
+  check(`${width}: no key text anywhere in _replays/_inbox`, !all.includes(KEY) && !all.includes('sk-live'));
+  check(`${width}: no share token anywhere in _replays/_inbox`, !all.includes(token));
+  check(`${width}: clicks and layout are still recorded`, /"source":2/.test(all) && /"tagName":"div"/.test(all));
+  await context.close();
+}
+
+// Review fix: the recorder masks contenteditable text in both modes, and every text in inbox mode.
+async function recorderModes() {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(`${origin}/__feedback/healthz`);
+  await page.addScriptTag({ url: `${origin}/__feedback/replay/recorder.js` });
+  const run = mode => page.evaluate(async inbox => {
+    document.body.innerHTML = '<main><p>Ordinary visible words</p><div contenteditable="true">Typed words here</div><p data-rf-private>Blocked words here</p></main>';
+    const events = [];
+    const stop = window.RFRecorder.start({ emit: e => events.push(e), inbox });
+    await new Promise(r => setTimeout(r, 200));
+    stop();
+    return JSON.stringify(events);
+  }, mode);
+  const normal = await run(false), inbox = await run(true);
+  check('page mode: ordinary text is kept, contenteditable text is masked, data-rf-private is blocked', normal.includes('Ordinary visible words') && !normal.includes('Typed words here') && !normal.includes('Blocked words here'));
+  check('inbox mode: no text at all is kept', !inbox.includes('Ordinary visible words') && !inbox.includes('Typed words here') && !inbox.includes('Blocked words here'));
+  await context.close();
+}
+
 try {
+  await recorderModes();
+  await inboxPrivacy(390, true);
+  await inboxPrivacy(1280, false);
   await walk(390, true);
   await inboxRecording(390, true);
   await walk(1280, false);
