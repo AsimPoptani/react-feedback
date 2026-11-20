@@ -672,7 +672,8 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
   const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
   const item = await readItem(path);
   const stored = await materialise(path, item);
-  if (client_id) { const again = stored.find(m => m.client_id === client_id && m.author === input.author); if (again) { duplicates.add(again); return { message: again, eventKind: 'message', eventText: '', addedItems: [] }; } }
+  // the same client id on a different kind of message (an answer, not a plain message) is a different message
+  if (client_id) { const again = stored.find(m => m.client_id === client_id && m.author === input.author && !!m.answer === (input.answer !== undefined));  if (again) { duplicates.add(again); return { message: again, eventKind: 'message', eventText: '', addedItems: [] }; } }
   if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
   if ((input.question || input.secret) && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question or a key request: nobody could answer it', 409);
   const { aside, replyTo } = checkAside(stored, input);
@@ -912,14 +913,37 @@ export async function reactTo(dir: string, id: string, mid: string, reaction: un
   if (result.first || result.closed) await logEvent(dir, { id, kind: 'reaction', text: kind === 'done' ? `Done, close it (on ${mid})` : `\u{1F44D} on ${mid}`, reply_to: mid });
   return result;
 }
-// Closes every open thread whose agent said "done" last and that waits on nobody. One tap in the inbox ("Close all done threads").
+// Closes every open thread whose agent said "done" last and that waits on nobody (not on you, not on the agent to check something you ticked). A thread you reopened after that message stays open.
+// One tap in the inbox ("Close all done threads"), with an Undo that reopens exactly these.
 export async function closeDoneThreads(dir: string): Promise<{ closed: string[] }> {
   const closed: string[] = [];
   for (const t of await listThreads(dir)) {
-    if (t.status !== 'open' || t.merged_into || t.read_only || t.last_flag !== 'done' || t.last_author !== 'agent' || t.waiting === 'you') continue;
+    if (t.status !== 'open' || t.merged_into || t.read_only || t.last_flag !== 'done' || t.last_author !== 'agent' || t.waiting !== 'idle') continue;
+    const path = await itemDir(dir, t.id);
+    const reopened = await readReopened(path);
+    if (reopened) {
+      const doneAt = [...(await materialise(path, await readItem(path)))].reverse().find(m => m.author === 'agent' && m.flag === 'done' && !m.divider)?.created_at;
+      if (!doneAt || reopened > doneAt) continue;
+    }
     await setStatus(dir, t.id, 'done'); closed.push(t.id);
   }
   return { closed };
+}
+// The person reopened a thread (the inbox's Reopen, or Undo): remembered, so a later bulk close leaves it alone.
+export async function markReopened(dir: string, id: string): Promise<void> {
+  await writeAtomic(join(await itemDir(dir, id), 'reopened.json'), JSON.stringify({ at: new Date().toISOString() }));
+}
+async function readReopened(path: string): Promise<string | null> {
+  try { const v = JSON.parse(await optional(join(path, 'reopened.json')) ?? 'null'); return isObject(v) && typeof v.at === 'string' ? v.at : null; } catch { return null; }
+}
+// Undo for the bulk close: reopens exactly the threads named (only ones that are done now).
+export async function reopenThreads(dir: string, ids: unknown): Promise<{ reopened: string[] }> {
+  if (!Array.isArray(ids) || ids.length > 500 || ids.some(id => typeof id !== 'string' || !ID.test(id))) throw new Invalid('ids must be a list of thread ids');
+  const reopened: string[] = [];
+  for (const id of ids as string[]) {
+    try { const path = await itemDir(dir, id); if ((await readStatus(path)) === 'done') { await writeStatus(path, 'open'); await markReopened(dir, id); reopened.push(id); } } catch { /* a thread that is gone has nothing to reopen */ }
+  }
+  return { reopened };
 }
 
 // ---- Split: an agent moves one message and everything that replies to it (and any question or side question tied to them) into a new thread. The old thread keeps a "Moved to <title>" link where each
@@ -2059,10 +2083,37 @@ export async function listThreads(dir: string, query?: string): Promise<Summary[
 
 // ---- Everything that waits on the person in one project: each open question, each needs-you message and each item of theirs. A thread that is done, merged away or read-only waits on nobody.
 export interface WaitingRow { thread: string; title: string; kind: 'question' | 'needs_you' | 'item'; text: string; at: string }
-export async function waitingRows(dir: string): Promise<WaitingRow[]> {
+// What the cache below rests on: every top-level .json / .jsonl file of each thread (size and time), so a write by the server, the CLI or an MCP agent changes it. A question's expiry changes the answer
+// without a write, so the cache also lapses at the earliest expiry among the questions it lists.
+export const waitingStats = { computed: 0 };
+const waitingCache = new Map<string, { fp: string; rows: WaitingRow[]; until: number }>();
+async function waitingFingerprint(dir: string): Promise<string> {
   let entries: string[];
-  try { entries = await readdir(dir); } catch (error) { if (code(error) === 'ENOENT') return []; throw error; }
+  try { entries = await readdir(dir); } catch (error) { if (code(error) === 'ENOENT') return ''; throw error; }
+  const parts: string[] = [];
+  for (const id of entries.filter(entry => ID.test(entry)).sort()) {
+    try {
+      const files = (await readdir(join(dir, id))).filter(name => /\.jsonl?$/.test(name)).sort();
+      const stats = await Promise.all(files.map(name => stat(join(dir, id, name)).then(x => `${name}:${x.size}:${x.mtimeMs}`, () => name)));
+      parts.push(`${id}|${stats.join(',')}`);
+    } catch { parts.push(id); }
+  }
+  return parts.join(';');
+}
+export async function waitingRows(dir: string): Promise<WaitingRow[]> {
+  const fp = await waitingFingerprint(dir);
+  const hit = waitingCache.get(dir);
+  if (hit && hit.fp === fp && Date.now() < hit.until) return hit.rows;
+  waitingStats.computed += 1;
+  const found = await computeWaiting(dir);
+  waitingCache.set(dir, { fp, rows: found.rows, until: found.until });
+  return found.rows;
+}
+async function computeWaiting(dir: string): Promise<{ rows: WaitingRow[]; until: number }> {
+  let entries: string[];
+  try { entries = await readdir(dir); } catch (error) { if (code(error) === 'ENOENT') return { rows: [], until: Infinity }; throw error; }
   const rows: WaitingRow[] = [];
+  let until = Infinity;
   for (const id of entries.filter(entry => ID.test(entry))) {
     try {
       const { summary, messages, path } = await summarise(dir, id);
@@ -2073,14 +2124,14 @@ export async function waitingRows(dir: string): Promise<WaitingRow[]> {
       const before = rows.length;
       for (const m of messages.slice(lastUser + 1)) {
         if (m.author !== 'agent' || m.divider) continue;
-        if (m.question) { if (questionLive(m.question) && !answered.has(m.question.id)) rows.push({ thread: id, title: summary.title, kind: 'question', text: one(m.question.prompt), at: m.created_at }); }
+        if (m.question) { if (questionLive(m.question) && !answered.has(m.question.id)) { if (m.question.expires_at) until = Math.min(until, Date.parse(m.question.expires_at)); rows.push({ thread: id, title: summary.title, kind: 'question', text: one(m.question.prompt), at: m.created_at }); } }
         else if (m.flag === 'needs_you') rows.push({ thread: id, title: summary.title, kind: 'needs_you', text: one(m.text) || 'Needs you', at: m.created_at });
       }
       for (const i of await readChecklist(path)) if (i.owner === 'user' && !i.done && !i.claimed_by_user_at) rows.push({ thread: id, title: summary.title, kind: 'item', text: one(i.text), at: i.created_at });
       if (rows.length === before) rows.push({ thread: id, title: summary.title, kind: 'needs_you', text: 'Waiting on you', at: summary.last_message_at });
     } catch { /* a broken folder must not hide the rest */ }
   }
-  return rows.sort((a, b) => b.at.localeCompare(a.at));
+  return { rows: rows.sort((a, b) => b.at.localeCompare(a.at)), until };
 }
 
 // ---- Presence: when the user last had the inbox open and when each agent last did something. Timestamps only (no address, no browser, no thread).

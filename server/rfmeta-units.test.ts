@@ -3,7 +3,7 @@ import { expect, test } from 'bun:test';
 import { DRAFT_KEY, composerKey, createDrafts, questionKey, typingPinger } from './inbox/drafts.js';
 import { suggestTitle, topicNudge } from './inbox/nudge.js';
 
-const memory = () => { const data = new Map<string, string>(); return { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v); }, data }; };
+const memory = () => { const data = new Map<string, string>(); return { getItem: (k: string) => data.get(k) ?? null, removeItem: (k: string) => { data.delete(k); }, setItem: (k: string, v: string) => { data.set(k, v); }, data }; };
 
 test('drafts are kept per project, thread and question, cleared when empty, and capped', () => {
   const store = memory();
@@ -49,4 +49,28 @@ test('the nudge fires on an opener, or on a long message that shares almost noth
   expect(topicNudge(long, 'Billing invoices export')?.reason).toBe('unrelated');
   expect(topicNudge(long, 'Photography schedule venue')).toBeNull();
   expect(suggestTitle('Also,   a very long first sentence that keeps going and going well past the seventy character limit for titles. More.').length).toBeLessThanOrEqual(71);
+});
+
+test('"stopped" goes to the thread the typing was in, even after the page moved on, and a new thread stops the old one first', () => {
+  let clock = 0; const timers: (() => void)[] = []; const sent: [boolean, string | undefined][] = [];
+  const pinger = typingPinger({ send: (on: boolean, id?: string) => sent.push([on, id]), gap: 5000, now: () => clock, setTimer: fn => { timers.push(fn); return timers.length; }, clearTimer: () => { timers.length = 0; } });
+  pinger.note('A'); timers.shift()!();
+  pinger.stop();
+  expect(sent).toEqual([[true, 'A'], [false, 'A']]);
+  sent.length = 0; clock = 10_000;
+  pinger.note('A'); timers.shift()!();
+  pinger.note('B'); // moved to another thread while typing: A is told first
+  expect(sent).toEqual([[true, 'A'], [false, 'A']]);
+  timers.shift()!(); pinger.stop();
+  expect(sent.slice(2)).toEqual([[true, 'B'], [false, 'B']]);
+});
+test('a draft lapses after 14 days, and wipe forgets them all', () => {
+  const store = memory(); let clock = 1_000_000;
+  const drafts = createDrafts(() => store as unknown as Storage, () => clock);
+  drafts.set('p|t|c', 'kept'); drafts.set('p|t|q:q1', 'answer');
+  clock += 13 * 864e5; expect(drafts.get('p|t|c')).toBe('kept');
+  clock += 2 * 864e5; expect(drafts.get('p|t|c')).toBe(''); expect(drafts.questions('p', 't')).toEqual([]);
+  drafts.set('p|t|c', 'new'); drafts.wipe();
+  expect(drafts.get('p|t|c')).toBe(''); expect(store.data.has(DRAFT_KEY)).toBe(false);
+  expect(() => createDrafts(() => { throw new Error('blocked'); }).wipe()).not.toThrow();
 });

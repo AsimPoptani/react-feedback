@@ -21,7 +21,8 @@ let waiting: unknown = { count: 0, items: [] };
 let projects: { id: string; name: string; unread: number }[] = [{ id: 'alpha', name: 'Alpha', unread: 0 }];
 let down = false;
 let answerReply: (payload: Record<string, unknown>) => { status: number; body: unknown } = () => ({ status: 201, body: {} });
-const posts: { path: string; body: Record<string, any> }[] = [];
+const posts: { path: string; search: string; body: Record<string, any> }[] = [];
+let unauthorized = false;
 const thread = () => ({ id: ID, title: 'Pictures', origin: 'user', mode: 'thread', status, created_at: at(0), url: null, last_message_at: at(1), last_author: 'agent', unread_for_user: false, user_read_at: at(1), agent_read_at: at(1),
   open_question: true, waiting: 'you', last_flag: 'needs_you', checklist: { total: 0, done: 0, claimed: 0 }, open_for_you: 0, merged_into: null, read_only: false, acked_through: null, viewport: null, target: null, note: '',
   checklist_items: [], files: { image: false, annotated: false, context: false }, messages, ...detailExtra });
@@ -39,17 +40,20 @@ async function load(hash = `#/${ID}`) {
   vi.stubGlobal('matchMedia', () => ({ matches: false }));
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (down) throw new TypeError('network down');
-    const path = new URL(url, 'http://local').pathname.replace(/^.*\/api\//, '');
+    const parsed = new URL(url, 'http://local');
+    const path = parsed.pathname.replace(/^.*\/api\//, '');
+    if (unauthorized) return { ok: false, status: 401, json: async () => ({ kind: 'unpaired' }), headers: { get: () => null } };
     const reply = (data: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => data, headers: { get: () => null } });
     if (init?.method === 'POST') {
       const payload = init.body ? JSON.parse(String(init.body)) as Record<string, any> : {};
-      posts.push({ path, body: payload });
+      posts.push({ path, search: parsed.search, body: payload });
       if (path.endsWith('/answer')) {
         const r = answerReply(payload);
         if (r.status < 300) messages.push({ id: `m${messages.length + 1}`, author: 'user', text: 'Chose: x', images: [], created_at: at(messages.length + 1), client_id: payload.client_id, answer: { question_id: payload.question_id, option_ids: payload.option_ids ?? [] } });
         return reply(r.body, r.status);
       }
       if (path === 'threads') return reply({ id: '20261118-110000-beef' }, 201);
+      if (path === 'threads/close-done') return reply({ closed: [ID] });
       return reply({});
     }
     if (path === 'threads') return reply([thread()]);
@@ -69,7 +73,7 @@ const typeIn = (node: HTMLInputElement | HTMLTextAreaElement, value: string) => 
 const draftStore = () => JSON.parse(localStorage.getItem('fb-inbox-drafts') || '{}') as Record<string, { t: string }>;
 const poll = async () => { const before = (fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length; document.dispatchEvent(new Event('visibilitychange')); await vi.waitFor(() => expect((fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBeGreaterThan(before + 3)); await wait(); };
 
-beforeEach(() => { localStorage.clear(); messages = base(); detailExtra = {}; status = 'open'; waiting = { count: 0, items: [] }; down = false; answerReply = () => ({ status: 201, body: {} }); projects = [{ id: 'alpha', name: 'Alpha', unread: 0 }]; });
+beforeEach(() => { unauthorized = false; localStorage.clear(); messages = base(); detailExtra = {}; status = 'open'; waiting = { count: 0, items: [] }; down = false; answerReply = () => ({ status: 201, body: {} }); projects = [{ id: 'alpha', name: 'Alpha', unread: 0 }]; });
 
 describe('what you type is kept', () => {
   it('the composer is kept per thread and comes back after a reload; sending clears it', async () => {
@@ -97,7 +101,7 @@ describe('what you type is kept', () => {
     await vi.waitFor(() => expect(draftStore()).toEqual({}));
   });
   it('a typed answer whose question is gone from the thread is kept below it, with Send as a message', async () => {
-    localStorage.setItem('fb-inbox-drafts', JSON.stringify({ [`alpha|${ID}|q:q9`]: { t: 'my answer to a vanished question', at: 1 } }));
+    localStorage.setItem('fb-inbox-drafts', JSON.stringify({ [`alpha|${ID}|q:q9`]: { t: 'my answer to a vanished question', at: Date.now() } }));
     await load();
     const row = document.querySelector<HTMLElement>('#kept-answers [data-kept="q9"]')!;
     expect(row.querySelector<HTMLInputElement>('input')!.value).toBe('my answer to a vanished question');
@@ -307,5 +311,54 @@ describe('copying a message', () => {
     await setup();
     msg('m2').querySelector<HTMLButtonElement>('.copy-btn')!.click();
     await vi.waitFor(() => expect($('toast').textContent).toBe("Couldn't copy"));
+  });
+});
+
+describe('review fixes in the page', () => {
+  const twoProjects = () => { projects = [{ id: 'alpha', name: 'Alpha', unread: 0 }, { id: 'beta', name: 'Beta', unread: 0 }]; localStorage.setItem('fb-inbox-project', 'beta'); };
+  it('an answer and a message written offline in the second project are sent to that project, not the first', async () => {
+    twoProjects();
+    await load();
+    down = true;
+    [...document.querySelectorAll<HTMLButtonElement>('#msgs .qopt')].find(b => b.textContent?.includes('Draw new'))!.click();
+    await vi.waitFor(() => expect(document.querySelector('#msgs .qpending')).not.toBeNull());
+    typeIn($('text') as HTMLTextAreaElement, 'a note written offline');
+    $('composer').dispatchEvent(new Event('submit', { cancelable: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('#msgs [data-queued]').length).toBeGreaterThan(1));
+    down = false;
+    window.dispatchEvent(new Event('online'));
+    await vi.waitFor(() => expect(posts.some(p => p.path.endsWith('/answer')) && posts.some(p => p.path.endsWith('/messages'))).toBe(true), { timeout: 4000 });
+    for (const p of posts.filter(p => p.path.endsWith('/answer') || p.path.endsWith('/messages'))) expect(p.search).toBe('?project=beta');
+  });
+  it('the project is kept on a queued entry: an old entry with none goes to the default project', async () => {
+    twoProjects();
+    await load();
+    down = true;
+    [...document.querySelectorAll<HTMLButtonElement>('#msgs .qopt')].find(b => b.textContent?.includes('Reuse'))!.click();
+    await vi.waitFor(() => expect(document.querySelector('#msgs .qpending')).not.toBeNull());
+    down = false;
+    answerReply = () => ({ status: 409, body: { detail: 'That question was withdrawn' } });
+    window.dispatchEvent(new Event('online'));
+    await vi.waitFor(() => expect(posts.some(p => p.path.endsWith('/answer'))).toBe(true), { timeout: 4000 });
+    expect(posts.find(p => p.path.endsWith('/answer'))!.search).toBe('?project=beta');
+    await vi.waitFor(() => expect(Object.keys(draftStore())).toContain(`beta|${ID}|q:q2`)); // kept under the project the answer was written in
+  });
+  it('a 401 (an unpaired or revoked device) clears the kept drafts', async () => {
+    await load();
+    typeIn($('text') as HTMLTextAreaElement, 'private words');
+    expect(Object.keys(draftStore()).length).toBe(1);
+    unauthorized = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect(localStorage.getItem('fb-inbox-drafts')).toBeNull());
+  });
+  it('Close all done threads offers Undo, which reopens exactly the ids that were closed', async () => {
+    messages = [{ id: 'm1', author: 'agent', text: 'All shipped', images: [], created_at: at(1), flag: 'done' }];
+    detailExtra = { waiting: 'idle', last_flag: 'done', last_author: 'agent' };
+    await load();
+    await vi.waitFor(() => expect(($('close-done') as HTMLButtonElement).hidden).toBe(false));
+    $('close-done').click();
+    await vi.waitFor(() => expect($('toast').querySelector('.toast-act')?.textContent).toBe('Undo'));
+    $('toast').querySelector<HTMLButtonElement>('.toast-act')!.click();
+    await vi.waitFor(() => expect(posts.find(p => p.path === 'threads/reopen')?.body).toEqual({ ids: [ID] }));
   });
 });

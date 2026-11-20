@@ -269,3 +269,67 @@ describe('the remote listener', () => {
     expect((await off(new Request('https://phone.example.test/__feedback/api/threads', { headers: { Host: 'evil.example' } }))).status).toBe(401);
   });
 });
+
+describe('review fixes', () => {
+  test('a glob is matched piece by piece (no backtracking blow-up), and an address over 2 KB is never matched', () => {
+    const projects = [{ id: 'a', name: 'A', dir: '/x/a', match: ['http://*a*a*a*a*a*a*a*a*a*a*a*a*b/docs'] }, { id: 'b', name: 'B', dir: '/x/b', match: ['https://*.acme.test/docs', 'https://acme.test/*/edit'] }];
+    const evil = `http://${'a'.repeat(1900)}`;
+    const t0 = performance.now();
+    expect(matchProject(projects, evil)).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(matchProject(projects, `https://eu.acme.test/docs/x#f`)?.id).toBe('b');
+    expect(matchProject(projects, `https://eu.acme.test/docsx`)).toBeNull();
+    expect(matchProject(projects, `https://acme.test/p/9/edit?x=1`)?.id).toBe('b');
+    expect(matchProject(projects, `https://acme.test/p/9/editor`)).toBeNull();
+    expect(matchProject(projects, `https://eu.acme.test/docs/${'x'.repeat(2100)}`)).toBeNull();
+    expect(closestProject(projects, `https://acme.test/${'x'.repeat(2100)}`)).toBeNull();
+  });
+  test('the same client id on an answer and on a plain message are two messages; a repeat of the same kind is still one', async () => {
+    const id = (await store.createThread(dir, { title: 'One', text: 'Which?', origin: 'agent', question: { prompt: 'Which?', options: [{ label: 'a' }] } })).id;
+    const cid = 'same-client-id-1';
+    const plain = await store.appendMessage(dir, id, { author: 'user', text: 'a word', client_id: cid });
+    const answer = await store.appendMessage(dir, id, { author: 'user', text: undefined, answer: { question_id: 'q1', option_ids: ['o1'] }, client_id: cid });
+    expect(answer.id).not.toBe(plain.id);
+    const again = await store.appendMessage(dir, id, { author: 'user', text: 'a word', client_id: cid });
+    expect(again.id).toBe(plain.id);
+    expect((await store.summarise(dir, id)).messages.filter(m => m.author === 'user')).toHaveLength(2);
+  });
+  test('Close all done: leaves a thread you reopened, one waiting on the agent to check an item, and Undo reopens exactly the closed ids', async () => {
+    const handle = createHandler(dir);
+    const finished = (await store.createThread(dir, { title: 'Finished', text: 'ok', origin: 'agent', flag: 'done' })).id;
+    const reopened = (await store.createThread(dir, { title: 'Reopened', text: 'ok', origin: 'agent', flag: 'done' })).id;
+    const checking = (await store.createThread(dir, { title: 'Checking', text: 'ok', origin: 'agent', flag: 'fyi' })).id;
+    for (const id of [finished, reopened, checking]) await store.setStatus(dir, id, 'open');
+    await store.appendMessage(dir, checking, { author: 'agent', text: 'all done', flag: 'done' });
+    await store.addChecklistItem(dir, checking, { owner: 'agent', text: 'verify', by: 'agent' });
+    const item = (await store.listChecklist(dir, checking))[0]!;
+    await store.patchChecklistItem(dir, checking, item.id, { claimed: true }, 'user'); // the person says it is done: the agent has to check
+    await store.setStatus(dir, checking, 'open');
+    expect((await post(handle, `threads/${reopened}/status`, { status: 'open' })).status).toBe(200); // the person reopened it
+    const closed = await (await post(handle, 'threads/close-done', {})).json();
+    expect(closed.closed).toEqual([finished]);
+    expect((await store.summarise(dir, reopened)).summary.status).toBe('open');
+    expect((await store.summarise(dir, checking)).summary.status).toBe('open');
+    const undo = await (await post(handle, 'threads/reopen', { ids: closed.closed })).json();
+    expect(undo.reopened).toEqual([finished]);
+    expect((await store.summarise(dir, finished)).summary.status).toBe('open');
+    expect((await post(handle, 'threads/reopen', { ids: ['../x'] })).status).toBe(400);
+    expect((await (await post(handle, 'threads/close-done', {})).json()).closed).toEqual([]); // an Undo is a reopen too: not closed again
+  });
+  test('GET api/waiting is computed again only when a thread changes (or a listed question expires)', async () => {
+    const handle = createHandler(dir);
+    const id = (await store.createThread(dir, { title: 'Asked', text: 'Which?', origin: 'agent', question: { prompt: 'Which?', options: [{ label: 'a' }] } })).id;
+    const before = store.waitingStats.computed;
+    expect((await (await get(handle, 'waiting')).json()).count).toBe(1);
+    await get(handle, 'waiting'); await get(handle, 'waiting');
+    expect(store.waitingStats.computed).toBe(before + 1);
+    await cli(['reply', id, 'a word'], dir); // a write by another process shows too
+    expect((await (await get(handle, 'waiting')).json()).count).toBe(1);
+    expect(store.waitingStats.computed).toBe(before + 2);
+    await store.appendMessage(dir, id, { author: 'user', text: undefined, answer: { question_id: 'q1', option_ids: ['o1'] } });
+    expect((await (await get(handle, 'waiting')).json()).count).toBe(0);
+    expect(store.waitingStats.computed).toBe(before + 3);
+    const soon = (await store.createThread(dir, { title: 'Expiring', text: 'Quick?', origin: 'agent', question: { prompt: 'Quick?', options: [{ label: 'a' }], expires: '1m' } })).id;
+    expect((await (await get(handle, 'waiting')).json()).items.some((i: { thread: string }) => i.thread === soon)).toBe(true);
+  });
+});

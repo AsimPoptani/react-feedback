@@ -3,6 +3,7 @@
 export const DRAFT_KEY = 'fb-inbox-drafts';
 const MAX_ENTRIES = 200;
 const MAX_TEXT = 12000;
+export const DRAFT_DAYS = 14; // a draft nobody came back to for two weeks is let go
 
 export const composerKey = (project, thread) => `${project || 'default'}|${thread}|c`;
 export const questionKey = (project, thread, qid) => `${project || 'default'}|${thread}|q:${qid}`;
@@ -13,13 +14,17 @@ export function createDrafts(storage = () => globalThis.localStorage, now = () =
   };
   const save = all => {
     try {
+      for (const k of Object.keys(all)) if (!live(all[k])) delete all[k];
       const keys = Object.keys(all);
       if (keys.length > MAX_ENTRIES) for (const k of keys.sort((a, b) => (all[a].at || 0) - (all[b].at || 0)).slice(0, keys.length - MAX_ENTRIES)) delete all[k];
       storage().setItem(DRAFT_KEY, JSON.stringify(all));
     } catch { /* storage may be blocked or full */ }
   };
+  const live = v => !!v && typeof v.t === 'string' && now() - (v.at || 0) < DRAFT_DAYS * 864e5;
   return {
-    get(key) { const v = load()[key]; return v && typeof v.t === 'string' ? v.t : ''; },
+    get(key) { const v = load()[key]; return live(v) ? v.t : ''; },
+    // Everything is dropped: the remote listener said this device is not paired (any more), and what was typed here is not for whoever holds it next.
+    wipe() { try { storage().removeItem(DRAFT_KEY); } catch { /* storage may be blocked */ } },
     set(key, text) {
       const all = load();
       if (typeof text !== 'string' || !text.trim()) { if (key in all) { delete all[key]; save(all); } return; }
@@ -31,7 +36,7 @@ export function createDrafts(storage = () => globalThis.localStorage, now = () =
     // Every draft of one thread's questions: [{ qid, text }].
     questions(project, thread) {
       const prefix = `${project || 'default'}|${thread}|q:`;
-      return Object.entries(load()).filter(([k, v]) => k.startsWith(prefix) && v && typeof v.t === 'string').map(([k, v]) => ({ qid: k.slice(prefix.length), text: v.t }));
+      return Object.entries(load()).filter(([k, v]) => k.startsWith(prefix) && live(v)).map(([k, v]) => ({ qid: k.slice(prefix.length), text: v.t }));
     },
     // A thread that moved to another project (and maybe another id) takes its drafts along.
     move(from, to) {
@@ -49,15 +54,21 @@ export function createDrafts(storage = () => globalThis.localStorage, now = () =
 // Tells the server the person is typing in a thread: the first keystroke after a pause is sent a moment later (debounced), then at most one ping per `gap` while typing goes on.
 // The server forgets it ~15 seconds after the last ping, so a stop is only sent to say "done" early (after a send, or an emptied box).
 export function typingPinger({ send, gap = 5000, delay = 300, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = t => clearTimeout(t), now = () => Date.now() }) {
-  let timer = null, last = -Infinity, on = false;
+  let timer = null, last = -Infinity, on = false, target = null;
+  const stop = () => {
+    if (timer !== null) { clearTimer(timer); timer = null; }
+    if (on) { on = false; last = -Infinity; send(false, target); } // "stopped" goes to the thread the typing was in, even if the page has moved on
+    target = null;
+  };
   return {
-    note() {
+    // `id` is the thread being typed in, taken now (not when the ping goes out).
+    note(id) {
+      if (target !== null && target !== id) stop();
+      target = id ?? null;
       if (timer !== null || now() - last < gap) return;
-      timer = setTimer(() => { timer = null; last = now(); on = true; send(true); }, delay);
+      const at = target;
+      timer = setTimer(() => { timer = null; last = now(); on = true; send(true, at); }, delay);
     },
-    stop() {
-      if (timer !== null) { clearTimer(timer); timer = null; }
-      if (on) { on = false; last = -Infinity; send(false); }
-    },
+    stop,
   };
 }

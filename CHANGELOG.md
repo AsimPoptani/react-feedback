@@ -20,6 +20,15 @@ Working together: fixes from watching real person-and-agent threads. The inbox n
 
 - **Copy.** A **Copy** action on every message with text: a small copy icon beside Reply on a wide screen, and in the message's ⋯ menu (the only way on a phone, where a long press keeps native text selection in message bodies). It copies the message's Markdown, not the drawn HTML and without the quote of what it replied to, and shows a "Copied" toast. It uses `navigator.clipboard.writeText`, with a hidden textarea and `execCommand` where that is missing (older iOS). A redacted message has no Copy.
 
+### Fixed (review)
+- An answer or message written offline in any project but the first is sent to the project it was written in (every outbox entry records its `project`; an older entry with none goes to the default project). Before, it was posted to the first project, so the answer was lost and the message failed for good.
+- "Close all done threads" now has an **Undo** toast (`POST api/threads/reopen`, exactly the closed ids), leaves a thread you reopened since the agent said done, and leaves one waiting on the agent to check something you ticked.
+- The typing "stopped" ping goes to the thread the typing was in, even when the page has already moved to another one.
+- A glob in a project's `match` is matched piece by piece (no regular expression, so no backtracking blow-up), and an address over 2 KB is never matched.
+- A `client_id` only dedupes a stored message of the same kind (an answer is not a plain message).
+- `GET api/waiting` is cached per project and recomputed only when a thread file changes (a write by the server, the CLI or MCP) or a listed question expires.
+- Kept drafts expire after 14 days and are all cleared when the remote listener answers 401 (an unpaired or revoked device).
+
 ### Changed
 - On a phone in a normal browser tab the composer sits 10 px from the bottom edge. The safe-area inset is added only in an installed (standalone or fullscreen) page, where nothing else keeps it clear. (It used to be added everywhere, leaving an empty band above the browser's own toolbar.)
 - A moved message's "Moved to" stub now appears in an open thread on the next poll (it used to wait for a reload).

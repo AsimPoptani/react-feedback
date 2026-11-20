@@ -139,7 +139,9 @@ async function scenario(label, contextOptions) {
   check(tag('an unmatched capture offers Move to the best project'), (await page.locator('#move-chip').innerText()).includes('Beta'));
   await shot('move-chip');
   await page.locator('#move-chip').click();
-  check(tag('one tap moves it'), await until(async () => (await store.listThreads(beta)).some(t => t.title.includes('beta.test/other') || t.id === lost)));
+  check(tag('one tap moves it'), await until(async () => (await store.listThreads(beta)).some(t => t.id === lost)));
+  // the inbox then switches to Beta and opens the moved thread: wait for that before going on
+  check(tag('and the inbox follows it to Beta'), await until(async () => (await page.evaluate(() => localStorage.getItem('fb-inbox-project'))) === 'beta' && (await page.evaluate(() => location.hash)).includes(lost) && (await page.locator('#title').innerText().catch(() => '')) !== ''));
 
   // ---- Answers given offline
   const off = await asked(`Offline ${label}`);
@@ -167,6 +169,25 @@ async function scenario(label, contextOptions) {
   await page.waitForSelector('#msgs .qrescue .qother');
   check(tag('a question withdrawn meanwhile keeps the answer, with Send as a message'), (await page.locator('#msgs .qrescue .qother').inputValue()) === 'Reuse' && (await page.getByRole('button', { name: 'Send as a message' }).count()) > 0);
   await shot('offline-answer-kept');
+
+  // ---- Offline in the second project: the answer and the message go to Beta, never to the first project
+  const bq = (await store.createThread(beta, { title: `Beta offline ${label}`, text: 'Start', origin: 'user' })).id;
+  await store.appendMessage(beta, bq, { author: 'agent', text: 'Which?', question: { prompt: 'Which?', options: [{ label: 'Reuse' }, { label: 'Draw new' }] }, flag: 'needs_you' });
+  await page.evaluate(() => localStorage.setItem('fb-inbox-project', 'beta'));
+  await page.goto(`${origin}/__feedback/inbox/#/${bq}`);
+  await page.reload();
+  await page.waitForSelector('#msgs .qcard');
+  await context.setOffline(true);
+  await page.locator('#msgs .qopt', { hasText: 'Draw new' }).click();
+  await page.waitForSelector('#msgs .qpending');
+  await page.locator('#text').fill('a note written offline in Beta');
+  await page.locator('#send').click();
+  await page.waitForSelector('#msgs [data-queued]:not(.qpending)');
+  await context.setOffline(false);
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  check(tag('an offline answer in Beta is delivered to Beta'), await until(async () => (await store.summarise(beta, bq)).messages.filter(m => m.answer).length === 1));
+  check(tag('an offline message in Beta is delivered to Beta'), await until(async () => (await store.summarise(beta, bq)).messages.some(m => m.text === 'a note written offline in Beta')));
+  check(tag('and nothing of it went to the first project'), (await store.listThreads(alpha)).every(t => t.id !== bq));
 
   // ---- Copy
   const copyId = (await store.createThread(alpha, { title: `Copy ${label}`, text: '**Bold** and `code`\n\n- one\n- two', origin: 'agent', flag: 'fyi' })).id;

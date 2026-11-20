@@ -534,6 +534,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   const remind = await remindersRoute(req, dir, path, read);
   if (remind) return remind;
   if (path === `${base}/close-done` && req.method === 'POST') { await read(req); return json(await store.closeDoneThreads(dir)); }
+  if (path === `${base}/reopen` && req.method === 'POST') return json(await store.reopenThreads(dir, (await read(req)).ids));
   const reaction = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/messages\/([^/]+)\/react$/);
   if (reaction && req.method === 'POST') { const data = await read(req); return json(await store.reactTo(dir, reaction[1]!, reaction[2]!, data.reaction)); }
   if (path === base && req.method === 'POST') {
@@ -571,7 +572,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, reply_to: data.reply_to, quote: data.quote, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
     return json(created, store.wasDuplicate(created) ? 200 : 201); // 200: it had already arrived (a retry from the offline queue)
   }
-  if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
+  if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); if (status === 'open') await store.markReopened(dir, id!); return json({ status }); }
   if (action === 'merge') { const data = await read(req); return json(await store.mergeThreads(dir, id!, data.into as string, 'user', options.files, { force: data.force === true })); }
   // The inbox says the person is typing here (or stopped). The marker lapses on its own 15 seconds after the last ping; nothing typed is ever sent.
   if (action === 'typing') {

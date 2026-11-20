@@ -90,13 +90,26 @@ function checkMatch(id: string, value: unknown): string[] | undefined {
 const lower = (text: string) => text.toLowerCase();
 // The part of a URL a rule is about: no fragment.
 const withoutFragment = (url: string) => { const at = url.indexOf('#'); return at < 0 ? url : url.slice(0, at); };
-// A pattern with `*` is a glob over the start of the address (it too ends at a segment); any other is a prefix that must end at a segment ("http://app.test:5173" matches "http://app.test:5173/billing" but not ":51730").
+export const MAX_URL = 2048; // a longer address is never matched (the work below is linear in it, but there is no reason to spend it on a page that sent kilobytes)
+const boundary = (u: string, at: number) => at >= u.length || u[at] === '/' || u[at] === '?';
+// A glob (`*` matches anything) matches the start of the address and ends at a segment, like a prefix. Matched by pieces, left to right: no regular expression, so no backtracking blow-up.
+function globMatches(p: string, u: string): boolean {
+  const parts = p.split('*');
+  if (!u.startsWith(parts[0]!)) return false;
+  let pos = parts[0]!.length;
+  for (let i = 1; i < parts.length - 1; i++) { const at = u.indexOf(parts[i]!, pos); if (at < 0) return false; pos = at + parts[i]!.length; }
+  const last = parts[parts.length - 1]!;
+  if (last === '') return true;
+  for (let at = u.indexOf(last, pos); at >= 0; at = u.indexOf(last, at + 1)) if (boundary(u, at + last.length)) return true;
+  return false;
+}
+// A pattern with `*` is a glob; any other is a prefix that must end at a segment ("http://app.test:5173" matches "http://app.test:5173/billing" but not ":51730").
 function patternMatches(pattern: string, url: string): boolean {
+  if (url.length > MAX_URL) return false;
   const p = lower(pattern), u = lower(withoutFragment(url));
-  if (p.includes('*')) return new RegExp(`^${p.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}(?:$|[/?])`).test(u);
+  if (p.includes('*')) return globMatches(p, u);
   if (!u.startsWith(p)) return false;
-  const next = u.charAt(p.length);
-  return p.endsWith('/') || next === '' || next === '/' || next === '?';
+  return p.endsWith('/') || boundary(u, p.length);
 }
 // Longer patterns are more specific: the longest one that matches wins (ties go to the earlier project).
 const specificity = (pattern: string) => pattern.replace(/\*/g, '').length;
@@ -104,7 +117,7 @@ export const INBOX_PATH = /^\/__feedback\/inbox(?:\/|$)/;
 function isInboxUrl(url: string): boolean { try { return INBOX_PATH.test(new URL(url).pathname); } catch { return false; } }
 // The project a capture taken on `url` belongs to, or null when no rule matches. The inbox's own pages go to the project with `inbox: true`.
 export function matchProject(projects: Project[], url: string): Project | null {
-  if (typeof url !== 'string' || !url) return null;
+  if (typeof url !== 'string' || !url || url.length > MAX_URL) return null;
   if (isInboxUrl(url)) { const owner = projects.find(project => project.inbox); if (owner) return owner; }
   let best: { project: Project; score: number } | null = null;
   for (const project of projects) for (const pattern of project.match ?? []) {
@@ -120,7 +133,7 @@ const originOf = (text: string): string => { try { return new URL(text.replace(/
 // The project that looks closest to a page no rule matched: the one with a rule on the same site (the same origin), the longest shared start of the address winning.
 // Null when nothing is close. `skip` is the project the capture already sits in.
 export function closestProject(projects: Project[], url: string, skip?: string): Project | null {
-  if (typeof url !== 'string' || !url) return null;
+  if (typeof url !== 'string' || !url || url.length > MAX_URL) return null;
   const site = originOf(url), u = lower(withoutFragment(url));
   let best: { project: Project; score: number } | null = null;
   for (const project of projects) {

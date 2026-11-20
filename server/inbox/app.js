@@ -53,7 +53,7 @@ const THREAD_ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
 const persistQ = qid => { if (state.openId) drafts.set(qdKey(state.openId, qid), state.qsel[`${state.openId}:${qid}`]?.other || ''); };
 const forgetQ = qid => { for (const box of document.querySelectorAll(`[data-question="${qid}"] .qother`)) box.value = ''; delete state.qsel[`${state.openId}:${qid}`]; if (state.openId) drafts.clear(qdKey(state.openId, qid)); };
 // The server hears "the person is typing in this thread" (never what) so an agent does not withdraw, merge or move it from under them.
-const typingPing = typingPinger({ send: on => { const id = state.openId; if (THREAD_ID.test(id || '')) void post(`threads/${id}/typing`, { typing: on }).catch(noop); } });
+const typingPing = typingPinger({ send: (on, id) => { if (THREAD_ID.test(id || '')) void post(`threads/${id}/typing`, { typing: on }).catch(noop); } });
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
 function loadClPref() { try { const v = JSON.parse(localStorage.getItem(CL_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -61,13 +61,13 @@ function saveClPref() { try { localStorage.setItem(CL_KEY, JSON.stringify(state.
 function saveFolds() { try { localStorage.setItem(FOLD_KEY, JSON.stringify(state.folds)); } catch { /* storage may be blocked */ } }
 
 // A request that got no answer at all is a NetworkError (`network: true`): the inbox goes offline-aware instead of showing a failure.
-function projectQuery() {
-  if (!state.project || !state.defaultProject || state.project === state.defaultProject) return '';
-  return `project=${encodeURIComponent(state.project)}`;
+function projectQuery(project = state.project) {
+  if (!project || !state.defaultProject || project === state.defaultProject) return '';
+  return `project=${encodeURIComponent(project)}`;
 }
-function withProject(path) {
+function withProject(path, project = state.project) {
   if (path === 'projects' || path.startsWith('projects?') || path === 'waiting') return path;
-  const q = projectQuery();
+  const q = projectQuery(project);
   if (!q) return path;
   return `${path}${path.includes('?') ? '&' : '?'}${q}`;
 }
@@ -77,7 +77,7 @@ async function api(path, options) {
   catch { setOffline(true); const e = new Error("You're offline, or the server can't be reached."); e.network = true; throw e; }
   setOffline(!!response.headers?.get?.('X-Fb-Offline')); // the service worker marks a saved copy it served in place of the network
   if (!response.ok) {
-    if (response.status === 401) notifyUnpaired(); // a paired phone that was revoked or expired
+    if (response.status === 401) { drafts.wipe(); notifyUnpaired(); } // a paired phone that was revoked or expired: what was typed here goes too
     let detail = '';
     try { detail = (await response.json()).detail || ''; } catch { /* not JSON */ }
     const error = new Error(detail || (response.status === 413 ? 'That is too large to send.' : `Request failed (${response.status})`));
@@ -125,21 +125,21 @@ async function postQueued(e) {
     const attachments = [];
     for (const f of e.files || []) { // a file that waited in the queue goes up first (resuming a half-finished upload), then the message names it
       if (!f.id) {
-        const r = await uploadFile({ file: queuedFile(f), route: routeOf, uploadId: f.uploadId || null,
+        const r = await uploadFile({ file: queuedFile(f), route: path => API + withProject(path, e.project ?? ''), uploadId: f.uploadId || null,
           onId: id => { if (f.uploadId !== id) { f.uploadId = id; outbox.touch(e, true); } }, onProgress: sent => { e.progress = f.size ? Math.min(99, Math.floor((sent / f.size) * 100)) : 0; outbox.touch(e); } });
         f.id = r.id; delete f.uploadId; outbox.touch(e, true);
       }
       attachments.push(f.id);
     }
     if (e.answer) { // an answer to a question card that waited offline: same client id, so a retry never answers twice
-      const a = await fetch(`${API}threads/${e.thread}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...e.answer, client_id: e.cid, written_at: e.written_at }) });
+      const a = await fetch(`${API}${withProject(`threads/${e.thread}/answer`, e.project ?? '')}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...e.answer, client_id: e.cid, written_at: e.written_at }) });
       if (a.ok || a.status < 500) setOffline(false);
       let answered = {}; try { answered = await a.json(); } catch { /* no body */ }
       // The question went away while this waited (withdrawn, expired, re-asked, answered elsewhere): the words are kept, and the card offers Send as a message. Nothing is lost.
       if (a.status === 409 || a.status === 404) { keepRefusedAnswer(e); return { status: 200, kept: true }; }
       return { status: a.status, reason: a.ok ? undefined : answered.detail, forwarded_to: typeof answered.forwarded_to === 'string' ? answered.forwarded_to : undefined };
     }
-    const r = await fetch(`${API}threads/${e.thread}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await fetch(`${API}${withProject(`threads/${e.thread}/messages`, e.project ?? '')}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: e.text, images: e.images, ...(attachments.length ? { attachments } : {}), ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : e.quote ? { quote: e.quote } : {}), client_id: e.cid, written_at: e.written_at }) });
     if (r.status === 404 && attachments.length) { for (const f of e.files) { delete f.id; delete f.uploadId; } outbox.touch(e, true); return { status: 503 }; } // the server dropped a file we had sent (a day old): send it again
     if (r.ok || r.status < 500) setOffline(false);
@@ -154,7 +154,7 @@ async function postQueued(e) {
 const queuedFile = f => ({ name: f.name, size: f.size, slice: (a, b) => f.blob.slice(a, b) });
 const outbox = createOutbox({ post: postQueued, canSend: () => !isOffline(),
   onChange: () => { drawOffline(); if (state.detail) drawMessages(state.detail); },
-  onSent: (e, result) => { if (!result?.kept) state.echo.set(e.cid, e); else showToast('That question changed while you were offline. Your answer is kept under it.'); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast(forwardedToast(e.thread, result.forwarded_to)); if (state.carryDraft?.from === e.thread) state.carryDraft = null; if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); state.shown = ''; if (state.detail) drawThread(); }); } });
+  onSent: (e, result) => { if (!result?.kept) state.echo.set(e.cid, e); else showToast('That question changed while you were offline. Your answer is kept under it.'); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast(forwardedToast(e.thread, result.forwarded_to)); if (state.carryDraft?.from === e.thread) state.carryDraft = null; if (sameProject(e) && e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([sameProject(e) && id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); state.shown = ''; if (state.detail) drawThread(); }); } });
 function drawOffline() {
   const banner = $('offline-banner'), n = outbox.pending(), off = isOffline();
   const waiting = n ? ` · ${n} waiting to send` : '';
@@ -670,7 +670,7 @@ function rescueFor(d, m, copy) {
   if (s.other.trim()) {
     const other = el('input', { type: 'text', class: 'qother', maxlength: '1000', 'aria-label': 'Kept answer' });
     other.value = s.other;
-    other.addEventListener('input', () => { s.other = other.value; persistQ(q.id); typingPing.note(); });
+    other.addEventListener('input', () => { s.other = other.value; persistQ(q.id); typingPing.note(state.openId); });
     other.addEventListener('keydown', event => {
       if (event.key !== 'Enter') return;
       event.preventDefault();
@@ -751,7 +751,7 @@ async function submitAnswer(q) {
   const cid = newCid(), written_at = new Date().toISOString();
   // With no signal (or messages already waiting, which go first), the answer joins the outbox and the card says it will send when you are back online.
   const queue = async () => {
-    await outbox.add({ cid, thread: d.id, text: '', answer, summary: `Chose: ${keptText(s, q)}`, written_at });
+    await outbox.add({ cid, thread: d.id, project: state.project, text: '', answer, summary: `Chose: ${keptText(s, q)}`, written_at });
     forgetQ(q.id); state.shown = ''; drawThread();
   };
   try {
@@ -781,7 +781,9 @@ async function submitAnswer(q) {
   finally { state.busy = false; }
 }
 // An answer given with no signal waits in the outbox; the card shows it as pending until it goes (or the server says the question is gone: then the words come back as a kept answer).
-const pendingAnswer = (thread, qid) => outbox.forThread(thread).find(e => e.answer?.question_id === qid && e.state === 'queued' && !e.sending) || null;
+const sameProject = e => (e.project || state.defaultProject) === (state.project || state.defaultProject); // an id is only unique inside its project
+const queuedFor = thread => outbox.forThread(thread).filter(sameProject);
+const pendingAnswer = (thread, qid) => queuedFor(thread).find(e => e.answer?.question_id === qid && e.state === 'queued' && !e.sending) || null;
 async function cancelPendingAnswer(d, q, entry) {
   if (!(await outbox.remove(entry.cid))) return;
   state.qsel[`${d.id}:${q.id}`] = { ids: [...entry.answer.option_ids], other: entry.answer.other_text || '' };
@@ -792,8 +794,8 @@ async function cancelPendingAnswer(d, q, entry) {
 function keepRefusedAnswer(entry) {
   const text = entry.summary.replace(/^Chose: /, '');
   const k = `${entry.thread}:${entry.answer.question_id}`;
-  state.qsel[k] = { ids: [], other: text };
-  drafts.set(questionKey(dProject(), entry.thread, entry.answer.question_id), text);
+  if (sameProject(entry)) state.qsel[k] = { ids: [], other: text };
+  drafts.set(questionKey(entry.project || state.defaultProject || 'default', entry.thread, entry.answer.question_id), text);
 }
 function questionCard(d, m) {
   const q = m.question;
@@ -831,7 +833,7 @@ function questionCard(d, m) {
   if (q.allow_other) {
     const other = el('input', { type: 'text', class: 'qother', placeholder: 'Other (write your own answer)', maxlength: '1000', 'aria-label': 'Other answer' });
     other.value = s.other;
-    other.addEventListener('input', () => { if (other.value.trim() && s.ids.length) { s.ids = []; hint(q, 'Typing your own answer cleared the option you picked.'); } s.other = other.value; persistQ(q.id); paintCard(q); typingPing.note(); });
+    other.addEventListener('input', () => { if (other.value.trim() && s.ids.length) { s.ids = []; hint(q, 'Typing your own answer cleared the option you picked.'); } s.other = other.value; persistQ(q.id); paintCard(q); typingPing.note(state.openId); });
     other.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitAnswer(q); } });
     card.append(other);
   }
@@ -1070,7 +1072,7 @@ function threadNodes(d) {
 // Messages written offline (or still sending) show at the end of the thread, with a clock until the server has them.
 const clockIcon = () => svg('svg', { viewBox: '0 0 24 24', width: 14, height: 14, 'aria-hidden': 'true', class: 'clock' }, svg('circle', { cx: 12, cy: 12, r: 9, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }), svg('path', { d: 'M12 7v5l3 2', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round' }));
 function queuedEntries(d) {
-  const mine = outbox.forThread(d.id), have = new Set(d.messages.map(m => m.client_id).filter(Boolean));
+  const mine = queuedFor(d.id), have = new Set(d.messages.map(m => m.client_id).filter(Boolean));
   return [...mine, ...[...state.echo.values()].filter(e => e.thread === d.id && !have.has(e.cid))];
 }
 function queuedNodes(d) { return queuedEntries(d).filter(e => !((d.messages || []).some(m => m.client_id === e.cid))).map(e => queuedNode(d, e)); }
@@ -1427,13 +1429,15 @@ function takeDraft(into) {
   return [quoted, c.text.trim() ? c.text : ''].filter(Boolean).join('\n\n');
 }
 let toastTimer = 0;
-function showToast(text) {
+// `action` ({ label, onclick }) adds a button (an Undo) and keeps the toast up longer.
+function showToast(text, action) {
   const node = $('toast');
   if (!node) return;
   node.textContent = text;
+  if (action) node.append(el('button', { type: 'button', class: 'toast-act', onclick: () => { node.hidden = true; clearTimeout(toastTimer); void action.onclick(); } }, action.label));
   node.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { node.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { node.hidden = true; }, action ? 8000 : 3200);
 }
 // A read-only thread only carries updates: no composer, and a note saying why.
 function drawReadOnly(d) {
@@ -1541,7 +1545,7 @@ function drawKept(d) {
   host.replaceChildren(...rows.map(x => {
     const input = el('input', { type: 'text', class: 'qkept', maxlength: '1000', 'aria-label': 'Kept answer' });
     input.value = x.text;
-    input.addEventListener('input', () => { drafts.set(qdKey(d.id, x.qid), input.value); typingPing.note(); });
+    input.addEventListener('input', () => { drafts.set(qdKey(d.id, x.qid), input.value); typingPing.note(state.openId); });
     const send = async () => {
       const text = input.value.trim(); if (!text || state.busy) return;
       state.busy = true;
@@ -1839,7 +1843,7 @@ async function send(event, forceAside = false) {
     // A file still on its way is stopped (its upload id is kept, so the queue carries on from there); a file already on the server is named by its id.
     for (const f of files) { f.controller?.abort(); }
     const held = files.map(f => ({ name: f.name, size: f.size, type: f.type, blob: f.file, ...(f.id ? { id: f.id } : {}), ...(f.uploadId && !f.id ? { uploadId: f.uploadId } : {}) }));
-    try { await outbox.add({ cid, thread: id, text, images, files: held, reply_to, ...(quote ? { quote } : {}), aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.files.push(...files); state.replyTo = replying; state.quote = quoting; redrawComposer(); throw error; }
+    try { await outbox.add({ cid, thread: id, project: state.project, text, images, files: held, reply_to, ...(quote ? { quote } : {}), aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.files.push(...files); state.replyTo = replying; state.quote = quoting; redrawComposer(); throw error; }
     drawReplyBar();
   };
   try {
@@ -1884,7 +1888,11 @@ function drawCloseDone() {
   b.textContent = `Close all done threads (${n})`;
 }
 async function closeDone() {
-  try { const r = await post('threads/close-done', {}); showToast(`Closed ${r.closed?.length || 0} done ${r.closed?.length === 1 ? 'thread' : 'threads'}`); await refreshList(); if (state.openId) await loadThread(state.openId, { quiet: true }); }
+  try {
+    const r = await post('threads/close-done', {});
+    const ids = Array.isArray(r.closed) ? r.closed : [];
+    showToast(`Closed ${ids.length} done ${ids.length === 1 ? 'thread' : 'threads'}`, ids.length ? { label: 'Undo', onclick: async () => { try { await post('threads/reopen', { ids }); await refreshList(); if (state.openId) await loadThread(state.openId, { quiet: true }); showToast(`Reopened ${ids.length}`); } catch (error) { showToast(error.message); } } } : undefined);
+    await refreshList(); if (state.openId) await loadThread(state.openId, { quiet: true }); }
   catch (error) { showToast(error.message); }
 }
 // ---- Waiting on you, across every project: one list of every open question and needs-you item.
@@ -2100,7 +2108,7 @@ function onKey(e) {
 paintKeys();
 $('help-rows').replaceChildren(...SHORTCUTS.map(([k, what]) => el('tr', {}, el('td', {}, ...k.split(' / ').flatMap((part, i) => [...(i ? [' or '] : []), kbd(part)])), el('td', { text: what }))));
 $('composer').addEventListener('submit', send);
-$('text').addEventListener('input', () => { if (THREAD_ID.test(state.openId || '')) drafts.set(cKey(state.openId), $('text').value); if ($('text').value.trim()) typingPing.note(); else typingPing.stop(); });
+$('text').addEventListener('input', () => { if (THREAD_ID.test(state.openId || '')) drafts.set(cKey(state.openId), $('text').value); if ($('text').value.trim()) typingPing.note(state.openId); else typingPing.stop(); });
 $('close-done')?.addEventListener('click', () => { void closeDone(); });
 $('waiting-all')?.addEventListener('click', openWaitingAll);
 $('waiting-all-close')?.addEventListener('click', () => { $('waiting-all-dialog').close(); drawWaitingAll(); });
@@ -2266,7 +2274,7 @@ function drawWaiting(d) {
     if (q.allow_other) {
       const other = el('input', { type: 'text', class: 'qother', placeholder: 'Other (write your own answer)', maxlength: '1000', 'aria-label': 'Other answer' });
       if (typed) other.value = typed;
-      other.addEventListener('input', () => { const s = selFor(q); s.other = other.value; persistQ(q.id); typingPing.note(); });
+      other.addEventListener('input', () => { const s = selFor(q); s.other = other.value; persistQ(q.id); typingPing.note(state.openId); });
       other.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); const s = selFor(q); s.ids = []; s.other = other.value; void submitAnswer(q); } });
       kids.push(other);
     }
