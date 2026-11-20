@@ -50,7 +50,7 @@ async function updateSession<T>(dir: string, id: string, fn: (s: Session) => T):
 // FEEDBACK_PROJECTS: a JSON file mapping a page origin to the folder whose sessions handle its captures.
 export function loadProjects(env: Record<string, string | undefined> = process.env): Projects {
   const file = env.FEEDBACK_PROJECTS?.trim();
-  if (!file) return {};
+  if (!file || file.startsWith('[')) return {}; // a JSON list is the server's own project list, not our file
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
     return Object.fromEntries(Object.entries(raw).flatMap(([origin, folder]) => {

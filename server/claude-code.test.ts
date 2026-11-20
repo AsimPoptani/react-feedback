@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as store from './store';
-import { agentName, onEnd, onPrompt, onStop, ownsCapture, readSession, runClaudeCode, unseen, wait } from './claude-code';
+import { agentName, onEnd, onPrompt, onStop, loadProjects as loadOriginMap, ownsCapture, readSession, runClaudeCode, unseen, wait } from './claude-code';
+import { loadProjects as loadProjectList, projectList } from './projects';
 import { injectWidget } from './proxy';
 import { areaOf, parseAreas } from './inbox/areas.js';
 
@@ -197,4 +198,12 @@ test('with conversations on, a conversation you start in the inbox goes to the w
   expect(off).toBe('');
   await onEnd(dir, { session_id: 'sess-2', cwd: H.cwd });
   expect(await quiet).toBe(0);
+});
+
+test('FEEDBACK_PROJECTS holds either the server project list (JSON) or the bridge origin map (a file path), never both', () => {
+  const list = '[{"id":"a","name":"A","dir":"/tmp/a"}]';
+  expect(projectList({ FEEDBACK_PROJECTS: '/Users/me/projects.json' })).toBe('');
+  expect(loadProjectList({ FEEDBACK_PROJECTS: '/Users/me/projects.json', FEEDBACK_DIR: '/tmp/d' }).map(p => p.dir)).toEqual(['/tmp/d']);
+  expect(loadProjectList({ FEEDBACK_PROJECTS: list }).map(p => p.id)).toEqual(['a']);
+  expect(loadOriginMap({ FEEDBACK_PROJECTS: list })).toEqual({});
 });
