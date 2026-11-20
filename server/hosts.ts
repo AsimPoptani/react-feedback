@@ -1,7 +1,10 @@
 // Which Host names the inbox and the proxy answer to. A page on another site can make a browser send requests to 127.0.0.1 under its own name
-// (DNS rebinding); refusing every Host we do not expect closes that. Share links and one-time secret links are credential-protected and exempt,
-// because they are meant to be opened from anywhere, by whatever name the server is reached under.
-const PUBLIC_LINK = /^\/__feedback\/(?:s|x)\//;
+// (DNS rebinding); refusing every Host we do not expect closes that. Share links, and the exact one-time secret routes, are credential-protected
+// and exempt, because they are meant to be opened from anywhere, by whatever name the server is reached under. A prefix would also let a
+// dot-segment through once the URL parser has normalised it, so the secret exemption is the same shapes the remote listener allows.
+const SHARE_LINK = /^\/__feedback\/s\//;
+const SECRET_PAGE = /^\/__feedback\/x\/[A-Za-z0-9_-]{43}$/;
+const SECRET_OPEN = /^\/__feedback\/x\/[A-Za-z0-9_-]{43}\/open$/;
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 
 // A Host header as a name and whether it is an IP literal: "name", "name:port", "1.2.3.4:port" or a bracketed "[::1]:port". Anything else (a comma list,
@@ -27,7 +30,10 @@ export const hostOfUrl = (url: string | null | undefined): string => { try { ret
 // Never throws: a header that cannot be read is a refusal.
 export function hostAllowed(req: Request, env: Record<string, string | undefined> = process.env): boolean {
   try {
-    if (PUBLIC_LINK.test(new URL(req.url).pathname)) return true;
+    const path = new URL(req.url).pathname;
+    if (SHARE_LINK.test(path)) return true;
+    if ((req.method === 'GET' || req.method === 'HEAD') && SECRET_PAGE.test(path)) return true;
+    if (req.method === 'POST' && SECRET_OPEN.test(path)) return true;
     const host = parseHost(req.headers.get('host') ?? new URL(req.url).host); // no Host header (HTTP/1.0): the address the server saw
     if (!host) return false;
     if (host.ip || host.name === 'localhost' || host.name.endsWith('.localhost')) return true;

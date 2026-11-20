@@ -61,3 +61,9 @@ export function clientKey(request: Request, server?: ServerLike, header: string 
   }
   try { return server?.requestIP?.(request)?.address ?? 'unknown'; } catch { return 'unknown'; }
 }
+
+// The remote listener chooses the client-IP header for a request (a quick tunnel uses cf-connecting-ip). Secret opens read it here.
+// Without this, every opener behind that tunnel shares the loopback socket address and one rate-limit bucket.
+const markedIp = new WeakMap<Request, string>();
+export const markClientIpHeader = (request: Request, header: string) => { markedIp.set(request, header); };
+export const markedClientIpHeader = (request: Request): string | undefined => markedIp.get(request);

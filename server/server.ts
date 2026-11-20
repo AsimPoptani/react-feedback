@@ -18,7 +18,7 @@ import { moveThreadToProject } from './move-project';
 import * as files from './files';
 import * as replay from './replay';
 import { shellPage, withCapture } from './shell';
-import { ByteBudget, Limiter, clientKey, type ServerLike } from './limits';
+import { ByteBudget, Limiter, clientKey, markedClientIpHeader, type ServerLike } from './limits';
 import { pairRoutes, type ExtraRoute } from './pair-routes';
 import { pairingFor } from './pair';
 import { hostAllowed, hostChecked, hostRefusal } from './hosts';
@@ -402,7 +402,7 @@ async function secretPublic(req: Request, path: string, dirs: string[], limits: 
   const id = open[1]!;
   try {
     if (!(await discardSmall(req))) return Response.json({ detail: 'Body is too large' }, { status: 413, headers: SECRET_HEADERS });
-    const caller = clientKey(req, server);
+    const caller = clientKey(req, server, markedClientIpHeader(req));
     if (!limits.caller.take(caller, now) || !limits.id.take(id, now)) return Response.json({ detail: 'Too many tries. Wait a minute.' }, { status: 429, headers: { ...SECRET_HEADERS, 'Retry-After': '60' } });
     let opened: { ciphertext: string; iv: string } | null = null;
     for (const folder of dirs) {
@@ -417,7 +417,14 @@ async function secretPublic(req: Request, path: string, dirs: string[], limits: 
   }
 }
 async function secretApiRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, now: number): Promise<Response | null> {
-  if (path === `${PREFIX}/api/secret-links` && req.method === 'GET') return json({ links: await secrets.listSecrets(dir, now) });
+  if (path === `${PREFIX}/api/secret-links` && req.method === 'GET') {
+    try { return json({ links: await secrets.listSecrets(dir, now) }); }
+    catch (error) {
+      if (error instanceof Invalid) throw error;
+      console.error('Secret link error', 'list');
+      throw new Invalid('Could not list secret links', 500);
+    }
+  }
   if (path === `${PREFIX}/api/secret-links` && req.method === 'POST') {
     const data = await read(req);
     try {
@@ -848,7 +855,12 @@ export function dataDirs(env: Record<string, string | undefined> = process.env):
 }
 // Partial uploads and finished ones no message took are removed after 24 hours: one sweep now, then every hour. Returns a function that stops it.
 export function startUploadSweep(dirs: string[], everyMs = 3600e3): () => void {
-  const sweep = () => { for (const folder of dirs) void files.cleanStale(folder).catch(() => undefined); };
+  const sweep = () => {
+    for (const folder of dirs) {
+      void files.cleanStale(folder).catch(() => undefined);
+      void secrets.sweepExpired(folder).catch(() => undefined);
+    }
+  };
   sweep();
   const timer = setInterval(sweep, everyMs); timer.unref();
   return () => clearInterval(timer);

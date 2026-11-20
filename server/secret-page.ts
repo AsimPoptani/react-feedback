@@ -1,5 +1,5 @@
 // The page a secret link serves. It is package HTML only: no inbox script, no inbox style, no request until Reveal is pressed.
-// The key stays in the URL fragment until Reveal, then the page wipes the fragment. The fragment is never sent.
+// The key stays in the URL fragment until a reveal that is not rate-limited, then the page wipes the fragment. A 429 leaves it so Reveal can be pressed again. The fragment is never sent.
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
 
 const SCRIPT = String.raw`(function () {
@@ -28,34 +28,48 @@ const SCRIPT = String.raw`(function () {
     try {
       var box = document.createElement('textarea');
       box.value = text; box.setAttribute('readonly', '');
+      box.setAttribute('spellcheck', 'false'); box.setAttribute('autocomplete', 'off'); box.setAttribute('autocapitalize', 'off'); box.setAttribute('autocorrect', 'off');
+      box.setAttribute('data-gramm', 'false'); box.setAttribute('data-enable-grammarly', 'false'); box.setAttribute('data-lpignore', 'true'); box.setAttribute('data-1p-ignore', 'true'); box.setAttribute('data-bwignore', 'true');
       box.style.position = 'fixed'; box.style.opacity = '0';
       document.body.appendChild(box); box.select();
       var ok = document.execCommand('copy'); box.remove(); return !!ok;
     } catch (e) { return false; }
   }
+  function unpad(bytes) {
+    if (!bytes || bytes.length < 64 || bytes.length % 64 !== 0 || bytes[0] !== 1) return bytes;
+    var len = ((bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+    if (len > bytes.length - 4) return bytes;
+    for (var i = 4 + len; i < bytes.length; i++) if (bytes[i] !== 0) return bytes;
+    return bytes.subarray(4, 4 + len);
+  }
   reveal.addEventListener('click', function () {
     if (reveal.disabled) return;
     reveal.disabled = true;
     var hash = location.hash.charAt(0) === '#' ? location.hash.slice(1) : location.hash;
-    wipe();
     var path = location.pathname, m = /^\/__feedback\/x\/([A-Za-z0-9_-]{43})$/.exec(path);
     var keyBytes = null;
     try { keyBytes = hash ? b64urlToBytes(decodeURIComponent(hash)) : null; } catch (e) { keyBytes = null; }
-    if (!m || !keyBytes || keyBytes.length !== 32 || !crypto.subtle) { if (keyBytes) keyBytes.fill(0); show(GONE); return; }
+    if (!m || !keyBytes || keyBytes.length !== 32 || !crypto.subtle) { wipe(); if (keyBytes) keyBytes.fill(0); show(GONE); return; }
     fetch(path + '/open', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, status: r.status, data: data }; }, function () { return { ok: false, status: r.status, data: null }; }); })
       .then(function (res) {
-        if (res.status === 429) { show('Too many tries. Wait a minute.'); return; }
+        if (res.status === 429) {
+          reveal.disabled = false;
+          msg.hidden = false;
+          msg.textContent = 'Too many tries, wait a minute and press Reveal again';
+          return;
+        }
+        wipe();
         if (!res.ok || !res.data || typeof res.data.ciphertext !== 'string' || typeof res.data.iv !== 'string') { show(GONE); return; }
         var iv = b64ToBytes(res.data.iv), cipher = b64ToBytes(res.data.ciphertext);
         return crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']).then(function (key) {
           return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, cipher);
         }).then(function (plain) {
-          secret.textContent = new TextDecoder().decode(plain);
+          secret.textContent = new TextDecoder().decode(unpad(new Uint8Array(plain)));
           secret.hidden = false; copy.hidden = false; reveal.hidden = true; msg.hidden = true;
         });
       })
-      .catch(function () { show(GONE); })
+      .catch(function () { wipe(); show(GONE); })
       .then(function () { if (keyBytes) keyBytes.fill(0); });
   });
   copy.addEventListener('click', function () {
@@ -64,6 +78,7 @@ const SCRIPT = String.raw`(function () {
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(legacyCopy(text)); });
     else done(legacyCopy(text));
   });
+  window.addEventListener('pagehide', function () { secret.textContent = ''; });
 })();
 `;
 
@@ -88,7 +103,7 @@ p.error { color: var(--ink); font-weight: 700; }
 <p>Nothing is sent until you choose Reveal. The link stops working after that.</p>
 <button type="button" id="reveal">Reveal</button>
 <p id="msg" class="error" role="alert" hidden></p>
-<div id="secret" data-rf-private hidden></div>
+<div id="secret" data-rf-private hidden spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" data-gramm="false" data-enable-grammarly="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></div>
 <button type="button" id="copy" hidden>Copy</button>
 </main>
 <script nonce="${nonce}">${SCRIPT}</script>

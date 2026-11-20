@@ -5,7 +5,7 @@ import { donutLabel, donutNode } from './donut.js';
 import { asideGroups, isAside, parseBtw } from './aside.js';
 import { ageOf, filterRows, stateOf } from './tracker.js';
 import { firstPlainLine, inline, markdown, plainText } from './markdown.js';
-import { secretStatusLine, secretUrl } from './secret.js';
+import { padSecret, secretStatusLine, secretUrl } from './secret.js';
 import { createOutbox, newCid } from './outbox.js';
 import { UploadError, cancelRemote, uploadFile } from './uploader.js';
 import { presenceLines } from './presence.js';
@@ -2380,7 +2380,7 @@ async function encryptSecret(text) {
   const keyBytes = crypto.getRandomValues(new Uint8Array(32));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
-  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, padSecret(text)));
   const packed = { ciphertext: bytesToBase64(cipher), iv: bytesToBase64(iv), fragment: bytesToBase64url(keyBytes) };
   keyBytes.fill(0);
   return packed;
@@ -2426,6 +2426,11 @@ async function createSecretLink(event) {
   if (text.length >= 8 && JSON.stringify(body).includes(text)) { showError($('secret-error'), 'The secret would have been sent in the clear. Nothing was sent.'); return; }
   try {
     const created = await post('secret-links', body);
+    if (!created || typeof created.url !== 'string' || !/^\/__feedback\/x\/[A-Za-z0-9_-]{43}$/.test(created.url)) {
+      $('secret-text').value = '';
+      showError($('secret-error'), 'The server did not return a usable link. Nothing is shown.');
+      return;
+    }
     const url = `${await secretOrigin()}${created.url}#${packed.fragment}`;
     $('secret-text').value = ''; $('secret-text').hidden = true;
     const label = secretLabel(); if (label) label.hidden = true;

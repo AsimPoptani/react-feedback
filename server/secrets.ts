@@ -1,5 +1,6 @@
 // One-time secret links. The browser encrypts; this file only ever holds ciphertext, the IV, an expiry and how many views remain.
 // The key is not here. A miss (unknown, expired, used up, revoked) is just a miss: callers must not learn which.
+// An expired file is deleted when a link is listed or created, and by the hourly sweep, so a never-opened ciphertext does not stay on disk.
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -85,7 +86,10 @@ export async function createSecret(dir: string, input: Record<string, unknown>, 
   const expires_at = new Date(now + EXPIRY_MS[expires]).toISOString();
   const record: SecretRecord = { id, ciphertext, iv, expires_at, views_left: views, created_at };
   await ensureFolder(dir);
-  await writeSecretFile(fileOf(dir, id), `${JSON.stringify(record)}\n`);
+  await withLock(folderOf(dir), async () => {
+    await writeSecretFile(fileOf(dir, id), `${JSON.stringify(record)}\n`);
+    await scanSecrets(dir, now, () => undefined);
+  });
   return { id, path: `/__feedback/x/${id}`, expires_at, views_left: views, created_at };
 }
 
@@ -124,21 +128,42 @@ export async function revokeSecret(dir: string, id: string): Promise<{ revoked: 
   });
 }
 
-export async function listSecrets(dir: string, now = Date.now()): Promise<SecretInfo[]> {
-  if (!(await folderReady(dir))) return [];
+// Reads every secret file. An expired one is deleted. An unreadable or corrupt one is skipped and only a 6-character id prefix is logged.
+async function scanSecrets(dir: string, now: number, keep: (rec: SecretRecord) => void): Promise<void> {
   let names: string[] = [];
-  try { names = await readdir(folderOf(dir)); } catch { return []; }
-  const out: SecretInfo[] = [];
+  try { names = await readdir(folderOf(dir)); } catch { return; }
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     const id = name.slice(0, -5);
     if (!SECRET_ID.test(id)) continue;
-    const raw = await optional(fileOf(dir, id));
+    const file = fileOf(dir, id);
+    let raw: string | null;
+    try { raw = await optional(file); }
+    catch { console.error('Secret link error', secretPrefix(id)); continue; }
     if (raw === null) continue;
     const rec = parseRecord(raw);
-    if (!rec || Date.parse(rec.expires_at) <= now || rec.views_left <= 0) continue;
-    out.push({ id: rec.id, created_at: rec.created_at, expires_at: rec.expires_at, views_left: rec.views_left });
+    if (!rec || rec.id !== id) { console.error('Secret link error', secretPrefix(id)); continue; }
+    if (Date.parse(rec.expires_at) <= now) {
+      try { await rm(file, { force: true }); }
+      catch { console.error('Secret link error', secretPrefix(id)); }
+      continue;
+    }
+    if (rec.views_left <= 0) continue;
+    keep(rec);
   }
-  out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
-  return out;
+}
+
+export async function sweepExpired(dir: string, now = Date.now()): Promise<void> {
+  if (!(await folderReady(dir))) return;
+  await withLock(folderOf(dir), () => scanSecrets(dir, now, () => undefined));
+}
+
+export async function listSecrets(dir: string, now = Date.now()): Promise<SecretInfo[]> {
+  if (!(await folderReady(dir))) return [];
+  return withLock(folderOf(dir), async () => {
+    const out: SecretInfo[] = [];
+    await scanSecrets(dir, now, rec => { out.push({ id: rec.id, created_at: rec.created_at, expires_at: rec.expires_at, views_left: rec.views_left }); });
+    out.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+    return out;
+  });
 }

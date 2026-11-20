@@ -860,7 +860,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <h2 id="secret-h">Share a secret</h2>
     <p class="hint">The secret is encrypted in this browser before it is sent. The server stores only the ciphertext. Inbox threads may be read by agents: posting the link into a thread is enough for an agent to open it, so send the link somewhere else if you don't want that.</p>
     <label for="secret-text">Secret</label>
-    <textarea id="secret-text" maxlength="8000" rows="4" required placeholder="Paste a password or a key"></textarea>
+    <textarea id="secret-text" maxlength="8000" rows="4" required placeholder="Paste a password or a key" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" data-gramm="false" data-enable-grammarly="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></textarea>
     <fieldset>
       <legend>Link expires</legend>
       <label><input type="radio" name="secret-exp" value="10m"> 10 min</label>
@@ -875,7 +875,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     </fieldset>
     <p class="error" id="secret-error" role="alert" hidden></p>
     <p class="hint" id="secret-note" hidden></p>
-    <input type="text" id="secret-url" readonly hidden>
+    <input type="text" id="secret-url" readonly hidden spellcheck="false">
     <div class="bar"><button type="button" id="secret-cancel">Close</button><button type="submit" class="primary" id="secret-create">Create link</button><button type="button" id="secret-copy" hidden>Copy</button></div>
   </form>
 </dialog>

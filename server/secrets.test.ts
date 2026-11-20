@@ -1,10 +1,11 @@
 // One-time secret links: the server stores ciphertext only, one view cannot be taken twice, and a miss is one message.
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { chmod, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHandler, serverOptions } from './server';
+import { createHandler, serverOptions, startUploadSweep } from './server';
 import { hostAllowed } from './hosts';
+import { padSecret, unpadSecret } from './inbox/secret.js';
 import { Pairing } from './pair';
 import { createRemoteHandler, isSecretRoute } from './remote';
 import { GONE } from './secrets';
@@ -253,4 +254,133 @@ test('a secret created in another project still opens', async () => {
   expect(await treeHas(alpha, sealed.ciphertext)).toBe(false);
   const opened = await (await multi(openReq(created.id))).json() as { ciphertext: string };
   expect(opened.ciphertext).toBe(sealed.ciphertext);
+});
+
+test('padding hides the length inside a 64-byte bucket and an old unpadded secret still decodes', () => {
+  const short = padSecret('a');
+  const medium = padSecret('a'.repeat(20));
+  expect(short.length).toBe(64);
+  expect(medium.length).toBe(64);
+  expect(new TextDecoder().decode(unpadSecret(short))).toBe('a');
+  expect(padSecret('a'.repeat(61)).length).toBe(128);
+  const legacy = new TextEncoder().encode('horse battery staple');
+  expect(new TextDecoder().decode(unpadSecret(legacy))).toBe('horse battery staple');
+  const block = new Uint8Array(64);
+  block.fill(0x61);
+  expect(new TextDecoder().decode(unpadSecret(block))).toBe('a'.repeat(64));
+  const almost = padSecret('keep');
+  almost[10] = 1;
+  expect(unpadSecret(almost)).toBe(almost);
+});
+
+test('an expired secret file is removed by a list and by a create', async () => {
+  const sealed = await seal('expires-on-disk');
+  const listed = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, expires: '10m' }))).json() as { id: string };
+  now += 11 * 60 * 1000;
+  const list = await handle(new Request('http://local/__feedback/api/secret-links'));
+  expect(list.status).toBe(200);
+  expect((await list.json() as { links: unknown[] }).links).toEqual([]);
+  await expect(stat(join(dir, '_secrets', `${listed.id}.json`))).rejects.toThrow();
+
+  now = Date.parse('2026-11-20T12:00:00Z');
+  const stale = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, expires: '10m' }))).json() as { id: string };
+  now += 11 * 60 * 1000;
+  const fresh = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, expires: '1h' }))).json() as { id: string };
+  await expect(stat(join(dir, '_secrets', `${stale.id}.json`))).rejects.toThrow();
+  expect((await stat(join(dir, '_secrets', `${fresh.id}.json`))).isFile()).toBe(true);
+  const after = await (await handle(new Request('http://local/__feedback/api/secret-links'))).json() as { links: { id: string }[] };
+  expect(after.links.map(link => link.id)).toEqual([fresh.id]);
+});
+
+test('the hourly sweep deletes an expired secret and leaves a live one', async () => {
+  const sealed = await seal('sweep-me');
+  const dead = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, expires: '1d' }))).json() as { id: string };
+  const live = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, expires: '1d' }))).json() as { id: string };
+  const deadFile = join(dir, '_secrets', `${dead.id}.json`);
+  const liveFile = join(dir, '_secrets', `${live.id}.json`);
+  const stamp = async (file: string, expires_at: string) => {
+    const rec = JSON.parse(await readFile(file, 'utf8')) as { expires_at: string };
+    rec.expires_at = expires_at;
+    await writeFile(file, `${JSON.stringify(rec)}\n`);
+  };
+  await stamp(deadFile, '2000-01-01T00:00:00.000Z');
+  await stamp(liveFile, '2099-01-01T00:00:00.000Z');
+  const stop = startUploadSweep([dir]);
+  try {
+    let gone = false;
+    for (let i = 0; i < 50 && !gone; i++) {
+      try { await stat(deadFile); } catch { gone = true; }
+      if (!gone) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(gone).toBe(true);
+    expect((await stat(liveFile)).isFile()).toBe(true);
+  } finally { stop(); }
+});
+
+test('a list skips an unreadable or corrupt secret and logs only a prefix', async () => {
+  const sealed = await seal(PLAIN);
+  const good = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, views: 2 }))).json() as { id: string };
+  const hidden = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, views: 2 }))).json() as { id: string };
+  const corruptId = 'C'.repeat(43);
+  await writeFile(join(dir, '_secrets', `${corruptId}.json`), '{not-json');
+  await chmod(join(dir, '_secrets', `${hidden.id}.json`), 0o000);
+  logs.length = 0;
+  try {
+    const response = await handle(new Request('http://local/__feedback/api/secret-links'));
+    expect(response.status).toBe(200);
+    const body = await response.json() as { links: { id: string }[] };
+    const ids = body.links.map(link => link.id);
+    expect(ids).toContain(good.id);
+    expect(ids).not.toContain(corruptId);
+    const flat = logged();
+    expect(flat).not.toContain(corruptId);
+    expect(flat).toContain(corruptId.slice(0, 6));
+    expect(flat).not.toContain(hidden.id);
+    expect(flat).not.toContain(sealed.ciphertext);
+    if (!ids.includes(hidden.id)) expect(flat).toContain(hidden.id.slice(0, 6));
+    expect((await stat(join(dir, '_secrets', `${corruptId}.json`))).isFile()).toBe(true);
+  } finally {
+    await chmod(join(dir, '_secrets', `${hidden.id}.json`), 0o600);
+  }
+});
+
+test('a self-started tunnel rate-limits secret opens by cf-connecting-ip', async () => {
+  const header = process.env.FEEDBACK_CLIENT_IP_HEADER;
+  delete process.env.FEEDBACK_CLIENT_IP_HEADER;
+  try {
+    const sealed = await seal(PLAIN);
+    const created = await (await handle(post({ ciphertext: sealed.ciphertext, iv: sealed.iv, views: 3 }))).json() as { id: string };
+    const remote = createRemoteHandler(handle, new Pairing(dir), { publicUrl: () => PUBLIC, now: () => now, clientIpHeader: 'cf-connecting-ip' });
+    const server = { requestIP: () => ({ address: '127.0.0.1' }) };
+    let seq = 0;
+    const call = (ip: string, id = `B${String(seq++).padStart(2, '0')}${'C'.repeat(40)}`) => remote(new Request(`${PUBLIC}/__feedback/x/${id}/open`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': ip }, body: '{}',
+    }), server);
+    for (let i = 0; i < 5; i++) expect((await call('203.0.113.9')).status).toBe(404);
+    expect((await call('203.0.113.9')).status).toBe(429);
+    expect((await call('203.0.113.10')).status).toBe(404);
+    expect((await call('203.0.113.11', created.id)).status).toBe(200);
+  } finally {
+    if (header === undefined) delete process.env.FEEDBACK_CLIENT_IP_HEADER; else process.env.FEEDBACK_CLIENT_IP_HEADER = header;
+  }
+});
+
+test('an unexpected host is allowed only the exact secret page and open', async () => {
+  const id = 'E'.repeat(43);
+  const ask = (path: string, method = 'GET') => hostAllowed(new Request(`http://attacker.example${path}`, { method, headers: { host: 'attacker.example' } }), {});
+  expect(ask(`/__feedback/x/${id}`, 'GET')).toBe(true);
+  expect(ask(`/__feedback/x/${id}`, 'HEAD')).toBe(true);
+  expect(ask(`/__feedback/x/${id}/open`, 'POST')).toBe(true);
+  expect(ask(`/__feedback/x/${id}/open`, 'GET')).toBe(false);
+  expect(ask(`/__feedback/x/${id}`, 'POST')).toBe(false);
+  expect(ask(`/__feedback/x/${id}/`, 'GET')).toBe(false);
+  expect(ask('/__feedback/x/', 'GET')).toBe(false);
+  expect(ask(`/__feedback/x/${'E'.repeat(42)}`, 'GET')).toBe(false);
+  expect(ask(`/__feedback/x/${id}E`, 'GET')).toBe(false);
+  expect(isSecretRoute(`/__feedback/x/${id}`, 'HEAD')).toBe(true);
+  expect(ask(`/__feedback/s/${'a'.repeat(20)}`, 'POST')).toBe(true);
+  const opts = serverOptions({ FEEDBACK_DIR: dir });
+  expect((await opts.fetch(new Request(`http://attacker.example/__feedback/x/${id}/open`, { headers: { host: 'attacker.example' } }))).status).toBe(403);
+  expect((await opts.fetch(new Request(`http://attacker.example/__feedback/x/${id}`, { method: 'HEAD', headers: { host: 'attacker.example' } }))).status).toBe(200);
+  expect((await opts.fetch(new Request(`http://attacker.example/__feedback/x/${id}/open`, { method: 'POST', headers: { host: 'attacker.example', 'Content-Type': 'application/json' }, body: '{}' }))).status).toBe(404);
 });

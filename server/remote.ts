@@ -1,14 +1,14 @@
 // Remote mode: a second listener, on 127.0.0.1 only, for a tunnel or reverse proxy to point at.
 // Behind a tunnel EVERY request arrives from loopback, so loopback is never trusted here. Each request needs the device cookie, except exactly these:
 //   - the share routes (GET /__feedback/s/<token>, POST /__feedback/s/<token>/feedback|replay): the token is their credential;
-//   - the secret routes (GET /__feedback/x/<id>, POST /__feedback/x/<id>/open): the fragment key is their credential, and it is not on these paths;
+//   - the secret routes (GET or HEAD /__feedback/x/<id>, POST /__feedback/x/<id>/open): the fragment key is their credential, and it is not on these paths;
 //   - POST /__feedback/api/pair/exchange: it is how a device gets its cookie;
 //   - GET /__feedback/inbox/ (and its redirect), which then is a small pairing page and not the inbox.
 // The local listener is the ordinary handler and is not touched by any of this.
 import { randomBytes } from 'node:crypto';
 import { devNull } from 'node:os';
 import { Invalid } from './store';
-import { Limiter, clientKey, type ServerLike } from './limits';
+import { Limiter, clientKey, markClientIpHeader, type ServerLike } from './limits';
 import { CODE_SHAPE, COOKIE_NAME, DEVICE_TTL_MS, deviceName, pairingFor, type Pairing } from './pair';
 import { remoteRequests } from './pair-routes';
 import { hostAllowed, hostOfUrl, markHostChecked, parseHost } from './hosts';
@@ -42,7 +42,7 @@ function cookieOf(req: Request): string | null {
 }
 
 export const isShareRoute = (path: string, method: string) => (method === 'GET' && SHARE_PAGE.test(path)) || (method === 'POST' && SHARE_SEND.test(path));
-export const isSecretRoute = (path: string, method: string) => (method === 'GET' && SECRET_PAGE.test(path)) || (method === 'POST' && SECRET_OPEN.test(path));
+export const isSecretRoute = (path: string, method: string) => ((method === 'GET' || method === 'HEAD') && SECRET_PAGE.test(path)) || (method === 'POST' && SECRET_OPEN.test(path));
 
 // The page an unpaired browser is given at the inbox address. It reads the code from the URL fragment (which a browser never sends), wipes the fragment, sends the code once, and
 // goes on to the thread named in `to`. Everything is inline under a nonce, so it needs no other file from the server.
@@ -170,7 +170,12 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, rawOptions: 
     // A Host header that is there but empty is not a name at all: refused plainly, whatever else is configured.
     if (req.headers.has('host') && !req.headers.get('host')!.trim()) return reply({ kind: 'invalid_request', detail: 'A Host header is required' }, 400);
     if (options.hostGuard && !remoteHostOk(req)) return reply({ kind: 'forbidden', detail: 'This host name is not allowed here. Use the public address, or list the name in FEEDBACK_ALLOWED_HOSTS.' }, 403);
-    if (isShareRoute(path, method) || isSecretRoute(path, method)) { markHostChecked(req); return inner(req, server); }
+    if (isShareRoute(path, method) || isSecretRoute(path, method)) {
+      markHostChecked(req);
+      // The same header the pairing limiter uses. The inner handler cannot see this option, and the process env may not name it.
+      if (isSecretRoute(path, method) && options.clientIpHeader !== undefined) markClientIpHeader(req, options.clientIpHeader);
+      return inner(req, server);
+    }
     if (path === EXCHANGE && method === 'POST') return exchange(req, server);
 
     const token = cookieOf(req);
