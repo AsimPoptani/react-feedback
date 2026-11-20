@@ -11,11 +11,20 @@ export function injectWidget(html: string, position?: string): string {
   return /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${tag}</body>`) : `${html}${tag}`;
 }
 
-export function proxyOptions(target: string, port: number, feedback: string, position?: string) {
+// The proxy has no sign-in, and what is written through it can drive a Claude Code session: it listens on this machine only. Any other address needs
+// --unsafe-public, which says in its name what it risks.
+export const isLoopback = (host: string) => /^(localhost|\[?::1\]?|127(\.\d{1,3}){3})$/i.test(host.trim());
+export function bindHost(host: string | undefined, unsafePublic = false): string {
+  const wanted = host?.trim() || '127.0.0.1';
+  if (!isLoopback(wanted) && !unsafePublic) throw new Error(`Refusing to listen on ${wanted}: the proxy has no sign-in and only listens on this machine (127.0.0.1). Pass --unsafe-public if you really mean to expose it.`);
+  return wanted;
+}
+
+export function proxyOptions(target: string, port: number, feedback: string, position?: string, host = '127.0.0.1') {
   const app = new URL(target), inbox = new URL(feedback);
   if (!/^https?:$/.test(app.protocol)) throw new Error('The target must be an http(s) URL, for example http://localhost:5391');
   return {
-    port, hostname: '127.0.0.1',
+    port, hostname: host,
     async fetch(req: Request, server: Server<Pipe>): Promise<Response | undefined> {
       const url = new URL(req.url);
       const base = url.pathname === PREFIX || url.pathname.startsWith(`${PREFIX}/`) ? inbox : app;

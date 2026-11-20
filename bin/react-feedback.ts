@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // react-feedback serve [--remote]  start the feedback server (FEEDBACK_DIR, FEEDBACK_HOST, PORT); --remote adds the paired-device listener (FEEDBACK_REMOTE_PORT, FEEDBACK_PUBLIC_URL)
-// react-feedback mcp           an MCP server on stdio (FEEDBACK_AGENT_NAME names the agent)
+// react-feedback mcp           an MCP server on stdio (FEEDBACK_AGENT_NAME names the agent; --channel also makes it a Claude Code channel)
 // react-feedback claude-code   the Claude Code bridge: hooks that give each session a thread, and wake it when you write there
 // react-feedback --version     print the version
 // react-feedback <command> ... the agent CLI (list, reply, new, status, ask, todo, metrics ...)
@@ -42,13 +42,15 @@ if (args[0] === "serve") {
     process.exit(1);
   });
 } else if (args[0] === "proxy") {
-  // react-feedback proxy <app-url> --port <n> [--position bottom-right]: the app on :n with the widget in it, no change to the app
-  const { proxyOptions } = await import("../server/proxy");
+  // react-feedback proxy <app-url> --port <n> [--position bottom-right] [--host h --unsafe-public]: the app on :n with the widget in it, no change to the app
+  const { proxyOptions, bindHost } = await import("../server/proxy");
   const flag = (name: string) => { const i = args.indexOf(`--${name}`); return i > 0 ? args[i + 1] : undefined; };
   const target = args[1], port = Number(flag("port"));
-  if (!target || !Number.isInteger(port) || port < 1) { console.error("Usage: react-feedback proxy <app-url> --port <n> [--position bottom-right]"); process.exit(1); }
+  if (!target || !Number.isInteger(port) || port < 1) { console.error("Usage: react-feedback proxy <app-url> --port <n> [--position bottom-right] [--host <address> --unsafe-public]"); process.exit(1); }
   const inbox = process.env.FEEDBACK_URL ?? `http://${process.env.FEEDBACK_HOST ?? "127.0.0.1"}:${process.env.PORT ?? 8099}`;
-  const server = Bun.serve(proxyOptions(target, port, inbox, flag("position")));
+  let host: string;
+  try { host = bindHost(flag("host"), args.includes("--unsafe-public")); } catch (error) { console.error((error as Error).message); process.exit(1); }
+  const server = Bun.serve(proxyOptions(target, port, inbox, flag("position"), host));
   console.log(`react-feedback proxy: http://${server.hostname}:${server.port} → ${target} (widget → ${inbox})`);
 } else if (args[0] === "claude-code") {
   const { runClaudeCode } = await import("../server/claude-code");
