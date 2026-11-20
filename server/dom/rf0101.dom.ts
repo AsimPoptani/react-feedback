@@ -41,15 +41,15 @@ async function load() {
 describe('project badges', () => {
   beforeEach(() => { mergedInto = null; });
   it('draw initials and a stable colour in the button and every menu row, and an image when has_icon', async () => {
-    projects = [{ id: 'fm', name: 'Field Manual', unread: 0 }, { id: 'rf', name: 'react-feedback', unread: 2, has_icon: true }, { id: 'solo', name: 'Alpha', unread: 0 }];
+    projects = [{ id: 'aa', name: 'Acme App', unread: 0 }, { id: 'rf', name: 'react-feedback', unread: 2, has_icon: true }, { id: 'solo', name: 'Alpha', unread: 0 }];
     await load();
     const badge = $('project-badge');
-    expect(badge.textContent).toBe('FM');
+    expect(badge.textContent).toBe('AA');
     const colour = badge.style.getPropertyValue('--pb');
     expect(colour).toMatch(/^#[0-9a-f]{6}$/);
     const rows = [...document.querySelectorAll('#project-menu .pbadge')] as HTMLElement[];
     expect(rows.length).toBe(3);
-    expect(rows[0]!.textContent).toBe('FM');
+    expect(rows[0]!.textContent).toBe('AA');
     expect(rows[0]!.style.getPropertyValue('--pb')).toBe(colour); // the same project, the same colour
     expect(rows[1]!.querySelector('img')?.getAttribute('src')).toContain('projects/rf/icon');
     expect(rows[2]!.textContent).toBe('AL');

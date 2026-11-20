@@ -20,7 +20,7 @@ await writeFile(iconFile, png);
 delete process.env.FEEDBACK_PROJECT;
 process.env.FEEDBACK_DIR = dirs[0];
 process.env.FEEDBACK_PROJECTS = JSON.stringify([
-  { id: 'field-manual', name: 'Field Manual', dir: dirs[0] },
+  { id: 'acme-app', name: 'Acme App', dir: dirs[0] },
   { id: 'react-feedback', name: 'react-feedback', dir: dirs[1], icon: iconFile },
   { id: 'plain', name: 'Plain', dir: dirs[2] },
 ]);
@@ -41,7 +41,7 @@ async function walk(width, height, tap) {
   const page = await context.newPage();
   await page.goto(`${origin}/__feedback/inbox/#/`);
   await page.waitForSelector('#project-button');
-  check(`${width}: the heading is gone and the badge is in the button`, !(await page.locator('#app-title').isVisible()) && (await page.locator('#project-badge').innerText()) === 'FM');
+  check(`${width}: the heading is gone and the badge is in the button`, !(await page.locator('#app-title').isVisible()) && (await page.locator('#project-badge').innerText()) === 'AA');
   await page.locator('.project-switch').screenshot({ path: join(SHOTS, `projects-closed-${width}.png`) });
   await page.locator('#project-button')[tap ? 'tap' : 'click']();
   await page.waitForSelector('#project-menu:not([hidden])');
@@ -50,7 +50,7 @@ async function walk(width, height, tap) {
   check(`${width}: the one with an icon shows its picture, the others the initials`, await page.evaluate(() => {
     const badges = [...document.querySelectorAll('#project-menu .pbadge')];
     const img = badges[1].querySelector('img');
-    return !!img && img.complete && img.naturalWidth === 64 && badges[0].textContent === 'FM' && badges[2].textContent === 'PL' && !badges[0].querySelector('img');
+    return !!img && img.complete && img.naturalWidth === 64 && badges[0].textContent === 'AA' && badges[2].textContent === 'PL' && !badges[0].querySelector('img');
   }));
   const size28 = await rows.first().evaluate(node => node.getBoundingClientRect().width);
   check(`${width}: a list badge is 28 px`, Math.round(size28) === 28);
