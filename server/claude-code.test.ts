@@ -177,3 +177,24 @@ test('saving a key in the key box wakes the session that asked for it', async ()
   expect(await waiting).toBe(2);
   expect(woke).toContain('elevenlabs saved');
 });
+
+test('with conversations on, a conversation you start in the inbox goes to the waiting session; Claude session threads never do', async () => {
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  const H = { session_id: 'sess-2', cwd: '/Users/me/Repo/hub' };
+  await onPrompt(dir, { ...H, prompt: 'other session' });
+  let woke = '';
+  const waiting = wait(dir, S, { poll: 20, projects: PROJECTS, conversations: true, out: t => { woke = t; } });
+  await Bun.sleep(60);
+  const { id: conv } = await store.createThread(dir, { title: 'Investigate this user', text: 'please look', origin: 'user' });
+  expect(await waiting).toBe(2);
+  expect(woke).toContain('please look');
+  expect(woke).toContain(conv);
+  let off = '';
+  const quiet = wait(dir, { session_id: 'sess-2', cwd: H.cwd }, { poll: 20, projects: PROJECTS, out: t => { off = t; } });
+  await Bun.sleep(60);
+  await store.createThread(dir, { title: 'another', text: 'no listener with conversations off', origin: 'user' });
+  await Bun.sleep(80);
+  expect(off).toBe('');
+  await onEnd(dir, { session_id: 'sess-2', cwd: H.cwd });
+  expect(await quiet).toBe(0);
+});

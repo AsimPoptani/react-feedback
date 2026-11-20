@@ -157,12 +157,14 @@ async function claim(dir: string, thread: string, id: string): Promise<boolean> 
   await updateSession(dir, id, s => { s.seen[thread] ??= ''; });
   return true;
 }
-// A capture thread (not a conversation) of this session's project, still waiting on the agent.
-async function claimable(dir: string, thread: string, session: Session, projects: Projects): Promise<boolean> {
+// A capture thread of this session's project, or (with `conversations`) a conversation you started in the inbox that no session owns yet.
+async function claimable(dir: string, thread: string, session: Session, projects: Projects, conversations = false): Promise<boolean> {
   if (session.seen[thread] !== undefined || (await store.optional(claimFile(dir, thread))) !== null) return false;
   try {
     const item = await store.readItem(await store.itemDir(dir, thread));
-    return item.mode !== 'thread' && ownsCapture(projects, session.cwd, (item.context as { url?: unknown } | undefined)?.url);
+    const context = (item.context as { url?: unknown; session?: unknown } | undefined) ?? {};
+    if (item.mode === 'thread') return conversations && item.origin === 'user' && context.url === undefined && context.session === undefined;
+    return ownsCapture(projects, session.cwd, context.url);
   } catch { return false; }
 }
 
@@ -237,7 +239,8 @@ async function readFrom(file: string, offset: number): Promise<{ lines: string[]
   } finally { await fh.close(); }
 }
 
-export interface WaitOptions { poll?: number; out?: (text: string) => void; orphaned?: () => boolean; projects?: Projects }
+// `conversations`: also claim conversations you start in the inbox (FEEDBACK_CLAIM_CONVERSATIONS=1), so one session answers them.
+export interface WaitOptions { poll?: number; out?: (text: string) => void; orphaned?: () => boolean; projects?: Projects; conversations?: boolean }
 // Runs until you write in a thread the session follows, or a capture for its project arrives (prints it, returns 2 so asyncRewake wakes
 // Claude), a newer waiter takes over, or Claude Code goes away (both return 0, which wakes nobody). One waiter per session.
 export async function wait(dir: string, input: HookInput, options: WaitOptions = {}): Promise<number> {
@@ -245,6 +248,7 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
   const poll = options.poll ?? 1000, out = options.out ?? (t => process.stderr.write(`${t}\n`));
   const orphaned = options.orphaned ?? (() => process.ppid === 1);
   const projects = options.projects ?? loadProjects();
+  const conversations = options.conversations ?? false;
   let session = await readSession(dir, id);
   for (let i = 0; i < 20 && !session; i++) { await sleep(250); session = await readSession(dir, id); } // the Stop mirror may still be making the thread
   if (!session) return 0;
@@ -255,9 +259,10 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
   const wake = async (thread: string) => { const text = await unseen(dir, id, thread); if (!text) return false; await rm(pidFile(dir, id), { force: true }); out(text); return true; };
   // Anything that arrived while no waiter ran: news in followed threads, then open captures for this project nobody has taken.
   for (const t of Object.keys(session.seen ?? {})) if (await wake(t)) return 2;
-  if (Object.keys(projects).length) {
-    for (const t of (await store.listThreads(dir)).filter(t => t.mode !== 'thread' && t.status === 'open' && t.waiting === 'agent' && ownsCapture(projects, session!.cwd, t.url)).reverse()) {
-      if (await claimable(dir, t.id, session, projects) && await claim(dir, t.id, id) && await wake(t.id)) return 2;
+  if (Object.keys(projects).length || conversations) {
+    const open = (await store.listThreads(dir)).filter(t => t.status === 'open' && t.waiting === 'agent' && (t.mode === 'thread' ? conversations : ownsCapture(projects, session!.cwd, t.url)));
+    for (const t of open.reverse()) {
+      if (await claimable(dir, t.id, session, projects, conversations) && await claim(dir, t.id, id) && await wake(t.id)) return 2;
     }
   }
   for (;;) {
@@ -276,7 +281,7 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
         return 2;
       }
       if (session.seen?.[e.id] !== undefined) { if (await wake(e.id)) return 2; continue; }
-      if (e.kind === 'thread' && await claimable(dir, e.id, session, projects) && await claim(dir, e.id, id) && await wake(e.id)) return 2;
+      if (e.kind === 'thread' && await claimable(dir, e.id, session, projects, conversations) && await claim(dir, e.id, id) && await wake(e.id)) return 2;
     }
     await sleep(poll);
   }
@@ -294,7 +299,7 @@ export async function runClaudeCode(argv: string[], dir: string, env: Record<str
     let input: HookInput;
     try { input = JSON.parse(await stdin()) as HookInput; } catch { return 0; }
     try {
-      if (command === 'wait') return await wait(dir, input, { projects: loadProjects(env) });
+      if (command === 'wait') return await wait(dir, input, { projects: loadProjects(env), conversations: /^(1|on|true|yes)$/i.test(env.FEEDBACK_CLAIM_CONVERSATIONS?.trim() ?? '') });
       await hook[command](dir, input);
     } catch (error) {
       await mkdir(claudeDir(dir), { recursive: true }).catch(() => {});
