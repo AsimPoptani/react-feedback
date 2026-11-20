@@ -11,6 +11,7 @@ import { UploadError, cancelRemote, uploadFile } from './uploader.js';
 import { presenceLines } from './presence.js';
 import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
 import { durationText, heatPositions, newSessionId, replaySummary } from './replays.js';
+import { parseShot } from './shot.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const PROJECT_KEY = 'fb-inbox-project';
@@ -131,7 +132,7 @@ async function postQueued(e) {
 const queuedFile = f => ({ name: f.name, size: f.size, slice: (a, b) => f.blob.slice(a, b) });
 const outbox = createOutbox({ post: postQueued, canSend: () => !isOffline(),
   onChange: () => { drawOffline(); if (state.detail) drawMessages(state.detail); },
-  onSent: (e, result) => { state.echo.set(e.cid, e); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast('Sent in the merged thread'); if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
+  onSent: (e, result) => { state.echo.set(e.cid, e); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast(forwardedToast(e.thread, result.forwarded_to)); if (state.carryDraft?.from === e.thread) state.carryDraft = null; if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
 function drawOffline() {
   const banner = $('offline-banner'), n = outbox.pending(), off = isOffline();
   const waiting = n ? ` · ${n} waiting to send` : '';
@@ -378,7 +379,7 @@ function buildGallery(d) {
   if (d.files.annotated) g.push({ key: 'annotated.png', src: fileUrl(d.id, 'annotated.png'), caption: 'Capture · annotated' });
   if (d.files.context) g.push({ key: 'context.png', src: fileUrl(d.id, 'context.png'), caption: 'Capture · context' });
   d.messages.forEach((m, mi) => m.images.forEach((f, i) => g.push({ key: f, src: fileUrl(d.id, f),
-    caption: `Message ${mi + 1} from ${m.author === 'user' ? state.profile.user.name : state.profile.agent.name}${m.images.length > 1 ? ` · image ${i + 1} of ${m.images.length}` : ''}` })));
+    caption: `Message ${mi + 1} from ${m.author === 'user' ? state.profile.user.name : m.author === 'viewer' ? 'a viewer' : state.profile.agent.name}${m.images.length > 1 ? ` · image ${i + 1} of ${m.images.length}` : ''}` })));
   d.messages.forEach(m => (m.attachments || []).filter(a => isShownImage(a.type)).forEach(a => g.push({ key: a.id, src: attachUrl(d.id, a.id), caption: `${a.name} (${humanSize(a.size)})` })));
   return g;
 }
@@ -473,6 +474,7 @@ function groupNode(key, label, rows, foldDone) {
   return section;
 }
 function drawList() {
+  if (state.detail?.merged_into) drawMerged(state.detail); // the target's title may only have arrived with the list
   const rows = state.threads.filter(passes).sort(rank);
   const foldDone = state.filter === 'all' && !state.q && !state.view;
   const pinnedAreas = new Set(state.pins.areas);
@@ -805,7 +807,7 @@ function messageNode(d, m) {
     const asked = (d.messages || []).find(item => item.question?.id === m.answer.question_id)?.question;
     node.append(el('button', { type: 'button', class: 'qchip', onclick: () => jumpToQuestion(m.answer.question_id) }, `↩ ${m.answer.question_id} · ${clip(asked?.prompt || 'Question', 42)}`));
   }
-  if (m.kind === 'viewer_feedback' && m.quote) node.append(el('blockquote', { class: 'viewer-quote' }, el('span', { class: 'hint', text: 'Pointing at' }), ...(m.quote.text ? [el('span', { text: ` \u201c${m.quote.text}\u201d` })] : []), ...(m.quote.path ? [el('code', { text: m.quote.path })] : [])));
+  if (m.kind === 'viewer_feedback' && m.quote) node.append(el('blockquote', { class: 'viewer-quote' }, el('span', { class: 'hint', text: m.quote.mode && CAP_NAMES[m.quote.mode] ? `${CAP_NAMES[m.quote.mode]} capture` : 'Pointing at' }), ...(m.quote.text ? [el('span', { text: ` \u201c${m.quote.text}\u201d` })] : []), ...(m.quote.path ? [el('code', { text: m.quote.path })] : [])));
   if (m.question) node.append(questionCard(d, m)); else if (shownText(m)) node.append(markdown(shownText(m)));
   if (m.kind === 'secret_request' && m.secret) node.append(secretNode(d, m));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
@@ -1251,22 +1253,28 @@ function dragStart(e) { if (!sheetOpen() || e.target.closest('button')) return; 
 function dragMove(e) { if (!sheetDrag) return; sheetDrag.dy = Math.max(0, e.touches[0].clientY - sheetDrag.y); $('checklist').style.transform = `translateY(${sheetDrag.dy}px)`; }
 function dragEnd() { if (!sheetDrag) return; const far = sheetDrag.dy > 70; sheetDrag = null; if (far) closeSheet(); else $('checklist').style.transform = ''; }
 
-// A merged-away thread stays readable. The composer and the question cards cannot post here; a late post is forwarded.
+// A merged-away thread stays readable. Its question cards cannot post here; the composer stays open, and what is sent is forwarded to the thread it was merged into
+// (a note above the composer says so). A question there is read-only: it has no id on the target.
 function drawMerged(d) {
-  const banner = $('merged-banner');
+  const banner = $('merged-banner'), note = $('merged-note');
   if (!banner) return;
   const into = d?.merged_into;
   banner.hidden = !into;
-  const off = !!into;
+  if (note) note.hidden = !into;
   if (into) {
     const title = state.threads.find(t => t.id === into)?.title || into;
     banner.replaceChildren(document.createTextNode('Merged into '), el('strong', { text: title }), document.createTextNode(' · '), el('a', { href: `#/${into}`, text: 'Open' }));
+    note?.replaceChildren(document.createTextNode('This thread was merged into '), el('strong', { text: title }), document.createTextNode('. What you send goes there. · '), el('a', { href: `#/${into}`, text: 'Open' }));
   }
   if (into) keepDraft(d);
-  const kept = !!into && !!state.carryDraft && state.carryDraft.from === d.id && !!$('text')?.value; // typed text stays visible and selectable so it can be copied out
-  $('composer')?.setAttribute('aria-disabled', String(off));
-  for (const id of ['text', 'send', 'attach', 'attach-file', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = off && !(kept && id === 'text'); }
-  if ($('text')) $('text').readOnly = off && kept;
+  $('composer')?.setAttribute('aria-disabled', 'false');
+  for (const id of ['text', 'send', 'attach', 'attach-file', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = false; }
+  if ($('text')) $('text').readOnly = false;
+}
+// The toast for a post that was forwarded: by name when the thread was already known to be merged, otherwise the plain note (the merge happened while the person was writing).
+function forwardedToast(from, into) {
+  const known = state.threads.find(t => t.id === from)?.merged_into === into;
+  return known ? `Sent to ${state.threads.find(t => t.id === into)?.title || 'the merged thread'}` : 'Sent in the merged thread';
 }
 // What the person had typed (composer, or an Other box) when a thread turned merged. It is restored on the target, so a merge never loses typing.
 function keepDraft(d) {
@@ -1623,7 +1631,6 @@ async function send(event, forceAside = false) {
   event.preventDefault();
   const id = state.openId, parsed = parseBtw($('text').value), aside = forceAside || parsed.aside, text = aside ? parsed.text : $('text').value;
   if (state.busy || !id) return;
-  if (state.detail?.merged_into) return;
   if (aside && !text.trim() && !state.images.length && !state.files.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
   if (!text.trim() && !state.images.length && !state.files.length) return;
   if (state.detail?.read_only) { showError($('error'), 'This thread is read-only, so nothing can be sent or queued.'); return; }
@@ -1656,7 +1663,8 @@ async function send(event, forceAside = false) {
       const sent = await post(`threads/${id}/messages`, { text, images, ...(files.length ? { attachments: files.map(f => f.id) } : {}), ...(aside ? { aside: true } : reply_to ? { reply_to } : quote ? { quote } : {}), client_id: cid, written_at });
       if (sent?.forwarded_to) {
         cleared();
-        showToast('Sent in the merged thread');
+        showToast(forwardedToast(id, sent.forwarded_to));
+        if (state.carryDraft?.from === id) state.carryDraft = null; // what was typed has gone: do not bring it back on the target
         location.hash = `#/${sent.forwarded_to}`;
         return;
       }
@@ -1666,9 +1674,8 @@ async function send(event, forceAside = false) {
   } catch (error) { showError($('error'), error.message); }
   finally {
     state.busy = false;
-    const merged = !!state.detail?.merged_into;
-    $('send').disabled = merged; $('btw').disabled = merged;
-    if (!merged) $('text').focus();
+    $('send').disabled = false; $('btw').disabled = false;
+    $('text').focus();
   }
 }
 const redrawComposer = () => { drawPreviews($('previews'), state.images, redrawComposer); drawChips($('fchips'), state.files, redrawComposer); };
@@ -2022,9 +2029,10 @@ function pillText(a) {
   const links = a.links || 0; if (!links) return '';
   return `Shared · ${links} ${links === 1 ? 'link' : 'links'} · viewed ${a.views || 0}×`;
 }
+// ?capture=1 adds the capture script to the page, so the owner can send a screenshot of it from here.
 function artifactSrc(id, version) {
   const q = projectQuery();
-  return `/__feedback/a/${id}/v${version}${q ? `?${q}` : ''}`;
+  return `/__feedback/a/${id}/v${version}?capture=1${q ? `&${q}` : ''}`;
 }
 function artifactCard(a) {
   const kids = [el('strong', { text: a.title }), el('span', { class: 'hint', text: `v${a.latest}` }), el('a', { href: `#/artifact/${a.id}`, text: 'Open' })];
@@ -2186,7 +2194,7 @@ function artifactFrame(src) {
     frame = el('iframe', { id: 'artifact-frame', sandbox: 'allow-scripts allow-popups', referrerpolicy: 'no-referrer', title: 'Artifact' });
     host.append(frame);
   }
-  if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);
+  if (frame.getAttribute('src') !== src) { state.capReady = false; paintCapture(); frame.setAttribute('src', src); }
 }
 function drawVersionPicker(meta, version) {
   const select = $('artifact-version');
@@ -2243,6 +2251,7 @@ function drawArtifactTabs(meta, version) {
   $('artifact-stage').hidden = replays; $('replays-panel').hidden = !replays;
   $('artifact-heat').hidden = replays; $('artifact-heat').setAttribute('aria-pressed', String(state.heat));
   if (replays) void loadReplays(meta);
+  paintCapture();
   void drawHeat(meta, version);
 }
 async function loadReplays(meta) {
@@ -2255,8 +2264,10 @@ async function loadReplays(meta) {
 function sessionRow(r, { artifact, onDelete, linkText }) {
   const path = artifact ? `artifacts/${artifact}/replays/${r.session}` : `replays/${r.session}`;
   const confirming = state.replayDel === r.session;
+  const live = r.live === true;
   return el('article', { class: 'replay-row', 'data-session': r.session },
-    el('div', { class: 'info' }, el('strong', { text: when(r.started_at) }), el('span', { text: `${replaySummary(r)}${linkText ? ` · ${linkText}` : ''}` })),
+    el('div', { class: 'info' }, el('strong', { text: when(r.started_at) }), ...(live ? [el('span', { class: 'live-tag', text: '● Live' })] : []), el('span', { text: `${replaySummary(r)}${linkText ? ` · ${linkText}` : ''}` })),
+    ...(live ? [el('button', { type: 'button', class: 'live-btn', 'aria-label': `Watch the session from ${when(r.started_at)} live`, onclick: () => { void watchLive(path, `${when(r.started_at)} · ${replaySummary(r)}`); } }, 'Watch live')] : []),
     el('button', { type: 'button', class: 'primary', 'aria-label': `Play the recording from ${when(r.started_at)}`, onclick: () => { void playReplay(path, `${when(r.started_at)} · ${replaySummary(r)}`); } }, 'Play'),
     el('button', { type: 'button', 'aria-label': `${confirming ? 'Confirm: delete' : 'Delete'} the recording from ${when(r.started_at)}`, onclick: () => {
       if (!confirming) { state.replayDel = r.session; onDelete(); setTimeout(() => { if (state.replayDel === r.session) { state.replayDel = null; onDelete(); } }, 4000); return; }
@@ -2266,7 +2277,7 @@ function sessionRow(r, { artifact, onDelete, linkText }) {
 }
 function drawReplays(meta) {
   const rows = state.replays;
-  const key = JSON.stringify([rows.map(r => [r.session, r.duration_ms, r.clicks]), state.replayDel]);
+  const key = JSON.stringify([rows.map(r => [r.session, r.duration_ms, r.clicks, r.live === true]), state.replayDel]);
   if (key === state.replaysDrawn) return;
   state.replaysDrawn = key;
   $('replays-sub').textContent = rows.length ? `${rows.length} ${rows.length === 1 ? 'recording' : 'recordings'}. Viewers were told the page records clicks and mouse movement, and could opt out. Kept for the retention period, then deleted.` : 'No recordings yet. Switch on Record interactions for a shared link, and viewers are told and can opt out.';
@@ -2310,7 +2321,88 @@ async function playReplay(path, label) {
   window.addEventListener('message', replayListener);
   frame.setAttribute('src', `${BASE}replay/player`);
 }
+// Watching a session that is still recording. The player page makes no requests of its own: this page (signed in) asks for the events after a cursor and passes them in.
+// A session with no new chunk for ~30 s (the server says live: false), or one that has gone (404), is ended.
+let liveRun = null;
+function stopLive() { if (liveRun) { liveRun.stopped = true; clearTimeout(liveRun.timer); liveRun = null; } }
+const LIVE_POLL_MS = 2000, LIVE_BATCH = 2000;
+async function watchLive(path, label) {
+  const dialog = $('replay-dialog'), frame = $('replay-frame');
+  let first;
+  try { first = await api(`${path}?after=0`); } catch (error) { showToast(`Could not open the live view: ${error.message}`); return; }
+  stopLive();
+  const run = liveRun = { cursor: first.cursor, stopped: false, timer: 0 };
+  $('replay-meta').textContent = `${label} · LIVE`;
+  dialog.showModal();
+  const width = Math.max(240, Math.min(1000, frame.clientWidth || 600));
+  const height = Math.max(160, Math.round(Math.min(frame.clientHeight || 400, width * 0.62) - 90));
+  const send = message => frame.contentWindow?.postMessage(message, '*');
+  const feed = (events, opening) => {
+    if (opening) send({ rf: 'live', events: events.slice(0, LIVE_BATCH), width, height });
+    for (let i = opening ? LIVE_BATCH : 0; i < events.length; i += LIVE_BATCH) send({ rf: 'more', events: events.slice(i, i + LIVE_BATCH) });
+  };
+  const end = () => { if (run.stopped) return; run.stopped = true; send({ rf: 'ended' }); $('replay-meta').textContent = `${label} · ended`; };
+  const tick = async () => {
+    if (run.stopped) return;
+    let more = false;
+    try {
+      const r = await api(`${path}?after=${run.cursor}`);
+      if (run.stopped) return;
+      if (r.events.length) feed(r.events, false);
+      run.cursor = r.cursor; more = r.events.length >= 5000;
+      if (!r.live && !more) { end(); return; }
+    } catch (error) { if (error.status === 404) { end(); return; } } // a failed poll is tried again
+    run.timer = setTimeout(tick, more ? 100 : LIVE_POLL_MS);
+  };
+  if (replayListener) window.removeEventListener('message', replayListener);
+  replayListener = event => {
+    if (event.source !== frame.contentWindow || !event.data) return;
+    if (event.data.rf === 'player-ready') {
+      feed(first.events, true);
+      if (!first.live) end(); else run.timer = setTimeout(tick, LIVE_POLL_MS);
+    } else if (event.data.rf === 'player-error') $('replay-meta').textContent = `${label} · could not play: ${String(event.data.message).slice(0, 120)}`;
+  };
+  window.addEventListener('message', replayListener);
+  frame.setAttribute('src', `${BASE}replay/player`);
+}
+// ---- Feedback from the owner's own view of an artifact: the capture script inside the page sends a screenshot and a note up; this page posts it to the artifact's thread as you.
+const CAP_NAMES = { region: 'Region', element: 'Element', section: 'Section', page: 'Full page' };
+const CAP_CHARS = 8500000; // about 6 MB of image as base64: the inbox takes up to 10 MB
+function paintCapture() {
+  const on = state.capReady && state.artTab === 'page';
+  if ($('artifact-capture')) $('artifact-capture').hidden = !on;
+  if ($('cap-modes') && !on) $('cap-modes').hidden = true;
+}
+async function sendArtifactShot(shot) {
+  const meta = state.artifact, version = state.artifactVer || meta?.latest;
+  if (!shot || !meta?.thread) { showToast('That capture could not be read.'); return; }
+  const where = [`${meta.title} v${version}`, CAP_NAMES[shot.mode], shot.selector ? `\`${shot.selector}\`` : '', shot.source ? `${shot.source.file}:${shot.source.line}` : ''].filter(Boolean).join(' · ');
+  const text = `${shot.note}\n\n\u2014 ${where}`.slice(0, 10000);
+  try { await post(`threads/${meta.thread}/messages`, { text, images: shot.image ? [shot.image] : [] }); showToast('Sent to this artifact\u2019s thread'); void refreshList(); }
+  catch (error) { showToast(`Could not send that: ${error.message}`); }
+}
+$('artifact-capture')?.addEventListener('click', () => {
+  const modes = $('cap-modes'); modes.hidden = !modes.hidden;
+  $('artifact-capture').setAttribute('aria-expanded', String(!modes.hidden));
+  if (!modes.hidden) modes.querySelector('button')?.focus();
+});
+for (const button of document.querySelectorAll('#cap-modes [data-capture]')) {
+  button.addEventListener('click', () => {
+    const win = $('artifact-frame')?.contentWindow; if (!win) return;
+    $('cap-modes').hidden = true; $('artifact-capture').hidden = true; $('artifact-capture').setAttribute('aria-expanded', 'false');
+    win.postMessage({ rf: 'cap', op: 'start', mode: button.dataset.capture, maxBytes: 6000000 }, '*');
+  });
+}
+// Only the artifact's own window is believed, and every field of what it sends is checked (parseShot) before anything is posted.
+window.addEventListener('message', event => {
+  const win = $('artifact-frame')?.contentWindow;
+  if (!win || event.source !== win || !event.data || typeof event.data !== 'object') return;
+  if (event.data.rf === 'cap-ready') { state.capReady = true; paintCapture(); }
+  else if (event.data.rf === 'cap-closed') paintCapture();
+  else if (event.data.rf === 'shot') { paintCapture(); void sendArtifactShot(parseShot(event.data, CAP_CHARS)); }
+});
 function closeReplay() {
+  stopLive();
   if (replayListener) { window.removeEventListener('message', replayListener); replayListener = null; }
   $('replay-frame').removeAttribute('src');
   if ($('replay-dialog').open) $('replay-dialog').close();
@@ -2384,6 +2476,7 @@ $('tab-replays')?.addEventListener('click', () => { state.artTab = 'replays'; st
 $('artifact-heat')?.addEventListener('click', () => { state.heat = !state.heat; if (state.artifact) drawArtifactTabs(state.artifact, state.artifactVer || state.artifact.latest); });
 $('replay-close')?.addEventListener('click', closeReplay);
 $('replay-dialog')?.addEventListener('close', () => { $('replay-frame').removeAttribute('src'); });
+$('replay-dialog')?.addEventListener('close', stopLive);
 window.addEventListener('resize', () => { if (state.heat) paintHeat(); });
 $('project-button')?.addEventListener('click', () => {
   const menu = $('project-menu'); if (!menu) return;

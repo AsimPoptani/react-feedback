@@ -1,6 +1,7 @@
 import type { Rect, Shot } from './types.js';
 interface Props {
     note: string;
+    saveLabel?: string;
     shot: Shot | null;
     failed: boolean;
     annotated: string | null;

@@ -71,14 +71,15 @@ describe('closed question line and merged composer', () => {
     expect(html).toMatch(/\.show \{[^}]*flex-shrink: 0;[^}]*white-space: nowrap/);
     expect(html).toMatch(/\.qclosed \.qsum \{[^}]*text-overflow: ellipsis[^}]*white-space: nowrap/);
   });
-  it('disables Attach file on a merged-away thread, and not otherwise', async () => {
+  it('keeps Attach image and Attach file enabled on a merged-away thread (0.12.0: what is sent there is forwarded)', async () => {
     projects = [{ id: 'a', name: 'A', unread: 0 }];
     mergedInto = null;
     await load();
     expect(($('attach-file') as HTMLButtonElement).disabled).toBe(false);
     mergedInto = '20261120-100001-abce';
     await load();
-    await vi.waitFor(() => expect(($('attach') as HTMLButtonElement).disabled).toBe(true));
-    expect(($('attach-file') as HTMLButtonElement).disabled).toBe(true);
+    await vi.waitFor(() => expect(($('merged-banner') as HTMLElement).hidden).toBe(false));
+    expect(($('attach') as HTMLButtonElement).disabled).toBe(false);
+    expect(($('attach-file') as HTMLButtonElement).disabled).toBe(false);
   });
 });

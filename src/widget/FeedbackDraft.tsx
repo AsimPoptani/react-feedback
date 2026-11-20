@@ -6,7 +6,7 @@ import { modifiers, keyLabel } from './shortcuts.js';
 import { focusInto, useModalFocus } from './focus.js';
 import { CAPTURE_FAILED } from './draft.js';
 interface Props {
-  note: string; shot: Shot | null; failed: boolean; annotated: string | null; clipped?: string; rect?: Rect;
+  note: string; saveLabel?: string; shot: Shot | null; failed: boolean; annotated: string | null; clipped?: string; rect?: Rect;
   onNote: (value: string) => void; onEdit: () => void; onSave: () => void; onCancel: () => void;
 }
 function beside(rect: Rect | undefined, width: number, height: number): CSSProperties {
@@ -42,7 +42,7 @@ export function FeedbackDraft(props: Props) {
     <div className="fb-toolbar">
       <button type="button" onClick={props.onEdit} disabled={!props.shot} aria-label="Draw on it" aria-keyshortcuts="Alt+D">Draw on it <Keycap>{keyLabel('Alt', 'D')}</Keycap></button>
       <button type="button" onClick={props.onCancel} aria-keyshortcuts="Escape">Cancel <Keycap>Esc</Keycap></button>
-      <button className="fb-save" type="button" disabled={!props.note.trim()} onClick={props.onSave} aria-label="Save" aria-keyshortcuts={`${modifiers().commandKey}+Enter`}>Save <Keycap>{keyLabel('Command', '↵')}</Keycap></button>
+      <button className="fb-save" type="button" disabled={!props.note.trim()} onClick={props.onSave} aria-label={props.saveLabel ?? 'Save'} aria-keyshortcuts={`${modifiers().commandKey}+Enter`}>{props.saveLabel ?? 'Save'} <Keycap>{keyLabel('Command', '↵')}</Keycap></button>
     </div>
   </section>;
 }

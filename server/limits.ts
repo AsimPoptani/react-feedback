@@ -26,6 +26,23 @@ export class Limiter {
   get size() { return this.hits.size; }
 }
 
+// A byte budget per key over a window (screenshots a link may receive a day). In memory only, like the rest.
+export class ByteBudget {
+  private spent = new Map<string, [number, number][]>();
+  constructor(private max: number, private windowMs: number) {}
+  // True when `bytes` fit in what is left (and counts them); false when they would not. A single amount over the whole budget never fits.
+  take(key: string, bytes: number, now: number): boolean {
+    const seen = (this.spent.get(key) ?? []).filter(([at]) => at > now - this.windowMs);
+    const total = seen.reduce((sum, [, n]) => sum + n, 0);
+    if (total + bytes > this.max) { this.spent.set(key, seen); return false; }
+    seen.push([now, bytes]);
+    this.spent.set(key, seen);
+    if (this.spent.size > MAX_KEYS) for (const [k, list] of this.spent) { if (!list.some(([at]) => at > now - this.windowMs)) this.spent.delete(k); if (this.spent.size <= MAX_KEYS) break; }
+    return true;
+  }
+  get size() { return this.spent.size; }
+}
+
 // The caller's address, for rate limiting only. It is never stored or logged. By default it is the socket address. A forwarded header is believed only when the
 // operator names the one header their proxy sets (FEEDBACK_CLIENT_IP_HEADER, e.g. cf-connecting-ip behind a Cloudflare tunnel): X-Forwarded-For is never used,
 // because a client can write its first hop.

@@ -1,4 +1,9 @@
 import type { Capture, Rect } from './types.js';
+export declare const PRIVATE = "[data-rf-private]";
+export declare function blankPrivate(canvas: HTMLCanvasElement, scale: number, shift?: {
+    x: number;
+    y: number;
+}): void;
 export declare function canvasFor(width: number, height: number): {
     canvas: HTMLCanvasElement;
     ctx: CanvasRenderingContext2D;

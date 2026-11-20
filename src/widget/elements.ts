@@ -56,10 +56,11 @@ function implicitRole(element: Element) {
 }
 export function targetFor(element: Element): ElementTarget {
   const react = reactSource(element);
+  const hidden = !!element.closest('[data-rf-private]'); // private content reports no words
   return { selector: selectorFor(element), tag: element.tagName.toLowerCase(),
-    role: element.getAttribute('role') ?? implicitRole(element), name: accessibleName(element),
+    role: element.getAttribute('role') ?? implicitRole(element), name: hidden ? '' : accessibleName(element),
     // biome-ignore lint/performance/useDomNodeTextContent: feedback needs visible text, excluding CSS-hidden content.
-    text: ((element as HTMLElement).innerText ?? element.textContent ?? '').trim().slice(0, 200),
+    text: hidden ? '' : ((element as HTMLElement).innerText ?? element.textContent ?? '').trim().slice(0, 200),
     rect: rectFor(element), components: react.components, ...(react.source ? { source: react.source } : {}) };
 }
 

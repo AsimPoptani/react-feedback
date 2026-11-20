@@ -50,14 +50,14 @@ async function load(hash = `#/${sourceId}`) {
 describe('merged-away thread', () => {
   beforeEach(() => { localStorage.clear(); merged = targetId; });
 
-  it('shows Merged into the target, and disables the composer and the question card', async () => {
+  it('shows Merged into the target and keeps the composer open (0.12.0), with the question card disabled', async () => {
     await load();
     await vi.waitFor(() => expect(document.getElementById('merged-banner')!.hidden).toBe(false));
     const banner = document.getElementById('merged-banner')!;
     expect(banner.textContent).toBe('Merged into Main thread · Open');
     expect(banner.querySelector('a')!.getAttribute('href')).toBe(`#/${targetId}`);
-    expect((document.getElementById('text') as HTMLTextAreaElement).disabled).toBe(true);
-    expect((document.getElementById('send') as HTMLButtonElement).disabled).toBe(true);
+    expect((document.getElementById('text') as HTMLTextAreaElement).disabled).toBe(false);
+    expect((document.getElementById('send') as HTMLButtonElement).disabled).toBe(false);
     const option = document.querySelector<HTMLButtonElement>(`[data-question="${question.id}"] .qopt`)!;
     expect(option.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>(`[data-question="${question.id}"] .qsubmit`)!.disabled).toBe(true);

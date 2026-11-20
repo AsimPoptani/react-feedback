@@ -73,9 +73,9 @@ describe('typed text survives a merge', () => {
     await vi.waitFor(() => expect(document.getElementById('merged-banner')!.hidden).toBe(false));
     expect(text.value).toBe('half written reply');
     expect(text.disabled).toBe(false);
-    expect(text.readOnly).toBe(true);
+    expect(text.readOnly).toBe(false); // 0.12.0: the composer stays open in a merged-away thread
     location.hash = `#/${targetId}`;
-    await vi.waitFor(() => expect(text.readOnly).toBe(false));
+    await vi.waitFor(() => expect(document.getElementById('merged-banner')!.hidden).toBe(true)); // the target is open (was: waited for readOnly to clear)
     expect(text.value).toBe('half written reply');
     expect(document.getElementById('merged-banner')!.hidden).toBe(true);
   });

@@ -60,7 +60,10 @@ export interface Message { id: string; author: MessageAuthor; text: string; imag
   agent_name?: string;
   // Set only on the object handed back when a post to a merged-away thread was written on the target instead. It is not stored.
   forwarded_to?: string }
-export interface ViewerQuote { text: string; path: string; box: [number, number, number, number] | null }
+// What a viewer pointed at. A capture from the share page adds `mode` (region, element, section or page), the element's component names and, when the page knew it, where it was written.
+export interface ViewerQuote { text: string; path: string; box: [number, number, number, number] | null; mode?: CaptureMode; components?: string[]; source?: { file: string; line: number; column: number; component: string } }
+export const CAPTURE_MODES = ['region', 'element', 'section', 'page'] as const;
+export type CaptureMode = (typeof CAPTURE_MODES)[number];
 // A bit of text the user selected inside an earlier message of the same thread, sent with their reply. (On a viewer's note, `quote` is the ViewerQuote above.)
 export interface MessageQuote { message_id: string; text: string }
 export const MAX_QUOTE = 1000;
@@ -117,6 +120,59 @@ export function dataUrlImages(value: unknown): Image[] {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > MAX_IMAGES) throw new Invalid(`At most ${MAX_IMAGES} images per message`);
   return value.map(dataUrlImage);
+}
+// A picture from a share link's viewer is the strictest kind: a PNG or JPEG only, at most 2 MB decoded, its structure walked end to end (so it is a whole image, not a
+// file with a picture's first bytes), and no larger than 4096 x 16384. The base64 must be exactly what encoding those bytes gives.
+export const VIEWER_IMAGE_BYTES = 2 * 1024 * 1024;
+export const VIEWER_IMAGE_MAX_WIDTH = 4096;
+export const VIEWER_IMAGE_MAX_HEIGHT = 16384;
+const VIEWER_DATA_URL = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/;
+function pngSize(bytes: Buffer): { width: number; height: number } | null {
+  if (!sniffIs(bytes, 'png') || bytes.length < 33) return null;
+  let at = 8, size: { width: number; height: number } | null = null;
+  for (let chunk = 0; at + 12 <= bytes.length && chunk < 5000; chunk++) {
+    const length = bytes.readUInt32BE(at);
+    const type = bytes.subarray(at + 4, at + 8).toString('latin1');
+    if (chunk === 0) { if (type !== 'IHDR' || length !== 13) return null; size = { width: bytes.readUInt32BE(at + 8), height: bytes.readUInt32BE(at + 12) }; }
+    else if (type === 'IHDR') return null;
+    at += 12 + length;
+    if (at > bytes.length) return null;
+    if (type === 'IEND') return at === bytes.length && length === 0 ? size : null;
+  }
+  return null;
+}
+function jpegSize(bytes: Buffer): { width: number; height: number } | null {
+  if (!sniffIs(bytes, 'jpg') || bytes.length < 4 || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) return null;
+  let at = 2;
+  while (at + 4 <= bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1]!;
+    if (marker === 0xff) { at++; continue; } // fill byte
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { at += 2; continue; } // a marker with no length
+    const length = bytes.readUInt16BE(at + 2);
+    if (length < 2 || at + 2 + length > bytes.length) return null;
+    if ([0xc0, 0xc1, 0xc2].includes(marker)) return length >= 8 ? { height: bytes.readUInt16BE(at + 5), width: bytes.readUInt16BE(at + 7) } : null;
+    if (marker === 0xda) return null; // the scan began and no frame header came before it
+    at += 2 + length;
+  }
+  return null;
+}
+const sniffIs = (bytes: Buffer, ext: Extension) => sniff(bytes) === ext;
+export function viewerImage(value: unknown): Image {
+  const match = typeof value === 'string' ? VIEWER_DATA_URL.exec(value) : null;
+  if (!match) throw new Invalid('image must be a PNG or JPEG data URL');
+  const encoded = match[2]!;
+  if (encoded.length > Math.ceil(VIEWER_IMAGE_BYTES / 3) * 4) throw new Invalid('The image is over 2 MB', 413);
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded) throw new Invalid('The image is not valid base64');
+  if (bytes.length > VIEWER_IMAGE_BYTES) throw new Invalid('The image is over 2 MB', 413);
+  const ext = sniff(bytes);
+  if (ext !== 'png' && ext !== 'jpg') throw new Invalid('image must be a PNG or JPEG');
+  if (ext !== (match[1] === 'png' ? 'png' : 'jpg')) throw new Invalid('The image does not match its declared type');
+  const size = ext === 'png' ? pngSize(bytes) : jpegSize(bytes);
+  if (!size || size.width < 1 || size.height < 1) throw new Invalid('The image could not be read');
+  if (size.width > VIEWER_IMAGE_MAX_WIDTH || size.height > VIEWER_IMAGE_MAX_HEIGHT) throw new Invalid(`The image is larger than ${VIEWER_IMAGE_MAX_WIDTH} x ${VIEWER_IMAGE_MAX_HEIGHT}`);
+  return { bytes, ext };
 }
 export function messageText(value: unknown, hasImages: boolean): string { // hasImages: true when the message carries images or files instead of words
   if (value == null && hasImages) return '';
@@ -334,7 +390,11 @@ export function parseQuote(q: unknown): ViewerQuote | undefined {
   const text = typeof q.text === 'string' ? stripControls(q.text).slice(0, 300) : '';
   const path = typeof q.path === 'string' ? stripControls(q.path).slice(0, 300) : '';
   const box = Array.isArray(q.box) && q.box.length === 4 && q.box.every(n => typeof n === 'number' && Number.isFinite(n)) ? (q.box as number[]).map(n => Math.round(n * 1000) / 1000) as [number, number, number, number] : null;
-  return text || path || box ? { text, path, box } : undefined;
+  const mode = (CAPTURE_MODES as readonly unknown[]).includes(q.mode) ? q.mode as CaptureMode : undefined;
+  const components = Array.isArray(q.components) ? q.components.filter((c): c is string => typeof c === 'string').slice(0, 8).map(c => stripControls(c).slice(0, 80)).filter(Boolean) : [];
+  const src = isObject(q.source) && typeof q.source.file === 'string' && q.source.file && Number.isInteger(q.source.line) && (q.source.line as number) > 0 ? q.source : null;
+  const source = src ? { file: stripControls(src.file as string).slice(0, 300), line: src.line as number, column: Number.isInteger(src.column) && (src.column as number) >= 0 ? src.column as number : 0, component: typeof src.component === 'string' ? stripControls(src.component).slice(0, 80) : '' } : undefined;
+  return text || path || box || mode ? { text, path, box, ...(mode ? { mode } : {}), ...(components.length ? { components } : {}), ...(source ? { source } : {}) } : undefined;
 }
 function parseMessageQuote(q: unknown): MessageQuote | undefined {
   if (!isObject(q) || typeof q.message_id !== 'string' || !q.message_id || typeof q.text !== 'string') return undefined;
@@ -856,7 +916,7 @@ export async function appendShareNotice(dir: string, id: string, text: string, s
 
 export const MAX_VIEWER_NOTE = 4000;
 // A note from someone with a share link. It is flagged for the user, and it is data (never an instruction) for any agent that reads the thread.
-export async function appendViewerFeedback(dir: string, id: string, input: { text: string; shareId: string; artifactId: string; label: string; quote?: ViewerQuote }): Promise<Message> {
+export async function appendViewerFeedback(dir: string, id: string, input: { text: string; shareId: string; artifactId: string; label: string; quote?: ViewerQuote; image?: Image }): Promise<Message> {
   // A note aimed at a thread that has been merged away is written on the thread it ended up in (a chain of merges is followed), with the line a forwarded post keeps.
   let at = id, sentIn: string | undefined;
   for (let hops = 0; hops < 16; hops++) {
@@ -875,9 +935,10 @@ export async function appendViewerFeedback(dir: string, id: string, input: { tex
       const stored = await materialise(path, await readItem(path));
       const clean = stripControls(input.text);
       const text = sentIn ? quoteSent(sentIn, clean) : clean;
-      const created: Message = { id: `m${stored.length + 1}`, author: 'viewer', text, images: [], created_at: new Date().toISOString(), flag: 'needs_you', kind: 'viewer_feedback',
+      const names = input.image ? await saveImages(path, [input.image]) : [];
+      const created: Message = { id: `m${stored.length + 1}`, author: 'viewer', text, images: names, created_at: new Date().toISOString(), flag: 'needs_you', kind: 'viewer_feedback',
         share_id: input.shareId, artifact_id: input.artifactId, label: stripControls(input.label), ...(input.quote ? { quote: input.quote } : {}) };
-      await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
+      try { await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`); } catch (error) { for (const name of names) await rm(join(path, name), { force: true }); throw error; }
       return created;
     });
     if (typeof written === 'string') { sentIn ??= titleOf(await readItem(path), at); at = written; continue; }

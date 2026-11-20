@@ -464,6 +464,9 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 .merged-banner { flex: none; margin: 0; padding: 8px 16px; background: var(--teal-tint); color: var(--ink); border-bottom: 2px solid var(--teal); font-size: 14px; font-weight: 650; }
 .merged-banner[hidden] { display: none; }
 .merged-banner a { font-weight: 700; }
+.merged-note { flex: none; margin: 0; padding: 8px 16px; background: var(--teal-tint); color: var(--ink); border-top: 2px solid var(--teal); font-size: 14px; }
+.merged-note[hidden] { display: none; }
+.merged-note a { font-weight: 700; }
 .toast { position: fixed; z-index: 90; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(420px, 92vw); background: var(--ink); color: var(--paper); border-radius: 999px; padding: 8px 14px; font-size: 14px; font-weight: 650; }
 .toast[hidden] { display: none; }
 .offline small { font-weight: 400; }
@@ -590,6 +593,10 @@ button.share-pill:hover { background: var(--paper); }
 #heatmap .dot { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; background: radial-gradient(circle, rgba(232, 89, 12, .55) 0%, rgba(232, 89, 12, .25) 45%, rgba(232, 89, 12, 0) 70%); }
 #heatmap-note { position: absolute; left: 8px; top: 8px; z-index: 2; background: var(--ink); color: #fff; border-radius: 8px; padding: 4px 10px; font-size: 13px; pointer-events: none; }
 .tabs { display: flex; gap: 6px; }
+.cap-modes { display: flex; flex-wrap: wrap; gap: 6px; }
+.cap-modes[hidden], #artifact-capture[hidden] { display: none; }
+.replay-row button.live-btn { border-color: #c62828; color: #c62828; font-weight: 700; }
+.live-tag { display: inline-block; margin-right: 8px; color: #c62828; font-weight: 700; }
 .tabs button[aria-pressed="true"], button.toggle[aria-pressed="true"] { background: var(--teal-tint); border-color: var(--teal); }
 #replays-panel { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 14px 16px 72px; }
 .replay-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border: 1px solid var(--rule); border-radius: 12px; padding: 10px 12px; margin: 8px 0; background: var(--white); min-width: 0; }
@@ -686,6 +693,8 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
           <button type="button" class="share-pill" id="artifact-pill" hidden>Shared</button>
           <span class="tabs" role="group" aria-label="View"><button type="button" id="tab-page" aria-pressed="true">Page</button><button type="button" id="tab-replays" aria-pressed="false">Replays</button></span>
           <button type="button" class="toggle" id="artifact-heat" aria-pressed="false">Heatmap</button>
+          <button type="button" id="artifact-capture" aria-expanded="false" aria-controls="cap-modes" hidden>Feedback</button>
+          <span class="cap-modes" id="cap-modes" role="group" aria-label="Capture a screenshot of this page" hidden><button type="button" data-capture="region">Region</button><button type="button" data-capture="element">Element</button><button type="button" data-capture="section">Section</button><button type="button" data-capture="page">Full page</button></span>
         </div>
       </div>
       <div id="artifact-stage"><p id="heatmap-note" hidden></p><div id="heatmap" aria-hidden="true" hidden></div></div>
@@ -729,6 +738,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
             <div class="msgs" id="msgs" aria-live="polite"></div>
           </div>
           <div class="waiting" id="waiting-bar" hidden></div>
+          <p class="merged-note" id="merged-note" role="note" hidden></p>
           <form class="composer" id="composer">
             <div class="replybar" id="replybar" hidden>
               <span class="replybar-text" id="replybar-text"></span>

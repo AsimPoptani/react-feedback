@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.0
+
+### Added
+- **The full Feedback capture on shared and owner-viewed artifacts.** A share link's **Feedback** dialog now offers **Region**, **Element**, **Section** and **Full page** with a screenshot, drawing and a note, the same capture as the widget in a host app (touch works at 390 px). The capture runs inside the artifact's sandboxed iframe, where the DOM is: a new inline script, `dist/capture.js` (the widget's own capture and screenshot code with React and the CSS, driven by `postMessage`), is added to the shared page. It does nothing until asked, makes no request and does not patch the page's console or `fetch`. It hands the picture (PNG, or a JPEG when a PNG would be too big; downscaled in the page to fit), the mode, the rectangle, the selector, the snippet and any component names and source to the shell, which believes only its own iframe and validates every field (`server/inbox/shot.js`, one function used by both the shell and the inbox). A note-only request is unchanged.
+- **Screenshots from viewers.** `POST /__feedback/s/<token>/feedback` takes an optional `image` (and `?image=1` on the same path for the larger body cap, so a note without one keeps the 16 KB cap). The server checks that it is a PNG or JPEG: exact base64, the file's structure walked end to end, at most 2 MB decoded and 4096 x 16384 pixels. A link may receive 20 MB of screenshots a day (then `429`, and a note alone still goes through); the other rate limits are unchanged. The image is stored as the viewer message's image; the `quote` now also keeps `mode`, `components` and `source`. **No new public path**: the reverse-proxy exemption is still `/s/<token>`, `/s/<token>/feedback` and `/s/<token>/replay`. An agent reading the thread sees the image labelled as the viewer's (CLI `viewer-supplied image`, MCP `notice`).
+- **The owner's capture in the inbox.** The artifact viewer loads the page as `/__feedback/a/<id>/v<n>?capture=1` (the plain URL is still the published page, byte for byte) and has a **Feedback** button with the same four modes. The inbox page validates the message and posts it to the artifact's thread as a message from you, with the picture and a line naming the artifact, version, mode and element.
+- **Anything in `[data-rf-private]` is painted over in every screenshot** and reports no text when picked (the widget too). The recorder no longer records the widget's own host element.
+- **Watch live.** A session that received a chunk in the last ~20 seconds shows **● Live** and **Watch live** (an artifact's Replays tab and Metrics, My sessions); recorded sessions keep **Play**. The live view is rrweb's live mode a few seconds behind, with a **LIVE** badge and an **ENDED** state after ~30 seconds without a chunk or when the session is gone. The player keeps its strict CSP and makes no request: the signed-in inbox polls `GET api/artifacts/:id/replays/:session?after=<n>` (and `GET api/replays/:session?after=<n>`) and passes events in by `postMessage`; the player believes only its parent (source and origin), validates each event and takes at most 5,000 a message. Each chunk's start in the gzip file is kept in the session metadata, so a poll unpacks only the newest chunk (a session from before 0.12.0 is read from its start). There is no public live endpoint, and nothing about what is collected changes.
+- **`live`** on each row of the replay lists; `?after=` on the owner's session reads (`{meta, events, cursor, live}`, at most 5,000 events a read).
+
+### Changed
+- **A merged-away thread keeps its composer open.** A send posts to that thread and the server forwards it to the target (as since 0.9.2; files and images follow). A toast says "Sent to <title>" and the target opens, and a note above the composer says "This thread was merged into <title>. What you send goes there. · Open". Attach image and Attach file work as in any thread. Questions in it stay read-only. What was typed is no longer brought back in the target once it has been sent.
+- The widget accepts a `bridge` prop (used inside an artifact; no launcher, no server).
+- `dist/capture.js` is new; `dist/player.js` grew with rrweb's replayer for the live view.
+- The service worker cache is `fb-inbox-0.12.0`; `shot.js` is in its file list.
+
 ## 0.11.0
 
 ### Added

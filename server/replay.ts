@@ -21,7 +21,15 @@ export interface ReplayMeta {
   session: string; scope: Scope; link: string | null; version: number | null; started_at: string; last_at: string;
   duration_ms: number; clicks: number; events: number; bytes: number; seq: number; first_ts: number; last_ts: number;
   viewport: { w: number; h: number } | null; points: ClickPoint[]; scroll_y: number;
+  // Where each chunk starts in the gzip file, as [byte offset, events before it], and the file's size once the last chunk was written. A live view reads from the nearest chunk
+  // instead of unpacking the whole recording on every poll. Absent on a session written before 0.12; a read then starts from the first entry it has, or the beginning.
+  gz?: number; idx?: [number, number][];
 }
+export const REPLAY_INDEX_MAX = 2000; // chunk entries kept per session; a read from past the last one unpacks only what follows it
+export const LIVE_MS = 20_000; // a chunk this recent: the session is live
+export const LIVE_ENDED_MS = 30_000; // none for this long: it has ended
+export const LIVE_MAX_EVENTS = 5000; // events one cursor read returns
+export const isLive = (meta: { last_at: string }, now: number, within = LIVE_MS) => { const at = Date.parse(meta.last_at); return Number.isFinite(at) && now - at < within; };
 export interface Chunk { session: unknown; seq: unknown; events: unknown }
 export interface Origin { scope: Scope; link: string | null; version: number | null }
 
@@ -38,9 +46,11 @@ function parseMeta(raw: string | null): ReplayMeta | null {
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
     const viewport = m.viewport && typeof m.viewport === 'object' && num((m.viewport as { w?: unknown }).w) > 0 && num((m.viewport as { h?: unknown }).h) > 0 ? { w: num((m.viewport as { w: number }).w), h: num((m.viewport as { h: number }).h) } : null;
     const points = Array.isArray(m.points) ? m.points.flatMap((p: unknown) => (p && typeof p === 'object' && num((p as ClickPoint).w) > 0 ? [{ x: num((p as ClickPoint).x), y: num((p as ClickPoint).y), w: num((p as ClickPoint).w) }] : [])) : [];
+    const idx = Array.isArray(m.idx) ? m.idx.flatMap((e: unknown) => (Array.isArray(e) && Number.isInteger(e[0]) && Number.isInteger(e[1]) && e[0] >= 0 && e[1] >= 0 ? [[e[0], e[1]] as [number, number]] : [])).slice(0, REPLAY_INDEX_MAX) : undefined;
     return { session: m.session, scope: m.scope, link: typeof m.link === 'string' ? m.link : null, version: typeof m.version === 'number' ? m.version : null,
       started_at: typeof m.started_at === 'string' ? m.started_at : '', last_at: typeof m.last_at === 'string' ? m.last_at : '', duration_ms: num(m.duration_ms), clicks: num(m.clicks),
-      events: num(m.events), bytes: num(m.bytes), seq: typeof m.seq === 'number' ? m.seq : -1, first_ts: num(m.first_ts), last_ts: num(m.last_ts), viewport, points, scroll_y: num(m.scroll_y) };
+      events: num(m.events), bytes: num(m.bytes), seq: typeof m.seq === 'number' ? m.seq : -1, first_ts: num(m.first_ts), last_ts: num(m.last_ts), viewport, points, scroll_y: num(m.scroll_y),
+      ...(typeof m.gz === 'number' && Number.isInteger(m.gz) && m.gz >= 0 ? { gz: m.gz } : {}), ...(idx ? { idx } : {}) };
   } catch { return null; }
 }
 
@@ -102,7 +112,11 @@ export async function appendChunk(dir: string, origin: Origin, chunk: Chunk, now
     const next: ReplayMeta = { ...meta, first_ts: Math.min(meta.first_ts, low), last_ts: Math.max(meta.last_ts, high), seq, last_at: new Date(now).toISOString(), events: meta.events + events.length, bytes: meta.bytes + size,
       clicks: meta.clicks + seen.clicks, points: [...meta.points, ...seen.points], viewport: seen.viewport, scroll_y: seen.scrollY };
     next.duration_ms = Math.max(0, next.last_ts - next.first_ts);
-    await appendFile(join(where, `${session}.jsonl.gz`), gzipSync(text));
+    const member = gzipSync(text);
+    const offset = await stat(join(where, `${session}.jsonl.gz`)).then(s => s.size, () => 0);
+    await appendFile(join(where, `${session}.jsonl.gz`), member);
+    next.gz = offset + member.length;
+    next.idx = [...(meta.idx ?? []), ...((meta.idx?.length ?? 0) < REPLAY_INDEX_MAX ? [[offset, meta.events] as [number, number]] : [])];
     await writeAtomic(file, JSON.stringify(next));
     return { seq, stored: true };
   });
@@ -115,7 +129,7 @@ export async function listReplays(dir: string, scope: Scope): Promise<Omit<Repla
   const out: Omit<ReplayMeta, 'points'>[] = [];
   for (const name of names.filter(n => n.endsWith('.json'))) {
     const meta = parseMeta(await optional(join(folder(dir, scope), name)).catch(() => null));
-    if (meta) { const { points: _points, ...rest } = meta; out.push(rest); }
+    if (meta) { const { points: _points, idx: _idx, gz: _gz, ...rest } = meta; out.push(rest); }
   }
   return out.sort((a, b) => b.started_at.localeCompare(a.started_at) || b.session.localeCompare(a.session));
 }
@@ -129,8 +143,35 @@ export async function readReplay(dir: string, scope: Scope, session: string): Pr
   const lines = gunzipSync(Buffer.from(await file.arrayBuffer())).toString('utf8').split('\n');
   const events: unknown[] = [];
   for (const line of lines) { if (!line) continue; try { events.push(JSON.parse(line)); } catch { /* a torn line */ } }
-  const { points: _points, ...rest } = meta;
+  const { points: _points, idx: _idx, gz: _gz, ...rest } = meta;
   return { meta: rest, events };
+}
+
+// The events after the first `after` of a session, for a live view: at most LIVE_MAX_EVENTS, and the cursor to ask from next. Only the part of the file from the chunk that holds
+// `after` is unpacked. `live` is true while a chunk has arrived in the last 30 s. Null when the session is not there (it ended, or its viewer opted out and it was deleted).
+export async function readReplayAfter(dir: string, scope: Scope, session: string, after: number, now = Date.now()): Promise<{ meta: Omit<ReplayMeta, 'points' | 'idx' | 'gz'>; events: unknown[]; cursor: number; live: boolean } | null> {
+  if (!validScope(scope) || !SESSION_ID.test(session) || !Number.isInteger(after) || after < 0) return null;
+  const meta = parseMeta(await optional(join(folder(dir, scope), `${session}.json`)));
+  if (!meta) return null;
+  const file = Bun.file(join(folder(dir, scope), `${session}.jsonl.gz`));
+  if (!(await file.exists())) return null;
+  const { points: _points, idx, gz, ...rest } = meta;
+  const live = isLive(meta, now, LIVE_ENDED_MS);
+  if (after >= meta.events) return { meta: rest, events: [], cursor: meta.events, live };
+  let start: [number, number] = [0, 0];
+  for (const entry of idx ?? []) if (entry[1] <= after && entry[1] >= start[1]) start = entry;
+  const bytes = Buffer.from(await file.slice(start[0], gz ?? file.size).arrayBuffer());
+  const events: unknown[] = [];
+  let position = start[1];
+  for (const line of gunzipSync(bytes).toString('utf8').split('\n')) {
+    if (!line) continue;
+    if (position >= after) {
+      if (events.length >= LIVE_MAX_EVENTS) break;
+      try { events.push(JSON.parse(line)); } catch { /* a torn line */ }
+    }
+    position++;
+  }
+  return { meta: rest, events, cursor: position, live };
 }
 
 export async function deleteReplay(dir: string, scope: Scope, session: string): Promise<boolean> {

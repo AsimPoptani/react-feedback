@@ -12,13 +12,13 @@ export interface RecorderOptions {
 // Text typed into a contenteditable is the person's, like an input: it is masked in both modes.
 const EDITABLE = '[contenteditable]:not([contenteditable="false"])';
 
-// Inputs and contenteditable text are always masked, anything marked data-rf-private is blocked, and mouse moves are sampled every 50 ms.
+// Inputs and contenteditable text are always masked, anything marked data-rf-private (and the capture widget) is blocked, and mouse moves are sampled every 50 ms.
 // In inbox mode all text is masked too (`maskTextSelector: '*'`).
 export function start(options: RecorderOptions): () => void {
   const stop = record({
     emit: options.emit as never,
     maskAllInputs: true,
-    blockSelector: "[data-rf-private]",
+    blockSelector: "[data-rf-private], [data-react-feedback-root]", // the capture widget's host (it has no size of its own) is never recorded: a screenshot preview is a large image
     maskTextSelector: options.inbox ? "*" : EDITABLE,
     sampling: { mousemove: 50, scroll: 150, input: "last" },
     slimDOMOptions: "all",

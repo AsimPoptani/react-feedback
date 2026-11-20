@@ -302,12 +302,13 @@ function implicitRole(element) {
 }
 function targetFor(element) {
 	const react = reactSource(element);
+	const hidden = !!element.closest("[data-rf-private]");
 	return {
 		selector: selectorFor(element),
 		tag: element.tagName.toLowerCase(),
 		role: element.getAttribute("role") ?? implicitRole(element),
-		name: accessibleName(element),
-		text: (element.innerText ?? element.textContent ?? "").trim().slice(0, 200),
+		name: hidden ? "" : accessibleName(element),
+		text: hidden ? "" : (element.innerText ?? element.textContent ?? "").trim().slice(0, 200),
 		rect: rectFor(element),
 		components: react.components,
 		...react.source ? { source: react.source } : {}
@@ -430,15 +431,38 @@ var cache = {
 	fonts: /* @__PURE__ */ new Map()
 };
 var CACHE_LIMIT = 400;
+function readableSandbox(context) {
+	if (window.origin !== "null" || context.sandbox) return;
+	context.sandbox = {
+		contentWindow: null,
+		remove() {}
+	};
+}
 async function render$1(options) {
 	if (cache.requests.size > CACHE_LIMIT) cache.requests.clear();
 	const context = await createContext$1(document.documentElement, options);
+	readableSandbox(context);
 	context.requests = cache.requests;
 	context.fontCssTexts = cache.fonts;
 	try {
 		return await domToCanvas(context);
 	} finally {
 		context.sandbox?.remove();
+	}
+}
+var PRIVATE = "[data-rf-private]";
+function blankPrivate(canvas, scale, shift = {
+	x: 0,
+	y: 0
+}) {
+	const nodes = document.querySelectorAll(PRIVATE);
+	if (!nodes.length) return;
+	const ctx = canvas.getContext("2d");
+	if (!ctx) return;
+	ctx.fillStyle = "#c9d3d1";
+	for (const node of nodes) {
+		const box = node.getBoundingClientRect();
+		if (box.width > 0 && box.height > 0) ctx.fillRect((box.left + shift.x) * scale, (box.top + shift.y) * scale, box.width * scale, box.height * scale);
 	}
 }
 function canvasFor(width, height) {
@@ -488,6 +512,7 @@ async function captureViewport(rect) {
 			y
 		})
 	});
+	blankPrivate(source, scale);
 	const area = cropRect(rect, width, height);
 	if (!area.width || !area.height) throw new Error("The capture is outside the viewport.");
 	const { canvas, ctx } = canvasFor(area.width * scale, area.height * scale);
@@ -533,6 +558,10 @@ async function capturePage(size) {
 		features: { restoreScrollPosition: true },
 		fetch: { requestInit: { credentials: "same-origin" } },
 		onCloneNode: documentClone()
+	});
+	blankPrivate(source, scale, {
+		x: scrollX,
+		y: scrollY
 	});
 	return {
 		shot: {
@@ -987,9 +1016,13 @@ function FeedbackDraft(props) {
 						type: "button",
 						disabled: !props.note.trim(),
 						onClick: props.onSave,
-						"aria-label": "Save",
+						"aria-label": props.saveLabel ?? "Save",
 						"aria-keyshortcuts": `${modifiers().commandKey}+Enter`,
-						children: ["Save ", /* @__PURE__ */ jsx(Keycap, { children: keyLabel("Command", "↵") })]
+						children: [
+							props.saveLabel ?? "Save",
+							" ",
+							/* @__PURE__ */ jsx(Keycap, { children: keyLabel("Command", "↵") })
+						]
 					})
 				]
 			})
@@ -2520,6 +2553,31 @@ function openStore() {
 		})
 	};
 }
+// src/widget/captureBridge.ts
+function shotPayload(draft, result, note, annotated) {
+	const extra = [result?.clipped, result ? void 0 : CAPTURE_FAILED].filter(Boolean).join("\n\n");
+	const target = draft.target;
+	const element = "selector" in target ? target : null;
+	return {
+		note: extra ? `${note}\n\n${extra}` : note,
+		mode: draft.mode,
+		image: result ? annotated ?? result.shot.url : null,
+		rect: "rect" in target ? target.rect : null,
+		viewport: {
+			width: innerWidth,
+			height: innerHeight
+		},
+		selector: element?.selector ?? "",
+		text: element?.text ?? "",
+		components: element?.components ?? [],
+		...element?.source ? { source: element.source } : {},
+		...element ? {
+			tag: element.tag,
+			role: element.role,
+			name: element.name
+		} : {}
+	};
+}
 // src/widget/FeedbackWidget.tsx
 var modes = [
 	"region",
@@ -2541,7 +2599,23 @@ function pillText({ pending, failed }) {
 	return [pending ? `${pending} sending` : "", failed ? `${failed} failed` : ""].filter(Boolean).join(", ");
 }
 var positionOf = (value) => value === "bottom-right" ? "bottom-right" : "bottom-left";
-function FeedbackWidget({ endpoint = "/__feedback", position = "bottom-left", hints = "off" }) {
+function FeedbackWidget({ endpoint = "/__feedback", position = "bottom-left", hints = "off", bridge }) {
+	if (bridge) return /* @__PURE__ */ jsx(HintsContext.Provider, {
+		value: hints === "on",
+		children: /* @__PURE__ */ jsx(FeedbackPanel, {
+			outbox: null,
+			bridge,
+			endpoint: "",
+			position: positionOf(position)
+		})
+	});
+	return /* @__PURE__ */ jsx(ServerWidget, {
+		endpoint,
+		position,
+		hints
+	});
+}
+function ServerWidget({ endpoint, position, hints }) {
 	const base = endpoint.replace(/\/$/, "");
 	const [outbox] = useState(() => new Outbox$1(base, openStore()));
 	outbox.endpoint = base;
@@ -2561,7 +2635,27 @@ function FeedbackWidget({ endpoint = "/__feedback", position = "bottom-left", hi
 		})
 	});
 }
-function FeedbackPanel({ outbox, endpoint, position }) {
+var noContext = () => ({
+	url: "",
+	title: "",
+	route: "",
+	viewport: {
+		width: 0,
+		height: 0
+	},
+	scroll: {
+		x: 0,
+		y: 0
+	},
+	devicePixelRatio: 1,
+	userAgent: "",
+	"prefers-color-scheme": "light",
+	ts: "",
+	console: [],
+	failedFetches: []
+});
+function FeedbackPanel({ outbox, endpoint, position, bridge }) {
+	const readContext = bridge ? noContext : getContext;
 	const [step, setStep] = useState("closed");
 	const [mode, setMode] = useState(null);
 	const [region, setRegion] = useState(null);
@@ -2582,8 +2676,8 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 	useFeedbackLayer(root);
 	const queue = useOutboxSnapshot();
 	useEffect(() => {
-		installCapture();
-	}, []);
+		if (!bridge) installCapture();
+	}, [bridge]);
 	useEffect(() => {
 		if (!saved) return;
 		const timer = window.setTimeout(() => setSaved(false), 4e3);
@@ -2592,6 +2686,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 	useEffect(() => {
 		const from = previousStep.current;
 		previousStep.current = step;
+		if (step === "closed" && from !== "closed") bridge?.closed();
 		if (step === "closed") {
 			if (from !== "closed") restoreFocus(savedClose.current ? opener.current : null, launcher.current);
 			opener.current = null;
@@ -2602,7 +2697,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 		const panel = root.current?.querySelector(".fb-panel"), choice = returnTo.current;
 		returnTo.current = null;
 		focusInto(choice && panel?.querySelector(`[data-choice="${choice}"]`) || panel?.querySelector("button"));
-	}, [step]);
+	}, [step, bridge]);
 	const remember = () => {
 		if (step !== "closed") return;
 		const active = document.activeElement;
@@ -2639,7 +2734,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 		setDraft({
 			mode,
 			target,
-			context: getContext(),
+			context: readContext(),
 			pending,
 			capture: null,
 			failed: false
@@ -2650,7 +2745,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 		}, () => {
 			if (generation.current === token) current({ failed: true });
 		});
-	}, [warm]);
+	}, [warm, readContext]);
 	const warmElement = useCallback((target) => {
 		warm(mode === "section" ? "section" : "element", target).catch(() => {});
 	}, [warm, mode]);
@@ -2730,6 +2825,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 			},
 			help: () => setHelp((value) => !value),
 			list: () => {
+				if (bridge) return;
 				remember();
 				reset();
 				setStep("list");
@@ -2738,9 +2834,34 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 		if (actions[command]) actions[command]();
 		else if (modes.includes(command)) choose(command);
 	});
+	const commands = useRef(() => {});
+	commands.current = (command) => {
+		if (command.op === "cancel") {
+			if (step !== "closed") {
+				reset();
+				setMode(null);
+				setStep("closed");
+			}
+			return;
+		}
+		if (step !== "closed") return;
+		if (command.mode) choose(command.mode);
+		else toggle();
+		if (command.note) setNote(command.note);
+	};
+	useEffect(() => bridge?.onCommand((command) => commands.current(command)), [bridge]);
 	function save() {
 		if (!draft || !note.trim()) return;
-		const text = note, drawn = annotated, taken = draft, live = getContext();
+		const text = note, drawn = annotated, taken = draft;
+		if (bridge) {
+			Promise.resolve(taken.capture ?? taken.pending).then((result) => result, () => null).then((result) => bridge.send(shotPayload(taken, result, text, drawn)));
+			reset();
+			setMode(null);
+			savedClose.current = true;
+			setStep("closed");
+			return;
+		}
+		const live = getContext();
 		outbox.enqueue({
 			id: newId(),
 			label: text.trim().split("\n")[0].slice(0, 80),
@@ -2789,7 +2910,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 		children: [
 			/* @__PURE__ */ jsx("div", {
 				className: "fb-launchers",
-				style: launcherStyle,
+				style: bridge ? { display: "none" } : launcherStyle,
 				children: /* @__PURE__ */ jsxs("button", {
 					ref: launcher,
 					type: "button",
@@ -2851,7 +2972,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 									/* @__PURE__ */ jsx(Keycap, { children: modeKeys[index] })
 								]
 							}, mode)),
-							/* @__PURE__ */ jsxs("button", {
+							!bridge && /* @__PURE__ */ jsxs("button", {
 								type: "button",
 								"data-choice": "list",
 								"aria-label": "My feedback",
@@ -2867,7 +2988,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 								onClick: () => setHelp((value) => !value),
 								children: [/* @__PURE__ */ jsx(Keycap, { children: "?" }), " Shortcuts"]
 							}),
-							place.custom && /* @__PURE__ */ jsx("button", {
+							!bridge && place.custom && /* @__PURE__ */ jsx("button", {
 								type: "button",
 								"data-choice": "reset-position",
 								onClick: place.reset,
@@ -2897,6 +3018,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 				annotated,
 				clipped: draft.capture?.clipped,
 				rect: "rect" in draft.target ? draft.target.rect : void 0,
+				saveLabel: bridge ? "Send" : "Save",
 				onNote: setNote,
 				onEdit: () => {
 					if (draft.capture) setStep("editor");
@@ -2904,7 +3026,7 @@ function FeedbackPanel({ outbox, endpoint, position }) {
 				onSave: save,
 				onCancel: discard
 			}),
-			step === "list" && /* @__PURE__ */ jsx(FeedbackList, {
+			step === "list" && !bridge && /* @__PURE__ */ jsx(FeedbackList, {
 				endpoint,
 				onClose: back
 			}),

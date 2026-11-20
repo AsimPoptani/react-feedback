@@ -3,6 +3,7 @@
 // no inbox API calls and carries no inbox chrome. The shell is itself sandboxed by the response header (no allow-same-origin).
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { parseShot } from './inbox/shot.js';
 
 const escapeAttr = (value: string) => value.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 const escapeText = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -15,6 +16,21 @@ async function recorderBundle(): Promise<string | null> {
   try { recorderCode = await readFile(resolve(import.meta.dir, '../dist/recorder.js'), 'utf8'); }
   catch { recorderCode = null; } // not built: the page is served without it, and without the notice
   return recorderCode;
+}
+
+// The widget's own capture (region, element, section, full page, with a screenshot and drawing), built to dist/capture.js. It runs inside the artifact, where the page is,
+// does nothing until the page that framed it asks, and hands the finished capture back by postMessage. It makes no request of its own.
+let captureCode: string | null | undefined;
+async function captureBundle(): Promise<string | null> {
+  if (captureCode !== undefined) return captureCode;
+  try { captureCode = await readFile(resolve(import.meta.dir, '../dist/capture.js'), 'utf8'); }
+  catch { captureCode = null; } // not built: the page is served without it, and without the capture buttons
+  return captureCode;
+}
+// The owner's own view of an artifact in the inbox: the same capture script, and nothing else is added to the page.
+export async function withCapture(html: string): Promise<string> {
+  const code = await captureBundle();
+  return code === null ? html : inject(html, `<script>${safeScript(code)}</script>`);
 }
 
 // Runs inside the artifact. It can only talk to the page that framed it, by postMessage. "Pointing" reports what was clicked: a text snippet, a CSS path
@@ -94,6 +110,9 @@ button:focus-visible, textarea:focus-visible { outline: 3px solid #f5b400; outli
 #fb-open { position: fixed; right: 16px; bottom: 16px; z-index: 5; border-color: var(--teal); color: var(--teal); font-weight: 700; box-shadow: 0 2px 10px rgba(0, 0, 0, .18); }
 #fb-hint { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 6; max-width: calc(100vw - 32px); background: var(--ink); color: #fff; border-radius: 10px; padding: 10px 14px; font-size: 14px; display: flex; gap: 10px; align-items: center; }
 #fb-hint[hidden] { display: none; }
+#fb-toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 6; max-width: calc(100vw - 32px); background: var(--ink); color: #fff; border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+#fb-toast[hidden], #fb-capture[hidden], #fb-held[hidden], #fb-open[hidden] { display: none; }
+#fb-held { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid var(--teal); background: #f3f7f5; font-size: 14px; }
 #fb-hint button { min-height: 36px; padding: 4px 10px; }
 dialog { width: min(92vw, 440px); border: 1px solid var(--rule); border-radius: 14px; padding: 16px; color: var(--ink); }
 dialog::backdrop { background: rgba(25, 47, 56, .45); }
@@ -108,7 +127,7 @@ textarea { width: 100%; min-height: 110px; padding: 10px; font: inherit; border:
 .small { font-size: 13px; color: #4a636d; }
 `;
 
-const SHELL_SCRIPT = `(function () {
+export const SHELL_SCRIPT = `(function () {
   var cfg = JSON.parse(document.getElementById('rf-config').textContent);
   var frame = document.getElementById('art');
   var base = location.pathname.replace(/\\/$/, '');
@@ -124,10 +143,14 @@ const SHELL_SCRIPT = `(function () {
 
   // ---- Feedback
   var dialog = $('fb-dialog'), note = $('fb-note');
+  var kept = null; // a capture whose send failed: it stays attached to the note until it goes or is removed
+  var toastTimer = 0;
+  function toast(text) { var t = $('fb-toast'); t.textContent = text; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, 5000); }
   function drawQuote() {
     $('fb-quote').hidden = !pick;
-    $('fb-quote-text').textContent = pick ? (pick.text ? '\\u201c' + pick.text + '\\u201d' : pick.path) : '';
+    $('fb-quote-text').textContent = pick ? (pick.text ? '“' + pick.text + '”' : pick.path) : '';
     $('fb-point').textContent = pick ? 'Point at something else' : 'Point at something on the page';
+    $('fb-held').hidden = !kept;
   }
   function openDialog() { say(''); drawQuote(); if (!dialog.open) dialog.showModal(); note.focus(); }
   $('fb-open').addEventListener('click', openDialog);
@@ -135,19 +158,61 @@ const SHELL_SCRIPT = `(function () {
   $('fb-point').addEventListener('click', function () { dialog.close(); $('fb-hint').hidden = false; tell({ rf: 'point', on: true }); });
   $('fb-hint-cancel').addEventListener('click', function () { $('fb-hint').hidden = true; tell({ rf: 'point', on: false }); openDialog(); });
   $('fb-unpick').addEventListener('click', function () { pick = null; drawQuote(); });
+  $('fb-unhold').addEventListener('click', function () { kept = null; drawQuote(); });
+  // The note: with a capture still attached it goes with its picture, otherwise as a note alone (the same request as before).
+  function bodyOf(shot) {
+    var quote = { text: shot.text, path: shot.selector, mode: shot.mode };
+    if (shot.box) quote.box = shot.box;
+    if (shot.components.length) quote.components = shot.components;
+    if (shot.source) quote.source = shot.source;
+    var body = { note: shot.note, quote: quote };
+    if (shot.image) body.image = shot.image;
+    return body;
+  }
+  function sendNote(body, withImage) {
+    return post('feedback' + (withImage ? '?image=1' : ''), JSON.stringify(body)).then(function (r) {
+      if (r.status === 201) return { ok: true, text: 'Thanks, your note was sent.' };
+      if (r.status === 429) return { ok: false, text: 'Too many notes just now. Try again in a minute.' };
+      if (r.status === 404) return { ok: false, text: 'This link is no longer active.' };
+      if (r.status === 413) return { ok: false, text: 'That screenshot is too large to send. Remove it and send the note.' };
+      return { ok: false, text: 'Could not send that. Try again.' };
+    }, function () { return { ok: false, text: 'Could not send that. Check your connection and try again.' }; });
+  }
   $('fb-send').addEventListener('click', function () {
     var text = note.value.trim();
     if (!text) { say('Write a note first.'); return; }
-    $('fb-send').disabled = true; say('Sending\\u2026');
-    var body = { note: text };
-    if (pick) body.quote = pick;
-    post('feedback', JSON.stringify(body)).then(function (r) {
-      if (r.status === 201) { note.value = ''; pick = null; drawQuote(); say('Thanks, your note was sent.'); }
-      else if (r.status === 429) say('Too many notes just now. Try again in a minute.');
-      else if (r.status === 404) say('This link is no longer active.');
-      else say('Could not send that. Try again.');
-    }, function () { say('Could not send that. Check your connection and try again.'); }).then(function () { $('fb-send').disabled = false; });
+    $('fb-send').disabled = true; say('Sending…');
+    var shot = kept ? Object.assign({}, kept, { note: text }) : null;
+    var body = shot ? bodyOf(shot) : { note: text };
+    if (!shot && pick) body.quote = pick;
+    sendNote(body, !!(shot && shot.image)).then(function (done) {
+      if (done.ok) { note.value = ''; pick = null; kept = null; drawQuote(); say(done.text); } else say(done.text);
+    }).then(function () { $('fb-send').disabled = false; });
   });
+
+  // ---- The capture script inside the artifact: region, element, section and full page, with a screenshot. It starts when asked and answers by message.
+  var capReady = false;
+  var MODES = ['region', 'element', 'section', 'page'];
+  var SHOT_CHARS = 2900000; // about 2 MB decoded, as base64
+  var parseShot = __PARSE_SHOT__;
+  MODES.forEach(function (mode) {
+    var button = document.querySelector('[data-capture="' + mode + '"]');
+    if (!button) return;
+    button.addEventListener('click', function () {
+      dialog.close(); $('fb-open').hidden = true;
+      tell({ rf: 'cap', op: 'start', mode: mode, note: note.value.slice(0, 4000), maxBytes: 1900000 });
+    });
+  });
+  function arrived(data) {
+    $('fb-open').hidden = false;
+    var shot = parseShot(data, SHOT_CHARS);
+    if (!shot) { toast('That capture could not be read.'); return; }
+    toast('Sending…');
+    sendNote(bodyOf(shot), !!shot.image).then(function (done) {
+      if (done.ok) { kept = null; note.value = ''; toast(done.text); return; }
+      kept = shot; note.value = shot.note; openDialog(); say(done.text);
+    });
+  }
 
   // ---- Messages from the artifact. Only its own window is believed.
   var clip = function (value, max) { return typeof value === 'string' ? value.slice(0, max) : ''; };
@@ -159,6 +224,12 @@ const SHELL_SCRIPT = `(function () {
       var box = Array.isArray(data.box) && data.box.length === 4 && data.box.every(function (n) { return typeof n === 'number' && isFinite(n); }) ? data.box : null;
       pick = { text: clip(data.text, 200), path: clip(data.path, 300), box: box };
       $('fb-hint').hidden = true; openDialog();
+    } else if (data.rf === 'cap-ready') {
+      capReady = true; $('fb-capture').hidden = false;
+    } else if (data.rf === 'cap-closed') {
+      $('fb-open').hidden = false;
+    } else if (data.rf === 'shot') {
+      arrived(data);
     } else if (data.rf === 'ready') {
       if (cfg.record && !declined) { recording = true; tell({ rf: 'ctl', op: 'start' }); }
     } else if (data.rf === 'ev' && recording && data.event && typeof data.event === 'object') {
@@ -211,11 +282,15 @@ const SHELL_SCRIPT = `(function () {
   }
 })();`;
 
+// The shell's script as it is sent: with the function it believes the artifact's capture with filled in.
+export const shellScript = () => SHELL_SCRIPT.replace('__PARSE_SHOT__', () => parseShot.toString());
+
 export interface ShellInput { html: string; title: string; record: boolean }
 export async function shellPage(input: ShellInput): Promise<string> {
   const bundle = input.record ? await recorderBundle() : null;
   const record = input.record && bundle !== null;
-  const scripts = [`<script>${safeScript(HELPER)}</script>`, ...(record ? [`<script>${safeScript(bundle!)}</script>`, `<script>${safeScript(RECORD_GLUE)}</script>`] : [])].join('\n');
+  const capture = await captureBundle();
+  const scripts = [`<script>${safeScript(HELPER)}</script>`, ...(capture !== null ? [`<script>${safeScript(capture)}</script>`] : []), ...(record ? [`<script>${safeScript(bundle!)}</script>`, `<script>${safeScript(RECORD_GLUE)}</script>`] : [])].join('\n');
   const doc = inject(input.html, scripts);
   return `<!doctype html>
 <html lang="en">
@@ -231,6 +306,7 @@ export async function shellPage(input: ShellInput): Promise<string> {
 <div id="notice" role="status" hidden><p id="notice-text">This page records clicks and mouse movement to help the author.</p><button type="button" id="norec">Don't record</button></div>
 <iframe id="art" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" title="${escapeAttr(input.title || 'Shared page')}" srcdoc="${escapeAttr(doc)}"></iframe>
 <button type="button" id="fb-open">Feedback</button>
+<div id="fb-toast" role="status" aria-live="polite" hidden></div>
 <div id="fb-hint" hidden role="status"><span>Click the part of the page you mean.</span><button type="button" id="fb-hint-cancel">Cancel</button></div>
 <dialog id="fb-dialog" aria-labelledby="fb-h">
   <h2 id="fb-h">Send feedback</h2>
@@ -238,11 +314,13 @@ export async function shellPage(input: ShellInput): Promise<string> {
   <textarea id="fb-note" maxlength="4000" placeholder="What did you notice?"></textarea>
   <p id="fb-quote" hidden><span class="small">Pointing at</span><br><span id="fb-quote-text"></span> <button type="button" id="fb-unpick" class="small">Remove</button></p>
   <div class="row"><button type="button" id="fb-point">Point at something on the page</button></div>
+  <div class="row" id="fb-capture" role="group" aria-label="Capture a screenshot" hidden><span class="small">Or capture</span><button type="button" data-capture="region">Region</button><button type="button" data-capture="element">Element</button><button type="button" data-capture="section">Section</button><button type="button" data-capture="page">Full page</button></div>
+  <p id="fb-held" hidden>A screenshot is attached to this note. <button type="button" id="fb-unhold" class="small">Remove</button></p>
   <p id="fb-status" role="status" aria-live="polite"></p>
-  <div class="row"><span class="grow small">Only your note and what you point at are sent. No name or address.</span><button type="button" id="fb-cancel">Close</button><button type="button" id="fb-send" class="primary">Send</button></div>
+  <div class="row"><span class="grow small">Only your note, your screenshot and what you point at are sent. No name or address.</span><button type="button" id="fb-cancel">Close</button><button type="button" id="fb-send" class="primary">Send</button></div>
 </dialog>
 <script type="application/json" id="rf-config">${JSON.stringify({ record })}</script>
-<script>${safeScript(SHELL_SCRIPT)}</script>
+<script>${safeScript(shellScript())}</script>
 </body>
 </html>
 `;

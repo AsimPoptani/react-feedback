@@ -8,11 +8,32 @@ const filter = (node: Node) => !(node instanceof Element) || (!node.closest('nos
 // tunnel. Keep those results for the page session, so a later capture only fetches what is new.
 const cache = { requests: new Map() as Context['requests'], fonts: new Map() as Context['fontCssTexts'] };
 const CACHE_LIMIT = 400;
+// modern-screenshot finds a browser's default styles in a hidden iframe it makes with `srcdoc`, and copies only what differs. A sandboxed page (a shared artifact has an opaque
+// origin, and every frame inside it gets another one) cannot read that iframe back. With no sandbox window it falls back to copying every computed style, which is exact but
+// larger, so a stand-in with no window is handed over there.
+function readableSandbox(context: Context) {
+  if (window.origin !== 'null' || context.sandbox) return; // window.origin is the document's own origin (location.origin is the URL's)
+  context.sandbox = { contentWindow: null, remove() {} } as unknown as HTMLIFrameElement;
+}
 async function render(options: Options): Promise<HTMLCanvasElement> {
   if (cache.requests.size > CACHE_LIMIT) cache.requests.clear();
   const context = await createContext(document.documentElement, options);
+  readableSandbox(context);
   context.requests = cache.requests; context.fontCssTexts = cache.fonts;
   try { return await domToCanvas(context); } finally { context.sandbox?.remove(); }
+}
+// Anything marked data-rf-private never appears in a screenshot: its box is painted over after the page is drawn, so none of its pixels survive.
+export const PRIVATE = '[data-rf-private]';
+export function blankPrivate(canvas: HTMLCanvasElement, scale: number, shift: { x: number; y: number } = { x: 0, y: 0 }) {
+  const nodes = document.querySelectorAll(PRIVATE);
+  if (!nodes.length) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.fillStyle = '#c9d3d1';
+  for (const node of nodes) {
+    const box = node.getBoundingClientRect();
+    if (box.width > 0 && box.height > 0) ctx.fillRect((box.left + shift.x) * scale, (box.top + shift.y) * scale, box.width * scale, box.height * scale);
+  }
 }
 export function canvasFor(width: number, height: number) {
   const canvas = document.createElement('canvas');
@@ -40,6 +61,7 @@ export async function captureViewport(rect: Rect): Promise<Capture> {
     fetch: { requestInit: { credentials: 'same-origin' } },
     onCloneNode: viewportClone({ x, y }),
   });
+  blankPrivate(source, scale);
   const area = cropRect(rect, width, height);
   if (!area.width || !area.height) throw new Error('The capture is outside the viewport.');
   const { canvas, ctx } = canvasFor(area.width * scale, area.height * scale);
@@ -65,6 +87,7 @@ export async function capturePage(size: { width: number; height: number }): Prom
     fetch: { requestInit: { credentials: 'same-origin' } },
     onCloneNode: documentClone(),
   });
+  blankPrivate(source, scale, { x: scrollX, y: scrollY });
   return {
     shot: { url: source.toDataURL('image/png'), width: source.width, height: source.height, origin: { x: 0, y: 0 } },
     clipped: size.height > height ? `Full page capture clipped at 16 000 px (page height: ${size.height} px).` : undefined,
