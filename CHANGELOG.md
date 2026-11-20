@@ -9,6 +9,9 @@
 - **Remote mode: `react-feedback serve --remote`.** A second listener on `FEEDBACK_REMOTE_PORT` (default `PORT` + 1), bound to 127.0.0.1, for a tunnel or proxy. Every request needs the device cookie (loopback is never trusted there), except the share routes, the pairing exchange and the pairing page at the inbox address. Writes also need an `Origin` matching the public address and a JSON body. `FEEDBACK_PUBLIC_URL` names the public address; with `cloudflared` on the PATH and none set, a quick tunnel is started and stopped with the server. The ordinary listener is unchanged.
 - README: "Continue on your phone", "Remote mode" (including how to use pairing instead of, or with, a basic-auth proxy), the new variables and routes.
 
+### Security
+- The pairing and device routes on the ordinary listener refuse any `Host` that is not `localhost`, an IP address, `FEEDBACK_HOST` or a `FEEDBACK_ALLOWED_HOSTS` name (DNS rebinding). A paired device cannot create codes or revoke other devices. The exchange counts only well-formed attempts from the right origin against its rate limit, caps its body at 1 KiB, and the remote listener returns a plain 500 on an error. A revoked phone gets `Clear-Site-Data`, and the service worker drops its saved data on a 401. The self-started tunnel keeps its output drained (it used to die on its next log line), ignores a user's cloudflared config, and its exit is logged.
+
 ### Changed
 - The service worker also keeps `pair.js` for offline starts. (The cache name is unchanged: the version is assigned at release.)
 

@@ -705,7 +705,7 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   const feedbackDir = configured?.[0]?.dir ?? env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
   files.validateLimits(env);
-  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env }, extra: pairRoutes(pairingFor(feedbackDir)) });
+  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env }, extra: pairRoutes(pairingFor(feedbackDir), { host: env.FEEDBACK_HOST ?? null, allowedHosts: env.FEEDBACK_ALLOWED_HOSTS ?? '' }) });
   return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch };
 }
 // The data folders this server serves (one, or one per configured project).

@@ -126,7 +126,7 @@ describe('codes', () => {
     const used = await pairOnce();
     const old = pairing.createCode(clock - CODE_TTL_MS - 1000);
     const answers = [];
-    for (const code of ['A'.repeat(22), used.code, old.code, 'short', '', 5, null, { a: 1 }, 'a'.repeat(5000)]) {
+    for (const code of ['A'.repeat(22), used.code, old.code, 'short', '', 5, null, { a: 1 }, 'a'.repeat(500)]) {
       clock += 20e3; // inside the rate limit
       const response = await remote(json('/__feedback/api/pair/exchange', { code }));
       answers.push([response.status, await response.text(), response.headers.get('set-cookie')]);
@@ -164,14 +164,17 @@ describe('codes', () => {
     expect(pairing.redeem(made.code, clock)).toBe(false);
     expect(pairing.revokeCode(made.id)).toBe(false);
   });
-  test('creating one is refused from the remote listener without a device, and allowed with one', async () => {
+  test('creating one is refused from the remote listener, with a device or without', async () => {
     expect((await remote(json('/__feedback/api/pair/codes', {}))).status).toBe(401);
     const { token } = await pairOnce();
     const made = await remote(withCookie(token, '/__feedback/api/pair/codes', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: PUBLIC }, body: '{}' }));
-    expect(made.status).toBe(201);
-    const body = await made.json();
-    expect(body.code).toMatch(/^[\w-]{22}$/);
-    expect(body.ttl_seconds).toBe(300);
+    expect(made.status).toBe(403); // a paired device cannot pair another: that needs the desktop
+    expect(pairing.openCodes(clock)).toBe(0);
+    // and a forged header cannot make a local request look remote, or a remote one look local
+    const forged = await remote(withCookie(token, '/__feedback/api/pair/codes', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: PUBLIC, 'X-Rf-Remote': '0' }, body: '{}' }));
+    expect(forged.status).toBe(403);
+    const desktop = await local(new Request('http://127.0.0.1:8099/__feedback/api/pair/codes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Rf-Remote': '1' }, body: '{}' }));
+    expect(desktop.status).toBe(201);
   });
   test('on the local listener it works, and is refused when remote mode is off', async () => {
     const made = await local(new Request('http://127.0.0.1:8099/__feedback/api/pair/codes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
@@ -263,8 +266,18 @@ describe('the device cookie', () => {
     expect(out.headers.get('set-cookie')).toContain('Max-Age=0');
     expect((await remote(withCookie(a.token, '/__feedback/api/threads'))).status).toBe(401);
     const all = await remote(withCookie(b.token, '/__feedback/api/devices/revoke-all', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: PUBLIC }, body: '{}' }));
-    expect(await all.json()).toEqual({ revoked: 1 });
+    expect(all.status).toBe(403); // revoking everyone needs the desktop
+    expect((await remote(withCookie(b.token, '/__feedback/api/threads'))).status).toBe(200);
+    expect((await local(new Request('http://127.0.0.1:8099/__feedback/api/devices/revoke-all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }))).status).toBe(200);
     expect((await remote(withCookie(b.token, '/__feedback/api/threads'))).status).toBe(401);
+    const c = await pairOnce(), d = await pairOnce();
+    const other = (await pairing.list()).find(x => x.name && x.id)!;
+    const ids = (await pairing.list()).map(x => x.id);
+    const [mine] = (await (await remote(withCookie(c.token, '/__feedback/api/devices'))).json()).devices.filter((x: { current?: boolean }) => x.current);
+    const theirs = ids.find(id => id !== mine.id)!;
+    expect(other).toBeTruthy(); expect(d.token).toBeTruthy();
+    expect((await remote(withCookie(c.token, `/__feedback/api/devices/${theirs}`, { method: 'DELETE', headers: { Origin: PUBLIC } }))).status).toBe(403); // not another device
+    expect((await pairing.list()).length).toBe(2);
   });
   test('an expired cookie is refused', async () => {
     const { token } = await pairOnce();
@@ -349,6 +362,103 @@ describe('CSRF on the remote listener', () => {
     const listed = await (await remote(withCookie(token, '/__feedback/api/devices', { headers: { 'X-Rf-Device': id } }))).json();
     expect(listed.devices.filter((d: { current?: boolean }) => d.current).length).toBe(1);
     expect(other.token).not.toBe(token);
+  });
+});
+
+describe('DNS rebinding on the local listener', () => {
+  const routes: [string, string][] = [['GET', '/__feedback/api/pair/status'], ['POST', '/__feedback/api/pair/codes'], ['DELETE', '/__feedback/api/pair/codes/00000000'], ['GET', '/__feedback/api/devices'], ['POST', '/__feedback/api/devices/revoke-all'], ['DELETE', '/__feedback/api/devices/d00000000']];
+  const call = (handler: typeof local, method: string, path: string, host: string, origin?: string) => handler(new Request(`http://127.0.0.1:8099${path}`, { method, headers: { Host: host, ...(origin ? { Origin: origin } : {}), 'Content-Type': 'application/json' }, ...(method === 'GET' ? {} : { body: '{}' }) }));
+  for (const [method, path] of routes) {
+    test(`${method} ${path} refuses a host name that is not this machine's`, async () => {
+      for (const host of ['evil.test', 'rebind.attacker.example:8099', 'localhost.evil.test', '127.0.0.1.evil.test']) expect((await call(local, method, path, host, `http://${host}`)).status).toBe(403);
+      expect((await call(local, method, path, 'evil.test')).status).toBe(403); // with no Origin too
+      expect((await call(local, method, path, 'localhost:8099', 'http://localhost:8099')).status).not.toBe(403);
+      expect((await call(local, method, path, '127.0.0.1:8099')).status).not.toBe(403);
+      expect((await call(local, method, path, '[::1]:8099')).status).not.toBe(403);
+      expect((await call(local, method, path, '192.168.1.20:8099')).status).not.toBe(403);
+    });
+  }
+  test('no code was made for the rebinding page', async () => {
+    await call(local, 'POST', '/__feedback/api/pair/codes', 'evil.test', 'http://evil.test');
+    expect(pairing.openCodes(clock)).toBe(0);
+  });
+  test('FEEDBACK_HOST and FEEDBACK_ALLOWED_HOSTS name more hosts that are allowed', async () => {
+    const named = createHandler(dir, undefined, { extra: pairRoutes(pairing, { host: 'inbox.home.test', allowedHosts: 'Box.Lan, other.lan:8099' }) });
+    for (const host of ['inbox.home.test:8099', 'box.lan', 'other.lan']) expect((await call(named, 'GET', '/__feedback/api/devices', host)).status).toBe(200);
+    expect((await call(named, 'GET', '/__feedback/api/devices', 'evil.test')).status).toBe(403);
+  });
+});
+
+describe('review fixes', () => {
+  test('a stale or revoked cookie also clears what the browser kept', async () => {
+    const { token } = await pairOnce();
+    await pairing.revokeAll();
+    const response = await remote(withCookie(token, '/__feedback/api/threads'));
+    expect(response.status).toBe(401);
+    expect(response.headers.get('clear-site-data')).toBe('"cache", "storage"');
+    expect((await remote(new Request(url('/__feedback/api/threads')))).headers.get('clear-site-data')).toBeNull();
+  });
+  test('the service worker drops its saved data on a 401', async () => {
+    const sw = await readFile(join(import.meta.dir, 'inbox/sw.js'), 'utf8');
+    expect(sw).toMatch(/response\.status === 401\) \{ await caches\.delete\(DATA\)/);
+  });
+  test('an oversized exchange body is refused before it is read, or cut off when streamed', async () => {
+    const { code } = pairing.createCode(clock);
+    const big = await remote(new Request(url('/__feedback/api/pair/exchange'), { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: PUBLIC }, body: JSON.stringify({ code, pad: 'x'.repeat(5000) }) }));
+    expect(big.status).toBe(413);
+    const stream = new ReadableStream({ pull(c) { c.enqueue(new TextEncoder().encode('x'.repeat(600))); } });
+    const streamed = await remote(new Request(url('/__feedback/api/pair/exchange'), { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: PUBLIC }, body: stream, duplex: 'half' } as RequestInit));
+    expect(streamed.status).toBe(413);
+    expect(pairing.redeem(code, clock)).toBe(true);
+  });
+  test('malformed attempts and wrong origins do not use up the rate limit', async () => {
+    for (let i = 0; i < 12; i++) {
+      await remote(json('/__feedback/api/pair/exchange', { code: 'short' }));
+      await remote(json('/__feedback/api/pair/exchange', { code: 'B'.repeat(22) }, { Origin: 'https://evil.example' }));
+    }
+    const { code } = pairing.createCode(clock);
+    expect((await remote(json('/__feedback/api/pair/exchange', { code }))).status).toBe(200);
+  });
+  test('an error inside returns a plain 500 with no detail', async () => {
+    const broken = createRemoteHandler(async () => { throw new Error('secret stack detail'); }, pairing, { now: () => clock, publicUrl: () => PUBLIC });
+    const { token } = await pairOnce();
+    const response = await broken(withCookie(token, '/__feedback/api/threads'));
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain('secret');
+  });
+  test('startRemote warns when a public address is set without a client address header', async () => {
+    const bare = await mkdtemp(join(tmpdir(), 'feedback-nopath-'));
+    const lines: string[] = [];
+    const base = { FEEDBACK_REMOTE_PORT: String(20000 + Math.floor(Math.random() * 20000)), PATH: bare, FEEDBACK_PUBLIC_URL: PUBLIC };
+    const a = await startRemote({ fetch: local, maxRequestBodySize: 1 << 20, port: 1 }, dir, base, l => lines.push(l));
+    a.stop();
+    expect(lines.join('\n')).toContain('FEEDBACK_CLIENT_IP_HEADER is not set');
+    lines.length = 0;
+    const b = await startRemote({ fetch: local, maxRequestBodySize: 1 << 20, port: 1 }, dir, { ...base, FEEDBACK_REMOTE_PORT: String(Number(base.FEEDBACK_REMOTE_PORT) + 1), FEEDBACK_CLIENT_IP_HEADER: 'cf-connecting-ip' }, l => lines.push(l));
+    b.stop();
+    expect(lines.join('\n')).not.toContain('is not set');
+    await rm(bare, { recursive: true, force: true });
+  });
+  test('the tunnel stays up after its address is read, ignores a user config, and reports its exit', async () => {
+    const bin = await mkdtemp(join(tmpdir(), 'feedback-fakebin-'));
+    const alive = join(bin, 'alive.txt'), args = join(bin, 'args.txt');
+    const script = `#!/bin/sh\necho "$@" > "${args}"\necho "INF |  Your quick Tunnel has been created! Visit it at:" >&2\necho "INF |  https://one-two-three-four.tunnel.example.test" >&2\ni=0\nwhile [ $i -lt 40 ]; do i=$((i+1)); echo $i > "${alive}"; echo "INF log line $i" >&2 || exit 9; sleep 0.05; done\nexit 3\n`;
+    await writeFile(join(bin, 'cloudflared'), script);
+    await chmod(join(bin, 'cloudflared'), 0o755);
+    let exited: number | null | undefined;
+    const tunnel = await startTunnel(4567, { PATH: `${bin}:/bin:/usr/bin` }, 10000, code => { exited = code; });
+    expect(tunnel?.url).toBe('https://one-two-three-four.tunnel.example.test');
+    expect(await readFile(args, 'utf8')).toMatch(/--config \S+ /);
+    await Bun.sleep(300);
+    const first = (await readFile(alive, 'utf8')).trim();
+    await Bun.sleep(400);
+    const second = (await readFile(alive, 'utf8')).trim();
+    expect(Number(second)).toBeGreaterThan(Number(first)); // still logging: its pipe is still read
+    expect(Number(second)).toBeGreaterThan(5);
+    for (let i = 0; i < 60 && exited === undefined; i++) await Bun.sleep(100);
+    expect(exited).toBe(3);
+    tunnel?.stop();
+    await rm(bin, { recursive: true, force: true });
   });
 });
 

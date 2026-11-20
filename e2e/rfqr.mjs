@@ -119,8 +119,8 @@ try {
   await mobile.goto(`${remote}/__feedback/inbox/#/`);
   await mobile.waitForSelector('#phone-link');
   await mobile.locator('#phone-link').tap();
-  await mobile.waitForSelector('dialog.pair svg path');
-  check('390: the phone can open the box too, and it fits', (await inside(mobile, 'dialog.pair')) && (await noSideways(mobile)));
+  await mobile.waitForSelector('dialog.pair:has-text("cannot pair another")');
+  check('390: a paired phone cannot make a code, says so, and the box fits', (await mobile.locator('dialog.pair svg').count()) === 0 && (await inside(mobile, 'dialog.pair')) && (await noSideways(mobile)));
   await mobile.screenshot({ path: join(SHOTS, 'open-on-phone-390.png') });
   await mobile.locator('dialog.pair button', { hasText: 'Paired devices' }).tap();
   await mobile.waitForSelector('.pair-page li');

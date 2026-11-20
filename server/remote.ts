@@ -5,10 +5,11 @@
 //   - GET /__feedback/inbox/ (and its redirect), which then is a small pairing page and not the inbox.
 // The local listener is the ordinary handler and is not touched by any of this.
 import { randomBytes } from 'node:crypto';
+import { devNull } from 'node:os';
 import { Invalid } from './store';
 import { Limiter, clientKey, type ServerLike } from './limits';
-import { COOKIE_NAME, DEVICE_TTL_MS, deviceName, pairingFor, type Pairing } from './pair';
-import { DEVICE_HEADER, REMOTE_HEADER } from './pair-routes';
+import { CODE_SHAPE, COOKIE_NAME, DEVICE_TTL_MS, deviceName, pairingFor, type Pairing } from './pair';
+import { remoteRequests } from './pair-routes';
 
 type Fetch = (req: Request, server?: ServerLike) => Promise<Response>;
 const PREFIX = '/__feedback';
@@ -110,25 +111,43 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: Rem
       return configured ? new URL(origin).origin === new URL(configured).origin : new URL(origin).host === req.headers.get('host');
     } catch { return false; }
   }
-  const unpaired = (stale: boolean) => reply({ kind: 'unpaired', detail: 'This device is not paired. Scan a new QR code from the desktop inbox.' }, 401, stale ? { 'Set-Cookie': clearCookie() } : {});
+  const unpaired = (stale: boolean) => reply({ kind: 'unpaired', detail: 'This device is not paired. Scan a new QR code from the desktop inbox.' }, 401, stale ? { 'Set-Cookie': clearCookie(), 'Clear-Site-Data': '"cache", "storage"' } : {}); // a revoked phone drops what it kept
 
+  // Read a small body with a hard cap: a declared length over the cap is refused unread, and a stream is cut off at the cap.
+  async function smallBody(req: Request): Promise<string | null> {
+    if (Number(req.headers.get('content-length') ?? 0) > MAX_EXCHANGE_BODY) return null;
+    const reader = req.body?.getReader();
+    if (!reader) return '';
+    const parts: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > MAX_EXCHANGE_BODY) { await reader.cancel(); return null; }
+      parts.push(value);
+    }
+    return Buffer.concat(parts).toString('utf8');
+  }
   async function exchange(req: Request, server?: ServerLike): Promise<Response> {
     const now = clock();
-    if (!exchangeLimit.take(clientKey(req, server, options.clientIpHeader), now)) return reply({ kind: 'rate_limited' }, 429, { 'Retry-After': '60' });
     if (!originOk(req)) return reply({ kind: 'forbidden', detail: 'Cross-site request refused' }, 403);
     if (req.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json') return reply({ kind: 'invalid_request', detail: 'JSON only' }, 415);
+    const text = await smallBody(req);
+    if (text === null) return reply({ kind: 'too_large' }, 413);
     let code: unknown = null;
-    try {
-      const text = await req.text();
-      if (text.length <= MAX_EXCHANGE_BODY) code = (JSON.parse(text) as { code?: unknown }).code;
-    } catch { /* the same answer as any other bad code */ }
+    try { code = (JSON.parse(text) as { code?: unknown }).code; } catch { /* the same answer as any other bad code */ }
+    const invalid = () => reply({ kind: 'invalid_code', detail: 'This link has expired or was already used. Scan a new QR code.' }, 401);
+    // Only a well-formed attempt from the right origin counts against the limit, so junk from anywhere cannot use up the one bucket every caller shares behind a tunnel.
+    if (typeof code !== 'string' || !CODE_SHAPE.test(code)) return invalid();
+    if (!exchangeLimit.take(clientKey(req, server, options.clientIpHeader), now)) return reply({ kind: 'rate_limited' }, 429, { 'Retry-After': '60' });
     // Bad, expired, used and malformed codes all answer the same.
-    if (!pairing.redeem(code, now)) return reply({ kind: 'invalid_code', detail: 'This link has expired or was already used. Scan a new QR code.' }, 401);
+    if (!pairing.redeem(code, now)) return invalid();
     const { token, device } = await pairing.create(deviceName(req.headers.get('user-agent')), now);
     return reply({ ok: true, device: { id: device.id, name: device.name } }, 200, { 'Set-Cookie': deviceCookie(token) });
   }
 
-  return async (req, server) => {
+  const handle: Fetch = async (req, server) => {
     const path = new URL(req.url).pathname, method = req.method;
     if (isShareRoute(path, method)) return inner(req, server);
     if (path === EXCHANGE && method === 'POST') return exchange(req, server);
@@ -149,15 +168,18 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: Rem
 
     let request = req;
     if (path.startsWith(`${PREFIX}/api/pair/`) || path.startsWith(`${PREFIX}/api/devices`)) {
-      const headers = new Headers(req.headers);
-      headers.delete(DEVICE_HEADER); headers.set(REMOTE_HEADER, '1'); headers.set(DEVICE_HEADER, auth.device.id);
-      request = new Request(req, { headers });
+      request = new Request(req);
+      remoteRequests.set(request, { device: auth.device.id });
     }
     const response = await inner(request, server);
     const out = new Response(response.body, response);
     if (auth.renewed && token) out.headers.append('Set-Cookie', deviceCookie(token)); // the sliding 30 days
     else if (request !== req && !SAFE.has(method) && !(await pairing.authenticate(token, clock()))) out.headers.append('Set-Cookie', clearCookie()); // this device revoked itself
     return out;
+  };
+  // No stack or detail ever reaches the other side of a tunnel.
+  return async (req, server) => {
+    try { return await handle(req, server); } catch (error) { console.error('Remote handler error', error instanceof Error ? error.message : 'unknown'); return reply({ kind: 'server_error' }, 500); }
   };
 }
 
@@ -196,25 +218,28 @@ export function findTunnelUrl(text: string): string | null {
   return null;
 }
 export interface Tunnel { url: string; stop: () => void }
-export async function startTunnel(port: number, env: Record<string, string | undefined> = process.env, timeoutMs = 30000): Promise<Tunnel | null> {
+export async function startTunnel(port: number, env: Record<string, string | undefined> = process.env, timeoutMs = 30000, onExit: (code: number | null) => void = () => {}): Promise<Tunnel | null> {
   const bin = Bun.which('cloudflared', env.PATH ? { PATH: env.PATH } : {});
   if (!bin) return null;
-  const child = Bun.spawn([bin, 'tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${port}`], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+  // An empty config file, so a config.yml in the user's cloudflared folder cannot change what a quick tunnel is.
+  const child = Bun.spawn([bin, 'tunnel', '--config', devNull, '--no-autoupdate', '--url', `http://127.0.0.1:${port}`], { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
   const stop = () => { try { child.kill(); } catch { /* already gone */ } };
   for (const signal of ['exit', 'SIGINT', 'SIGTERM'] as const) process.on(signal, () => { stop(); if (signal !== 'exit') process.exit(0); });
-  let seen = '';
+  let seen = '', found = false;
   const url = await new Promise<string | null>(done => {
     const timer = setTimeout(() => done(null), timeoutMs);
-    const read = async (stream: ReadableStream<Uint8Array>) => {
+    // Both pipes are read until they close, after the address is found too: a child whose pipe nobody reads dies on its next log line.
+    const drain = async (stream: ReadableStream<Uint8Array>) => {
       const decoder = new TextDecoder();
       for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) {
+        if (found) continue;
         seen += decoder.decode(chunk, { stream: true });
-        const found = findTunnelUrl(seen);
-        if (found) { clearTimeout(timer); done(found); return; }
+        const address = findTunnelUrl(seen);
+        if (address) { found = true; seen = ''; clearTimeout(timer); done(address); }
       }
     };
-    void read(child.stdout); void read(child.stderr);
-    void child.exited.then(() => { clearTimeout(timer); done(null); });
+    void drain(child.stdout).catch(() => undefined); void drain(child.stderr).catch(() => undefined);
+    void child.exited.then(code => { clearTimeout(timer); done(null); if (found) onExit(code); });
   });
   if (!url) { stop(); return null; }
   return { url, stop };
@@ -233,10 +258,11 @@ export async function startRemote(local: { fetch: Fetch; maxRequestBodySize: num
   const server = Bun.serve({ hostname: '127.0.0.1', port, maxRequestBodySize: local.maxRequestBodySize, fetch: handler });
   const bound = server.port ?? port;
   log(`Remote mode: listening on http://127.0.0.1:${bound} (every request needs a paired device)`);
+  if (configured && !env.FEEDBACK_CLIENT_IP_HEADER?.trim()) log('Warning: FEEDBACK_CLIENT_IP_HEADER is not set, so every caller through your proxy shares one pairing rate limit. Set it to the header your proxy sets (for Cloudflare, Cf-Connecting-Ip).');
   if (configured) log(`Public address: ${configured} (FEEDBACK_PUBLIC_URL). Point your proxy or tunnel at 127.0.0.1:${bound}.`);
   else if (fromTunnel) {
     log('Starting a quick tunnel with cloudflared...');
-    tunnel = await startTunnel(bound, env);
+    tunnel = await startTunnel(bound, env, 30000, code => log(`The tunnel stopped (cloudflared exited with ${code}). Phones can no longer reach this server until you restart it.`));
     if (tunnel) { state.publicUrl = tunnel.url; pairing.remote = { on: true, publicUrl: tunnel.url, source: 'tunnel' }; log(`Public address: ${tunnel.url} (a quick tunnel; it changes each time you start it)`); }
     else log('The tunnel did not start. Set FEEDBACK_PUBLIC_URL and point your own proxy or tunnel at the remote port.');
   } else {

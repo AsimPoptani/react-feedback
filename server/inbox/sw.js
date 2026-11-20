@@ -31,6 +31,7 @@ async function networkFirst(request, cacheName) {
   try {
     const response = await fetch(request, { signal: controller.signal });
     clearTimeout(timer);
+    if (response.status === 401) { await caches.delete(DATA); return response; } // a revoked phone keeps nothing it saved
     if (response.ok) { void cache.put(request, response.clone()); return response; }
     if (response.status >= 500) { const hit = await saved(); if (hit) return stale(hit); }
     return response;
