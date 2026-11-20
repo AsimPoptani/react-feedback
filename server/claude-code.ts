@@ -1,7 +1,7 @@
 // Claude Code bridge: one inbox thread per Claude Code session.
 // Hooks mirror the session into its thread (your terminal prompts as you, Claude's turn-end replies as an agent named after the folder),
 // and `wait`, run as an asyncRewake Stop hook, wakes the session when you write in that thread from the inbox.
-// With FEEDBACK_PROJECTS (page origin → folder), a capture taken on a project's page goes to a session working in that folder:
+// With FEEDBACK_ORIGIN_MAP (page origin → folder), a capture taken on a project's page goes to a session working in that folder:
 // the first waiting one claims it, is woken with it, and its reply goes to the capture's thread.
 import { appendFile, mkdir, open, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
@@ -47,10 +47,10 @@ async function updateSession<T>(dir: string, id: string, fn: (s: Session) => T):
   });
 }
 
-// FEEDBACK_PROJECTS: a JSON file mapping a page origin to the folder whose sessions handle its captures.
+// FEEDBACK_ORIGIN_MAP: a JSON file mapping a page origin to the folder whose sessions handle its captures.
 export function loadProjects(env: Record<string, string | undefined> = process.env): Projects {
-  const file = env.FEEDBACK_PROJECTS?.trim();
-  if (!file || file.startsWith('[')) return {}; // a JSON list is the server's own project list, not our file
+  const file = env.FEEDBACK_ORIGIN_MAP?.trim();
+  if (!file) return {};
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
     return Object.fromEntries(Object.entries(raw).flatMap(([origin, folder]) => {

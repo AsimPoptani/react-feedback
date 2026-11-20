@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as store from './store';
 import { agentName, onEnd, onPrompt, onStop, loadProjects as loadOriginMap, ownsCapture, readSession, runClaudeCode, unseen, wait } from './claude-code';
-import { loadProjects as loadProjectList, projectList } from './projects';
 import { injectWidget } from './proxy';
 import { areaOf, parseAreas } from './inbox/areas.js';
 
@@ -292,10 +291,14 @@ test('with conversations on, a conversation you start in the inbox goes to the w
   expect(await quiet).toBe(0);
 });
 
-test('FEEDBACK_PROJECTS holds either the server project list (JSON) or the bridge origin map (a file path), never both', () => {
+test('FEEDBACK_ORIGIN_MAP is the bridge origin map; FEEDBACK_PROJECTS (the server project list) is never read as one', () => {
   const list = '[{"id":"a","name":"A","dir":"/tmp/a"}]';
-  expect(projectList({ FEEDBACK_PROJECTS: '/Users/me/projects.json' })).toBe('');
-  expect(loadProjectList({ FEEDBACK_PROJECTS: '/Users/me/projects.json', FEEDBACK_DIR: '/tmp/d' }).map(p => p.dir)).toEqual(['/tmp/d']);
-  expect(loadProjectList({ FEEDBACK_PROJECTS: list }).map(p => p.id)).toEqual(['a']);
+  const map = join(dir, 'map.json');
+  Bun.write(map, JSON.stringify({ 'http://localhost:5185': '/Users/me/Repo/shop' }));
+  const shop = { 'http://localhost:5185': '/Users/me/Repo/shop' };
+  expect(loadOriginMap({ FEEDBACK_ORIGIN_MAP: map })).toEqual(shop);
+  expect(loadOriginMap({ FEEDBACK_ORIGIN_MAP: map, FEEDBACK_PROJECTS: list })).toEqual(shop);
   expect(loadOriginMap({ FEEDBACK_PROJECTS: list })).toEqual({});
+  expect(loadOriginMap({ FEEDBACK_PROJECTS: map })).toEqual({});
+  expect(loadOriginMap({})).toEqual({});
 });
