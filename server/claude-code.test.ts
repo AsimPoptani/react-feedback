@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as store from './store';
@@ -167,6 +167,98 @@ test('a message merged into another followed thread does not wake the session tw
   expect(await unseen(dir, 'sess-1', a)).toContain('merge these please');
   await store.mergeThreads(dir, a, b, 'agent');
   expect(await unseen(dir, 'sess-1', b)).toBeNull();
+});
+
+// Both captures are followed (the first two waits claim them); `a` is merged into `b` by the tests below.
+async function followTwo(): Promise<{ a: string; b: string }> {
+  const a = await capture('http://localhost:5185/a', 'first capture');
+  const b = await capture('http://localhost:5185/b', 'second capture');
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: () => {} })).toBe(2);
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: () => {} })).toBe(2);
+  return { a, b };
+}
+
+test('0.9.2: a post to a merged-away thread is written on the target and wakes the session once', async () => {
+  const { a, b } = await followTwo();
+  await store.mergeThreads(dir, a, b, 'agent');
+  // with and without a client_id (the CLI and the MCP tools send none)
+  const withId = await store.appendMessage(dir, a, { author: 'user', text: 'forwarded with id', client_id: 'inbox-fwd00001' });
+  const bare = await store.appendMessage(dir, a, { author: 'user', text: 'forwarded bare' });
+  expect(withId.forwarded_to).toBe(b);
+  expect(bare.forwarded_to).toBe(b);
+  const woke = await unseen(dir, 'sess-1', b);
+  expect(woke).toContain('forwarded with id');
+  expect(woke).toContain('forwarded bare');
+  expect(await unseen(dir, 'sess-1', b)).toBeNull();
+  expect(await unseen(dir, 'sess-1', a)).toBeNull(); // nothing was written on the source
+});
+
+test('0.9.2: a forwarded answer wakes once, and the source thread stays quiet', async () => {
+  const { a, b } = await followTwo();
+  await store.appendMessage(dir, a, { author: 'agent', text: 'Which one?', question: { prompt: 'Which one?', options: [{ label: 'X' }] } });
+  await store.mergeThreads(dir, a, b, 'agent');
+  const q = (await store.summarise(dir, a)).messages.find(m => m.question)!.question!.id;
+  const answered = await store.appendMessage(dir, a, { author: 'user', text: '', answer: { question_id: q, option_ids: ['o1'] } });
+  expect(answered.forwarded_to).toBe(b);
+  expect(await unseen(dir, 'sess-1', b)).toContain('Answer');
+  expect(await unseen(dir, 'sess-1', b)).toBeNull();
+  expect(await unseen(dir, 'sess-1', a)).toBeNull();
+});
+
+test('0.9.2: a message written before a merge and woken on the source does not wake again on the target', async () => {
+  const { a, b } = await followTwo();
+  await store.appendMessage(dir, a, { author: 'user', text: 'before the merge' }); // no client_id
+  expect(await unseen(dir, 'sess-1', a)).toContain('before the merge');
+  await store.mergeThreads(dir, a, b, 'agent');
+  expect(await unseen(dir, 'sess-1', b)).toBeNull();
+  // and the other order: merged first, woken on the target, then the source is read
+  const c = await capture('http://localhost:5185/c', 'third capture');
+  const d = await capture('http://localhost:5185/d', 'fourth capture');
+  await store.appendMessage(dir, c, { author: 'user', text: 'merged before any wake' });
+  await onEnd(dir, S);
+  await onPrompt(dir, { ...S, prompt: 'again' });
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: () => {} })).toBe(2);
+  await store.mergeThreads(dir, c, d, 'agent');
+  const once = [await unseen(dir, 'sess-1', d), await unseen(dir, 'sess-1', c)].filter(Boolean);
+  expect(once.length).toBeLessThanOrEqual(1);
+});
+
+for (const withClientId of [true, false]) {
+  test(`0.9.2: repair-merged carrying a stranded answer to the target does not wake the session again (client_id ${withClientId})`, async () => {
+    const { a, b } = await followTwo();
+    await store.appendMessage(dir, a, { author: 'agent', text: 'Which one?', question: { prompt: 'Which one?', options: [{ label: 'X' }] } });
+    await store.mergeThreads(dir, a, b, 'agent');
+    const note = JSON.parse(await Bun.file(join(dir, a, 'merged.json')).text());
+    const src = (await store.summarise(dir, a)).messages;
+    // what an older server did: the post landed on the source after the merge
+    const stranded = { id: `m${src.length + 1}`, author: 'user', text: 'Chose: X', images: [], created_at: new Date(Date.parse(note.at) + 1000).toISOString(), ...(withClientId ? { client_id: 'inbox-strand01' } : {}), answer: { question_id: src.find(m => m.question)!.question!.id, option_ids: ['o1'] } };
+    await appendFile(join(dir, a, 'thread.jsonl'), `${JSON.stringify(stranded)}\n`);
+    expect(await unseen(dir, 'sess-1', a)).toContain('Chose: X'); // woken on the source
+    const out = await store.repairMerged(dir);
+    expect(out.some(r => r.status === 'repaired')).toBe(true);
+    const copy = (await store.summarise(dir, b)).messages.find(m => m.text.includes('Sent in') && m.text.includes('Chose: X'));
+    expect(copy).toBeDefined();
+    expect(await unseen(dir, 'sess-1', b)).toBeNull(); // the carried copy is the same message
+    expect(await unseen(dir, 'sess-1', a)).toBeNull();
+    await store.repairMerged(dir); // a second run adds nothing, so nothing wakes
+    expect(await unseen(dir, 'sess-1', b)).toBeNull();
+  });
+}
+
+test('0.9.2: a stranded answer repaired before the session saw it wakes it once, not twice', async () => {
+  const { a, b } = await followTwo();
+  await store.appendMessage(dir, a, { author: 'agent', text: 'Which one?', question: { prompt: 'Which one?', options: [{ label: 'X' }] } });
+  await store.mergeThreads(dir, a, b, 'agent');
+  const note = JSON.parse(await Bun.file(join(dir, a, 'merged.json')).text());
+  const src = (await store.summarise(dir, a)).messages;
+  const stranded = { id: `m${src.length + 1}`, author: 'user', text: 'Chose: X', images: [], created_at: new Date(Date.parse(note.at) + 1000).toISOString(), answer: { question_id: src.find(m => m.question)!.question!.id, option_ids: ['o1'] } };
+  await appendFile(join(dir, a, 'thread.jsonl'), `${JSON.stringify(stranded)}\n`);
+  await store.repairMerged(dir);
+  const wakes = [await unseen(dir, 'sess-1', b), await unseen(dir, 'sess-1', a)].filter(Boolean);
+  expect(wakes.length).toBe(1);
+  expect(await unseen(dir, 'sess-1', b)).toBeNull();
+  expect(await unseen(dir, 'sess-1', a)).toBeNull();
 });
 
 test('saving a key in the key box wakes the session that asked for it', async () => {

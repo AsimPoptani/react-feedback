@@ -82,8 +82,14 @@ function titleOf(text: string): string {
   return line.length > 80 ? `${line.slice(0, 79)}…` : line;
 }
 const mirrorId = () => `${MIRROR}${randomBytes(8).toString('hex')}`;
-// The same message after a merge or move: copies keep client_id, author time and text.
-const fingerprint = (m: store.Message) => m.client_id ?? `${m.created_at}:${m.text.length}:${m.text.slice(0, 40)}`;
+// The same message after a merge, move or repair-merged: copies keep client_id and author time. A copy that was forwarded or carried after a merge
+// gains a "> Sent in <title> after the merge" line (0.9.2); it is dropped so a message without a client_id still matches itself.
+const SENT_IN = /^> Sent in [^\n]* after the merge(?:\n\n|$)/;
+const fingerprint = (m: store.Message) => {
+  if (m.client_id) return m.client_id;
+  const text = m.text.replace(SENT_IN, '');
+  return `${m.created_at}:${text.length}:${text.slice(0, 40)}`;
+};
 
 async function threadExists(dir: string, id: string): Promise<boolean> {
   try { await store.itemDir(dir, id); return true; } catch { return false; }
