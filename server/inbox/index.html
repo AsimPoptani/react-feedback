@@ -400,6 +400,11 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 .update-x { min-width: 32px; padding: 0 8px; font-size: 18px; line-height: 1; }
 .offline { flex: none; background: var(--ochre-tint); color: var(--ink); border-bottom: 2px solid var(--ochre); padding: 6px 14px; font-size: 14px; font-weight: 700; }
 .offline[hidden] { display: none; }
+.merged-banner { flex: none; margin: 0; padding: 8px 16px; background: var(--teal-tint); color: var(--ink); border-bottom: 2px solid var(--teal); font-size: 14px; font-weight: 650; }
+.merged-banner[hidden] { display: none; }
+.merged-banner a { font-weight: 700; }
+.toast { position: fixed; z-index: 90; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(420px, 92vw); background: var(--ink); color: var(--paper); border-radius: 999px; padding: 8px 14px; font-size: 14px; font-weight: 650; }
+.toast[hidden] { display: none; }
 .offline small { font-weight: 400; }
 .msg.queued { border-style: dashed; opacity: .92; }
 .msg.queued.failed { border-color: var(--berry); }
@@ -523,6 +528,7 @@ button.share-pill:hover { background: var(--paper); }
   <button type="button" class="update-x" id="update-dismiss" aria-label="Dismiss">&times;</button>
 </div>
 <div class="offline" id="offline-banner" role="status" aria-live="polite" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
 <div class="app" id="app">
   <nav class="list" aria-label="Threads">
     <div class="project-switch" id="project-switch" hidden>
@@ -606,6 +612,7 @@ button.share-pill:hover { background: var(--paper); }
         <button type="button" class="cl-btn" id="cl-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="checklist" hidden></button>
         <button type="button" class="more-btn" id="more" aria-haspopup="menu" aria-expanded="false" aria-label="More actions"><span aria-hidden="true">&#8943;</span></button>
       </div>
+      <p class="merged-banner" id="merged-banner" role="status" hidden></p>
       <p class="presence" id="presence" aria-label="Who was here last" hidden></p>
       <div class="thread-body" id="thread-body">
         <div class="thread-main" id="thread-main">

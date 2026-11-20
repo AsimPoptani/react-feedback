@@ -82,7 +82,7 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
         if (!result.network && status >= 200 && status < 300) {
           idle = 0; entries = entries.filter(e => e !== entry);
           await store.remove(entry.cid).catch(() => {});
-          emit(); onSent(entry);
+          emit(); onSent(entry, result);
         } else if (result.network || status >= 500 || status === 408 || status === 429) {
           entry.nextAt = now() + BACKOFF[Math.min(entry.attempts, BACKOFF.length - 1)]; entry.attempts++;
           emit();

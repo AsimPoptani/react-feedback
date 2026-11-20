@@ -48,7 +48,9 @@ export interface Message { id: string; author: Author; text: string; images: str
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
   client_id?: string; written_at?: string;
   // `agent_name`: which agent wrote an agent message, when it is not the default one (an MCP client's FEEDBACK_AGENT_NAME). Absent means the inbox's agent profile.
-  agent_name?: string }
+  agent_name?: string;
+  // Set only on the object handed back when a post to a merged-away thread was written on the target instead. It is not stored.
+  forwarded_to?: string }
 export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string; check?: 'works' | 'rejected' }
 export interface Redaction { at: string; by: Author; reason?: string; key: string }
 export const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -466,8 +468,100 @@ function messageFlag(author: Author, flag: unknown, asking: boolean): Flag | und
 async function closeForDone(path: string): Promise<void> {
   if (!(await readChecklist(path)).some(i => i.owner === 'user' && !i.done)) await writeStatus(path, 'done');
 }
-export async function appendMessage(dir: string, id: string, input: NewMessage): Promise<Message> {
+// The line a post keeps when it arrives on a thread that had already been merged away.
+function quoteSent(title: string, text: string): string {
+  const line = `> Sent in ${title} after the merge`;
+  return text ? `${line}\n\n${text}` : line;
+}
+interface Composed { message: Message; eventKind: 'message' | 'answer'; eventText: string; addedItems: ChecklistItem[] }
+interface Prepared { flag: Flag | undefined; attached: { add: ItemToAdd[]; check: string[] }; agentName: string | undefined; sentIn?: string }
+// Writes one message. The caller holds the thread lock. `sentIn` prefixes a post that was aimed at a thread already merged into this one.
+async function compose(path: string, input: NewMessage, prep: Prepared): Promise<Composed> {
+  const { flag, attached, agentName, sentIn } = prep;
   const images = input.images ?? [];
+  const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
+  const item = await readItem(path);
+  const stored = await materialise(path, item);
+  if (client_id) { const again = stored.find(m => m.client_id === client_id && m.author === input.author); if (again) { duplicates.add(again); return { message: again, eventKind: 'message', eventText: '', addedItems: [] }; } }
+  if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
+  if ((input.question || input.secret) && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question or a key request: nobody could answer it', 409);
+  const { aside, replyTo } = checkAside(stored, input);
+  const quoted = checkReplyTo(stored, replyTo);
+  const n = stored.length + 1;
+  const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
+  let text = input.answer !== undefined || input.question ? '' : secret ? messageText(input.text ?? `Please add ${secret.label}. Paste it in the secure box below; it goes straight to the app and is never saved in this thread.`, false) : messageText(input.text, images.length > 0);
+  let extra: Partial<Message> = secret ? { kind: 'secret_request', secret } : {};
+  let eventKind: 'message' | 'answer' = 'message';
+  let eventText = '';
+  if (input.question) { text = messageText(input.text ?? input.question.prompt, false); extra = { question: buildQuestion(`q${n}`, input.question) }; }
+  if (input.answer !== undefined) {
+    const checked = checkAnswer(stored, input.answer);
+    text = checked.text; extra = { answer: checked.answer };
+    const asked = stored.find(x => x.question?.id === checked.answer.question_id)?.question;
+    eventKind = 'answer'; eventText = answerLine(checked.answer.question_id, asked?.prompt ?? '', checked.labels);
+  }
+  if (sentIn) text = quoteSent(sentIn, text);
+  let added: ChecklistItem[] = [], ticked: string[] = [];
+  if (attached.add.length || attached.check.length) {
+    const items = await readChecklist(path);
+    added = attached.add.map(a => pushItem(items, a.owner, a.text, input.author));
+    ticked = attached.check.filter(c => tickItem(items, c));
+    await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
+  }
+  const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+    ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
+  await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
+  if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
+  if (flag === 'done') await closeForDone(path);
+  if (input.author === 'user') await writeStatus(path, 'open');
+  return { message: created, eventKind, eventText, addedItems: added };
+}
+async function recordSide(dir: string, id: string, author: Author, composed: Composed): Promise<void> {
+  if (author !== 'user') return;
+  const { message, eventKind, eventText, addedItems } = composed;
+  await logEvent(dir, { id, kind: eventKind, text: eventKind === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}), ...(message.aside ? { aside: true } : {}) });
+  for (const i of addedItems) await userEvent(dir, id, 'checklist', `add (${i.owner === 'user' ? 'for you' : 'for the agent'}): ${i.text}`);
+}
+// A post aimed at a thread that has already been merged is written on the target. An ask is refused: a new question has no id there.
+function remapForward(input: NewMessage, map: MergeMap | null): NewMessage {
+  const next: NewMessage = { ...input };
+  if (typeof next.reply_to === 'string' && next.reply_to) {
+    const mapped = map?.messages[next.reply_to];
+    if (!mapped) throw new Invalid('That message was not copied into the merged thread');
+    next.reply_to = mapped;
+  }
+  if (next.answer !== undefined && next.answer !== null && isObject(next.answer) && typeof next.answer.question_id === 'string') {
+    const mapped = map?.questions[next.answer.question_id];
+    if (!mapped) throw new Invalid('That question was not copied into the merged thread');
+    next.answer = { ...next.answer, question_id: mapped };
+  }
+  if (Array.isArray(next.check_items) && map) next.check_items = next.check_items.map(id => (typeof id === 'string' && map.items[id]) || id);
+  return next;
+}
+async function deliverForward(dir: string, fromId: string, input: NewMessage, prep: Prepared): Promise<Message> {
+  const from = await itemDir(dir, fromId);
+  const note = await readMerge(from);
+  if (!note || note.state !== 'done') throw new Invalid('That merge did not finish; nothing was posted');
+  if (input.question || input.secret !== undefined) throw new Invalid(`That thread was merged into ${note.into}; ask on that thread`);
+  const intoId = note.into;
+  const into = await itemDir(dir, intoId);
+  if (await readMerge(into)) throw new Invalid('The target thread was itself merged into another one', 409);
+  const fromItem = await readItem(from);
+  if (input.author === 'user' && fromItem.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
+  const [first, second] = fromId < intoId ? [from, into] : [into, from];
+  const composed = await withLock(first, () => withLock(second, async () => {
+    const live = await readMerge(from);
+    if (!live || live.state !== 'done' || live.into !== intoId) throw new Invalid('That merge did not finish; nothing was posted');
+    const map = await resolvedMap(fromId, live, from, into);
+    const forwarded = remapForward(input, map);
+    const checks = prep.attached.check.map(id => map?.items[id] ?? id);
+    return compose(into, forwarded, { ...prep, attached: { add: prep.attached.add, check: checks }, sentIn: titleOf(fromItem, fromId) });
+  }));
+  if (!wasDuplicate(composed.message)) await recordSide(dir, intoId, input.author, composed);
+  composed.message.forwarded_to = intoId;
+  return composed.message;
+}
+export async function appendMessage(dir: string, id: string, input: NewMessage): Promise<Message> {
   const path = await itemDir(dir, id);
   if (input.question && input.author !== 'agent') throw new Invalid('Only the agent can ask questions', 403);
   if (input.answer && input.author !== 'user') throw new Invalid('Only the user can answer', 403);
@@ -475,57 +569,20 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
   if (input.secret !== undefined && (input.question || input.answer !== undefined || input.aside || (input.images ?? []).length)) throw new Invalid('A key request is a message of its own: no question, side question or images');
   const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
   if (input.client_id !== undefined && (typeof input.client_id !== 'string' || !CLIENT_ID.test(input.client_id))) throw new Invalid('Invalid client_id');
-  const client_id = input.client_id as string | undefined, written = writtenAt(input.written_at);
   if (input.agent_name !== undefined && input.agent_name !== null && input.agent_name !== '' && input.author !== 'agent') throw new Invalid('Only the agent has an agent name', 403);
   const agentName = checkAgentName(input.agent_name);
   await notTheUser(dir, agentName);
-  const flag = messageFlag(input.author, input.flag, !!input.question || !!secret);
-  const attached = checkAttached(input.author, input);
-  let addedItems: ChecklistItem[] = [];
-  let eventKind: 'message' | 'answer' = 'message';
-  let eventText = '';
-  const message = await withLock(path, async () => {
-    const item = await readItem(path);
-    const stored = await materialise(path, item);
-    if (client_id) { const again = stored.find(m => m.client_id === client_id && m.author === input.author); if (again) { duplicates.add(again); return again; } }
-    if (input.author === 'user' && item.read_only === true) throw new Invalid(READ_ONLY_NOTE, 409);
-    if ((input.question || secret) && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question or a key request: nobody could answer it', 409);
-    const { aside, replyTo } = checkAside(stored, input);
-    const quoted = checkReplyTo(stored, replyTo);
-    const n = stored.length + 1;
-    let text = input.answer !== undefined || input.question ? '' : secret ? messageText(input.text ?? `Please add ${secret.label}. Paste it in the secure box below; it goes straight to the app and is never saved in this thread.`, false) : messageText(input.text, images.length > 0);
-    let extra: Partial<Message> = secret ? { kind: 'secret_request', secret } : {};
-    if (input.question) { text = messageText(input.text ?? input.question.prompt, false); extra = { question: buildQuestion(`q${n}`, input.question) }; }
-    if (input.answer !== undefined) {
-      const checked = checkAnswer(stored, input.answer);
-      text = checked.text; extra = { answer: checked.answer };
-      const asked = stored.find(x => x.question?.id === checked.answer.question_id)?.question;
-      eventKind = 'answer'; eventText = answerLine(checked.answer.question_id, asked?.prompt ?? '', checked.labels);
-    }
-    // Attached checklist changes are checked in full first, then written together with the message.
-    let added: ChecklistItem[] = [], ticked: string[] = [];
-    if (attached.add.length || attached.check.length) {
-      const items = await readChecklist(path);
-      added = attached.add.map(a => pushItem(items, a.owner, a.text, input.author));
-      ticked = attached.check.filter(c => tickItem(items, c));
-      await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
-    }
-    const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
-      ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
-    addedItems = added;
-    await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
-    // replying means that side read everything before it
-    if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
-    if (flag === 'done') await closeForDone(path);
-    if (input.author === 'user') await writeStatus(path, 'open'); // a user message reopens a done thread
-    return created;
+  const prep: Prepared = { flag: messageFlag(input.author, input.flag, !!input.question || !!secret), attached: checkAttached(input.author, input), agentName };
+  const noted = await readMerge(path);
+  if (noted?.state === 'done') return deliverForward(dir, id, input, prep);
+  const composed = await withLock(path, async () => {
+    // A merge can finish while this post waits for the lock. Write it on the target, not beside the farewell.
+    if ((await readMerge(path))?.state === 'done') return null;
+    return compose(path, input, prep);
   });
-  if (wasDuplicate(message)) return message;
-  if (input.author === 'user') {
-    await logEvent(dir, { id, kind: eventKind, text: (eventKind as string) === 'answer' ? eventText : message.text, ...(message.reply_to ? { reply_to: message.reply_to } : {}), ...(message.aside ? { aside: true } : {}) });
-    for (const i of addedItems) await userEvent(dir, id, 'checklist', `add (${i.owner === 'user' ? 'for you' : 'for the agent'}): ${i.text}`);
-  }
-  return message;
+  if (!composed) return deliverForward(dir, id, input, prep);
+  if (!wasDuplicate(composed.message)) await recordSide(dir, id, input.author, composed);
+  return composed.message;
 }
 export interface NewThread { title: unknown; text: unknown; images?: Image[]; origin: Author; question?: QuestionInput; flag?: unknown; readOnly?: boolean; agent_name?: unknown }
 export async function createThread(dir: string, input: NewThread): Promise<{ id: string }> {
@@ -877,7 +934,7 @@ export function setPin(dir: string, input: { kind: unknown; id: unknown; pinned?
 // `map` is the old→new id table for that copy (message ids, question ids, checklist ids). A later repair reads it back;
 // merges from before it was stored are recovered by lining the source up with the copy instead.
 interface MergeMap { messages: Record<string, string>; questions: Record<string, string>; items: Record<string, string> }
-interface MergeNote { into: string; at: string; state: 'copying' | 'done'; base: number; await_agent: boolean; map?: MergeMap }
+interface MergeNote { into: string; at: string; state: 'copying' | 'done'; base: number; await_agent: boolean; map?: MergeMap; carried?: Record<string, string> }
 const idRecord = (value: unknown): Record<string, string> | null => {
   if (!isObject(value)) return null;
   const out: Record<string, string> = {};
@@ -892,8 +949,19 @@ async function readMerge(path: string): Promise<MergeNote | null> {
     const questions = isObject(v.map) ? idRecord(v.map.questions) : null;
     const items = isObject(v.map) ? idRecord(v.map.items) : null;
     const map = messages && questions && items ? { messages, questions, items } : undefined;
-    return { into: v.into, at: v.at, state: v.state === 'copying' ? 'copying' : 'done', base: typeof v.base === 'number' ? v.base : 0, await_agent: v.await_agent === true, ...(map ? { map } : {}) };
+    const carried = idRecord(v.carried);
+    return { into: v.into, at: v.at, state: v.state === 'copying' ? 'copying' : 'done', base: typeof v.base === 'number' ? v.base : 0, await_agent: v.await_agent === true, ...(map ? { map } : {}), ...(carried && Object.keys(carried).length ? { carried } : {}) };
   } catch { return null; }
+}
+// The id table stored with the merge, or the same table rebuilt by lining the source up after the divider.
+async function resolvedMap(fromId: string, note: MergeNote, from: string, into: string): Promise<MergeMap | null> {
+  if (note.map) return note.map;
+  const source = await readMessages(from, await readItem(from));
+  const target = await readMessages(into, await readItem(into));
+  const pairs = pairsFromBase(source, target, note.base, note.into);
+  if (!pairs) return null;
+  const span = spanOf(fromId, note.into, pairs, undefined);
+  return { messages: asRecord(span.messages), questions: asRecord(span.questions), items: asRecord(span.items) };
 }
 // On the target: a merge brought in something the agent has not answered. Only an agent message after `at` clears it.
 async function readAwait(path: string): Promise<string | null> {
@@ -1111,11 +1179,56 @@ function editsFor(span: RepairSpan, spans: RepairSpan[]): Map<string, RepairEdit
       const got = copy[key] ?? [];
       if (next.join() !== got.join()) edit(copy.id)[key === 'added_items' ? 'added' : 'ticked'] = next;
     }
-    const reason = copy.question?.withdrawn?.reason ?? '';
-    if (copy.question?.withdrawn && WORKAROUND_REASON.test(reason)) edit(copy.id).unwithdraw = reason;
+  }
+  for (const [id, change] of edits) if (!change.answer && !change.replyTo && !change.added && !change.ticked) edits.delete(id);
+  return edits;
+}
+// A "Settled:" or "Answered:" withdrawal that travelled with the copy is the old "this looked unanswered" mark, so it is cleared.
+// One dated after the merge is a real decision: it comes off only when an answer in the target (including one this repair carries) names the question.
+function addUnwithdraw(span: RepairSpan, edits: Map<string, RepairEdit>, answered: Set<string>, mergeAt: string): void {
+  const edit = (id: string): RepairEdit => edits.get(id) ?? edits.set(id, {}).get(id)!;
+  for (const { copy } of span.pairs) {
+    const withdrawn = copy.question?.withdrawn;
+    const reason = withdrawn?.reason ?? '';
+    if (!withdrawn || !WORKAROUND_REASON.test(reason)) continue;
+    const after = withdrawn.at > mergeAt;
+    if ((after && answered.has(copy.question!.id)) || !after) edit(copy.id).unwithdraw = reason;
   }
   for (const [id, change] of edits) if (!change.answer && !change.replyTo && !change.added && !change.ticked && !change.unwithdraw) edits.delete(id);
-  return edits;
+}
+function answeredAfter(messages: Message[], edits: Map<string, RepairEdit>): Set<string> {
+  const ids = new Set<string>();
+  for (const m of messages) if (m.answer) ids.add(edits.get(m.id)?.answer ?? m.answer.question_id);
+  return ids;
+}
+function strandedAnswers(messages: Message[], mergeAt: string, intoId: string): Message[] {
+  const cut = messages.findIndex(m => m.author === 'agent' && m.text.startsWith('Merged into [') && m.text.includes(`(#/${intoId})`));
+  return (cut === -1 ? messages : messages.slice(cut + 1)).filter(m => !!m.answer && m.created_at > mergeAt);
+}
+function alreadyCarried(target: Message[], src: Message, questionId: string): boolean {
+  return target.some(m => m.author === src.author && m.created_at === src.created_at && m.answer?.question_id === questionId && m.text.includes('Sent in ') && m.text.includes('after the merge'));
+}
+interface CarryPlan { from: string; src: Message; copyId: string; fromQ: string; toQ: string; title: string; span: RepairSpan; skipped?: string }
+function describeCarry(plans: CarryPlan[]): string {
+  return plans.map(plan => plan.skipped ? `left ${plan.src.id}: ${plan.skipped}` : `carried ${plan.src.id} -> ${plan.copyId} (${plan.fromQ} -> ${plan.toQ})`).join('; ');
+}
+async function strandedCopy(from: string, into: string, plan: CarryPlan): Promise<Message> {
+  const src = plan.src;
+  const wanted = [...new Set(src.images)];
+  const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
+  const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
+  const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
+  const copy: Message = { ...src, id: plan.copyId, images: src.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])), text: quoteSent(plan.title, src.text), answer: { ...src.answer!, question_id: plan.toQ } };
+  if (src.reply_to && plan.span.messages.has(src.reply_to)) copy.reply_to = plan.span.messages.get(src.reply_to)!;
+  else delete copy.reply_to;
+  return copy;
+}
+async function recordCarried(fromPath: string, carried: Record<string, string>): Promise<void> {
+  const file = join(fromPath, 'merged.json');
+  const raw = JSON.parse(await optional(file) ?? 'null');
+  if (!isObject(raw)) return;
+  raw.carried = { ...(isObject(raw.carried) ? raw.carried : {}), ...carried };
+  await writeAtomic(file, JSON.stringify(raw));
 }
 function describeEdits(span: RepairSpan, edits: Map<string, RepairEdit>): string {
   const parts: string[] = [];
@@ -1165,18 +1278,20 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
   }
   const spans: RepairSpan[] = [];
   const results: MergeRepair[] = [];
-  const pending: { from: string; note: MergeNote; source: Message[] }[] = [];
+  const pending: { from: string; note: MergeNote; source: Message[]; title: string }[] = [];
   for (const { from, note } of notes) {
     if (note.state !== 'done') { results.push({ into: note.into, from, status: 'skipped', detail: 'merge did not finish; nothing changed' }); continue; }
-    let source: Message[] | null = null, target: Message[] | null = null;
+    let source: Message[] | null = null, target: Message[] | null = null, title = from;
     try {
-      source = await readMessages(join(dir, from), await readItem(join(dir, from)));
+      const item = await readItem(join(dir, from));
+      title = titleOf(item, from);
+      source = await readMessages(join(dir, from), item);
       target = await readMessages(join(dir, note.into), await readItem(join(dir, note.into)));
     } catch { /* the source or the target is gone */ }
     const pairs = source && target ? (note.map ? pairsFromMap(source, target, note.map) : null) ?? pairsFromBase(source, target, note.base, note.into) : null;
     if (!source || !target || !pairs) { results.push({ into: note.into, from, status: 'skipped', detail: 'mapping is not recoverable; nothing changed' }); continue; }
     spans.push(spanOf(from, note.into, pairs, note.map?.items));
-    pending.push({ from, note, source });
+    pending.push({ from, note, source, title });
   }
   const byInto = new Map<string, RepairSpan[]>();
   for (const span of spans) {
@@ -1186,23 +1301,62 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
   }
   for (const [into, group] of byInto) {
     const path = join(dir, into);
-    const described: { span: RepairSpan; edits: Map<string, RepairEdit> }[] = [];
+    const described: { span: RepairSpan; edits: Map<string, RepairEdit>; plans: CarryPlan[] }[] = [];
     const apply = async () => {
       const fresh = await readMessages(path, await readItem(path));
-      const merged = new Map<string, RepairEdit>();
+      const plans: CarryPlan[] = [];
+      let n = fresh.length;
+      for (const span of group) {
+        const row = pending.find(p => p.from === span.from);
+        if (!row) continue;
+        for (const src of strandedAnswers(row.source, row.note.at, span.into)) {
+          const qid = src.answer!.question_id;
+          const mapped = span.questions.get(qid);
+          if (!mapped) { plans.push({ from: span.from, src, copyId: '', fromQ: qid, toQ: '', title: row.title, span, skipped: `${qid} was asked after the merge` }); continue; }
+          const known = row.note.carried?.[src.id];
+          if ((known && fresh.some(m => m.id === known)) || alreadyCarried(fresh, src, mapped)) continue;
+          plans.push({ from: span.from, src, copyId: `m${++n}`, fromQ: qid, toQ: mapped, title: row.title, span });
+        }
+      }
+      const projected: Message[] = [...fresh, ...plans.filter(plan => !plan.skipped).map(plan => ({ id: plan.copyId, author: plan.src.author, text: quoteSent(plan.title, plan.src.text), images: [], created_at: plan.src.created_at, answer: { ...plan.src.answer!, question_id: plan.toQ } }))];
+      const ref: { span: RepairSpan; edits: Map<string, RepairEdit> }[] = [];
       for (const span of group) {
         const source = pending.find(p => p.from === span.from)?.source;
         const pairs = source ? pairsFromIds(source, fresh, span) ?? span.pairs : span.pairs;
         const live = { ...span, pairs };
-        const edits = editsFor(live, spans);
-        described.push({ span: live, edits });
-        for (const [id, change] of edits) merged.set(id, change);
+        ref.push({ span: live, edits: editsFor(live, spans) });
       }
-      if (!opts.dryRun) await patchThread(path, merged);
+      const seeded = new Map<string, RepairEdit>();
+      for (const { edits } of ref) for (const [id, change] of edits) seeded.set(id, change);
+      const answered = answeredAfter(projected, seeded);
+      for (const { span, edits } of ref) {
+        addUnwithdraw(span, edits, answered, pending.find(p => p.from === span.from)?.note.at ?? '');
+        described.push({ span, edits, plans: plans.filter(plan => plan.from === span.from) });
+      }
+      if (opts.dryRun) return;
+      const copies: Message[] = [];
+      for (const plan of plans) if (!plan.skipped) copies.push(await strandedCopy(join(dir, plan.from), path, plan));
+      if (copies.length) await appendFile(join(path, 'thread.jsonl'), copies.map(m => `${JSON.stringify(m)}\n`).join(''));
+      const merged = new Map<string, RepairEdit>();
+      for (const { edits } of described) for (const [id, change] of edits) merged.set(id, change);
+      await patchThread(path, merged);
+      const byFrom = new Map<string, Record<string, string>>();
+      for (const plan of plans) {
+        if (plan.skipped) continue;
+        const rec = byFrom.get(plan.from) ?? {};
+        rec[plan.src.id] = plan.copyId;
+        byFrom.set(plan.from, rec);
+      }
+      for (const [from, rec] of byFrom) await recordCarried(join(dir, from), rec);
     };
     try { await withLock(path, apply); }
     catch { results.push({ into, from: group[0]?.from ?? into, status: 'skipped', detail: 'mapping is not recoverable; nothing changed' }); continue; }
-    for (const { span, edits } of described) results.push({ into: span.into, from: span.from, status: edits.size ? 'repaired' : 'unchanged', detail: describeEdits(span, edits) });
+    for (const { span, edits, plans } of described) {
+      const carry = describeCarry(plans);
+      const edited = describeEdits(span, edits);
+      const detail = [carry, edited === 'nothing to change' ? '' : edited].filter(Boolean).join('; ') || 'nothing to change';
+      results.push({ into: span.into, from: span.from, status: edits.size || plans.some(plan => !plan.skipped) ? 'repaired' : 'unchanged', detail });
+    }
   }
   return results.sort((a, b) => a.into.localeCompare(b.into) || a.from.localeCompare(b.from) || a.detail.localeCompare(b.detail));
 }

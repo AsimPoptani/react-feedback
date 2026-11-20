@@ -126,9 +126,10 @@ export function createMcpServer(options: McpOptions): McpServer {
     todo: z.array(z.string()).max(store.MAX_ITEMS).optional(), for: z.enum(['agent', 'user']).optional().describe('Who the new todo items are for'), check: z.array(z.string()).max(store.MAX_ITEMS).optional(), aside: z.boolean().optional(), image }, async a => {
     const m = await store.appendMessage(dir, a.id, { author: 'agent', agent_name: agent, text: a.text, images: await images(a.image), flag: flagOf(a), reply_to: a.to, ...(a.aside ? { aside: true } : {}),
       ...(a.todo?.length ? { add_items: a.todo.map(t => ({ owner: a.for ?? 'agent', text: t })) } : {}), ...(a.check?.length ? { check_items: a.check } : {}) });
-    await reminders.checkAfterReply(dir, a.id);
-    const open = !a.aside && !a.todo?.length && !a.check?.length ? await reminders.openAgentItems(dir, a.id) : [];
-    return { posted: shapeMessage(m), ...(open.length ? { hint: `${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with check: ["cN"]`, open_items: open.map(shapeItem) } : {}) };
+    const thread = m.forwarded_to ?? a.id;
+    await reminders.checkAfterReply(dir, thread);
+    const open = !a.aside && !a.todo?.length && !a.check?.length ? await reminders.openAgentItems(dir, thread) : [];
+    return { posted: shapeMessage(m), ...(m.forwarded_to ? { forwarded_to: m.forwarded_to } : {}), ...(open.length ? { hint: `${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with check: ["cN"]`, open_items: open.map(shapeItem) } : {}) };
   });
   tool('ask', 'Ask the user a question with options, on a thread (id) or as a new thread (title). The answer comes back as the user\'s next message.', {
     id: thread.optional(), title: z.string().max(store.MAX_TITLE).optional().describe('Needed when there is no id: starts a thread'), prompt: z.string().min(1).max(1000),

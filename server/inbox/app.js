@@ -102,13 +102,13 @@ async function postQueued(e) {
     const r = await fetch(`${API}threads/${e.thread}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: e.text, images: e.images, ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : {}), client_id: e.cid, written_at: e.written_at }) });
     if (r.ok || r.status < 500) setOffline(false);
-    let reason; if (!r.ok) { try { reason = (await r.json()).detail; } catch { /* no detail */ } }
-    return { status: r.status, reason };
+    let body = {}; try { body = await r.json(); } catch { /* no body */ }
+    return { status: r.status, reason: r.ok ? undefined : body.detail, forwarded_to: typeof body.forwarded_to === 'string' ? body.forwarded_to : undefined };
   } catch { setOffline(true); return { network: true }; }
 }
 const outbox = createOutbox({ post: postQueued, canSend: () => !isOffline(),
   onChange: () => { drawOffline(); if (state.detail) drawMessages(state.detail); },
-  onSent: e => { state.echo.set(e.cid, e); const id = e.thread; Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
+  onSent: (e, result) => { state.echo.set(e.cid, e); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast('Sent in the merged thread'); if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
 function drawOffline() {
   const banner = $('offline-banner'), n = outbox.pending(), off = isOffline();
   const waiting = n ? ` · ${n} waiting to send` : '';
@@ -406,7 +406,7 @@ const imageButtonBlock = imageFig;
 // Structured questions: the agent asks, the user answers with a normal message carrying `answer`.
 function answerFor(d, q) { return d.messages.find(m => m.answer && m.answer.question_id === q.id) || null; }
 function activeQuestion() {
-  const d = state.detail; if (!d) return null;
+  const d = state.detail; if (!d || d.merged_into || d.read_only) return null;
   const open = d.messages.filter(m => m.question && !answerFor(d, m.question)).map(m => m.question);
   return open[open.length - 1] || null;
 }
@@ -426,11 +426,12 @@ function paintCard(q) {
 }
 async function submitAnswer(q) {
   const d = state.detail, s = selFor(q);
-  if (!d || state.busy || (!s.ids.length && !s.other.trim())) return;
+  if (!d || d.merged_into || state.busy || (!s.ids.length && !s.other.trim())) return;
   state.busy = true;
   try {
-    await post(`threads/${d.id}/answer`, { question_id: q.id, option_ids: s.ids, ...(s.other.trim() ? { other_text: s.other.trim() } : {}) });
+    const sent = await post(`threads/${d.id}/answer`, { question_id: q.id, option_ids: s.ids, ...(s.other.trim() ? { other_text: s.other.trim() } : {}) });
     delete state.qsel[q.id];
+    if (sent?.forwarded_to) { showToast('Sent in the merged thread'); location.hash = `#/${sent.forwarded_to}`; return; }
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) { showError($('error'), error.message); await loadThread(d.id, { quiet: true }); }
   finally { state.busy = false; }
@@ -464,7 +465,8 @@ function questionCard(d, m) {
   }
   const submit = el('button', { type: 'button', class: 'primary qsubmit', onclick: () => submitAnswer(q) }, 'Submit', kbd('Enter'));
   card.append(el('div', { class: 'qbar' }, submit, el('span', { class: 'hint', text: q.multi ? 'Choose any number. Keys 1–9 toggle, Enter submits.' : 'Click an option, or press its number then Enter.' })));
-  queueMicrotask(() => paintCard(q));
+  if (d.merged_into) for (const control of card.querySelectorAll('button, input, textarea')) control.disabled = true;
+  queueMicrotask(() => { if (!d.merged_into) paintCard(q); });
   return card;
 }
 
@@ -508,7 +510,7 @@ function messageNode(d, m) {
   if (quiet(d, m) && !farewell) head.append(el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Hide'));
   if (m.author === 'user' && d.acked_through === m.created_at) head.append(el('span', { class: 'acked-note', text: `· ${state.profile.agent.name} acknowledged` }));
   const ticks = ticksFor(d, m); if (ticks) head.append(ticks);
-  if (!d.read_only) head.append(el('button', { type: 'button', class: 'reply-btn', 'aria-label': `Reply to ${who.name}, ${when(m.created_at)}`, onclick: () => startReply(m.id) }, 'Reply'));
+  if (!d.read_only && !d.merged_into) head.append(el('button', { type: 'button', class: 'reply-btn', 'aria-label': `Reply to ${who.name}, ${when(m.created_at)}`, onclick: () => startReply(m.id) }, 'Reply'));
   if (m.author === 'user' && !m.redacted && state.config?.redact) head.append(el('button', { type: 'button', class: 'msg-more', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `More actions for your message of ${when(m.created_at)}`, onclick: e => openMenu(e.currentTarget, [{ label: 'Redact…', onclick: () => askRedact(d, m) }]) }, '⋯'));
   const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '-1', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
@@ -899,6 +901,29 @@ function dragStart(e) { if (!sheetOpen() || e.target.closest('button')) return; 
 function dragMove(e) { if (!sheetDrag) return; sheetDrag.dy = Math.max(0, e.touches[0].clientY - sheetDrag.y); $('checklist').style.transform = `translateY(${sheetDrag.dy}px)`; }
 function dragEnd() { if (!sheetDrag) return; const far = sheetDrag.dy > 70; sheetDrag = null; if (far) closeSheet(); else $('checklist').style.transform = ''; }
 
+// A merged-away thread stays readable. The composer and the question cards cannot post here; a late post is forwarded.
+function drawMerged(d) {
+  const banner = $('merged-banner');
+  if (!banner) return;
+  const into = d?.merged_into;
+  banner.hidden = !into;
+  const off = !!into;
+  if (into) {
+    const title = state.threads.find(t => t.id === into)?.title || into;
+    banner.replaceChildren(document.createTextNode('Merged into '), el('strong', { text: title }), document.createTextNode(' · '), el('a', { href: `#/${into}`, text: 'Open' }));
+  }
+  $('composer')?.setAttribute('aria-disabled', String(off));
+  for (const id of ['text', 'send', 'attach', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = off; }
+}
+let toastTimer = 0;
+function showToast(text) {
+  const node = $('toast');
+  if (!node) return;
+  node.textContent = text;
+  node.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { node.hidden = true; }, 3200);
+}
 // A read-only thread only carries updates: no composer, and a note saying why.
 function drawReadOnly(d) {
   const ro = d.read_only === true;
@@ -995,8 +1020,9 @@ function drawThread() {
   if (!state.artifactOn) removeArtifactFrame();
   if (arts) arts.style.display = state.artifactsOn ? 'flex' : 'none';
   if (artLink) artLink.setAttribute('aria-current', state.artifactOn || state.artifactsOn ? 'page' : 'false');
-  if (!d) { drawWaiting(null); return; }
+  if (!d) { drawMerged(null); drawWaiting(null); return; }
   drawReadOnly(d);
+  drawMerged(d);
   $('title').textContent = d.title;
   document.title = `${d.title} · Feedback inbox`;
   $('toggle-done').replaceChildren(d.status === 'done' ? 'Reopen' : 'Mark done', kbd('E'));
@@ -1213,6 +1239,7 @@ async function send(event, forceAside = false) {
   event.preventDefault();
   const id = state.openId, parsed = parseBtw($('text').value), aside = forceAside || parsed.aside, text = aside ? parsed.text : $('text').value;
   if (state.busy || !id) return;
+  if (state.detail?.merged_into) return;
   if (aside && !text.trim() && !state.images.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
   if (!text.trim() && !state.images.length) return;
   if (state.detail?.read_only) { showError($('error'), 'This thread is read-only, so nothing can be sent or queued.'); return; }
@@ -1228,12 +1255,23 @@ async function send(event, forceAside = false) {
     // With no signal, or messages already waiting (they go first, to keep the order), the message joins the outbox.
     if (isOffline() || outbox.pending()) { await queue(); return; }
     try {
-      await post(`threads/${id}/messages`, { text, images, ...(aside ? { aside: true } : reply_to ? { reply_to } : {}), client_id: cid, written_at });
+      const sent = await post(`threads/${id}/messages`, { text, images, ...(aside ? { aside: true } : reply_to ? { reply_to } : {}), client_id: cid, written_at });
+      if (sent?.forwarded_to) {
+        cleared();
+        showToast('Sent in the merged thread');
+        location.hash = `#/${sent.forwarded_to}`;
+        return;
+      }
     } catch (error) { if (error.network) { await queue(); return; } throw error; }
     cleared();
     await Promise.all([loadThread(id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
-  finally { state.busy = false; $('send').disabled = false; $('btw').disabled = false; $('text').focus(); }
+  finally {
+    state.busy = false;
+    const merged = !!state.detail?.merged_into;
+    $('send').disabled = merged; $('btw').disabled = merged;
+    if (!merged) $('text').focus();
+  }
 }
 const redrawComposer = () => drawPreviews($('previews'), state.images, redrawComposer);
 async function toggleDone() {
@@ -1488,7 +1526,7 @@ function clip(text, n) {
   return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
 }
 function liveQuestions(d) {
-  if (!d || d.read_only) return [];
+  if (!d || d.read_only || d.merged_into) return [];
   const answered = new Set((d.messages || []).flatMap(m => (m.answer ? [m.answer.question_id] : [])));
   return (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !answered.has(m.question.id));
 }

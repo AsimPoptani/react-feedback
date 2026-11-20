@@ -14,7 +14,7 @@
 //   react-feedback todo <id> list | done|check <item> | uncheck <item> | unclaim <item> "why" | edit <item> "text" | rm <item>
 //   react-feedback todos [--mine | --claimed]
 //   react-feedback merge <from-id> <into-id>
-//   react-feedback repair-merged [--dry-run]   (re-point answers left behind by a merge from before 0.9.1)
+//   react-feedback repair-merged [--dry-run]   (re-point answers a merge left on the old question id, and copy answers posted on the source after the merge)
 //   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>   (move messages to another thread)
 //   react-feedback new "title" "text" --read-only     (a thread the user cannot reply to)
 //   react-feedback readonly <id> on|off
@@ -64,7 +64,7 @@ const USAGE = `Usage:
   react-feedback todo <id> list | done <item> (or check) | uncheck <item> | unclaim <item> "why" | edit <item> "text" | rm <item>
   react-feedback todos [--mine | --claimed]
   react-feedback merge <from-id> <into-id>
-  react-feedback repair-merged [--dry-run]   (re-point answers a merge from before 0.9.1 left on the old question id)
+  react-feedback repair-merged [--dry-run]   (re-point answers a merge left on the old question id, and copy answers posted on the source after the merge)
   react-feedback move <from-id> <message-id> [<message-id> ...] --to <into-id>
   react-feedback new "title" "text" --read-only
   react-feedback readonly <id> on|off
@@ -341,12 +341,14 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     if (owner !== null && !addTodos.length) throw new store.Invalid('--for goes with --todo');
     const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), flag: flagOf(flags), reply_to: to ?? undefined, ...(aside ? { aside: true } : {}),
       ...(addTodos.length ? { add_items: addTodos.map(text => ({ owner: owner ?? 'agent', text })) } : {}), ...(checks.length ? { check_items: checks } : {}) });
-    const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, words[0]!))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
+    const thread = message.forwarded_to ?? words[0]!;
+    const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, thread))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
     const extras = `${aside ? `, side answer to ${message.reply_to}` : ''}${message.added_items ? `, added ${message.added_items.join(' ')}` : ''}${message.ticked_items ? `, ticked ${message.ticked_items.join(' ')}` : ''}`;
-    await reminders.checkAfterReply(dir, words[0]!);
-    const open = !aside && !addTodos.length && !checks.length ? await reminders.openAgentItems(dir, words[0]!) : [];
+    const via = message.forwarded_to ? `; forwarded from ${words[0]}` : '';
+    await reminders.checkAfterReply(dir, thread);
+    const open = !aside && !addTodos.length && !checks.length ? await reminders.openAgentItems(dir, thread) : [];
     if (open.length) notice(`${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with --check cN (open: ${open.map(i => i.id).join(' ')})`);
-    return `Replied to ${words[0]} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed})`;
+    return `Replied to ${thread} (${message.id}${message.images.length ? `, ${message.images.join(' ')}` : ''}${extras}${closed}${via})`;
   }
   if (command === 'read' && words.length === 1) {
     await store.markAgentRead(dir, words[0]!);

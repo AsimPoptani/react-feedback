@@ -265,7 +265,7 @@ react-feedback reply|new|ask ... [--needs-you | --done | --fyi] # flag the messa
 react-feedback todo <id> add agent|user "text"                  # checklist items; also list, done, uncheck, unclaim, edit, rm
 react-feedback todos [--mine | --claimed]
 react-feedback merge <from-id> <into-id>
-react-feedback repair-merged [--dry-run]                    # re-point answers a merge from before 0.9.1 left on the old question id
+react-feedback repair-merged [--dry-run]                    # re-point answers a merge left behind, and copy answers posted on the source after it
 react-feedback new "title" "text" --read-only                   # an updates thread the user cannot reply to
 react-feedback readonly <id> on|off
 react-feedback profile agent --avatar path                      # square PNG, JPEG or WebP, up to 2 MB

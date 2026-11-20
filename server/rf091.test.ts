@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from './cli';
@@ -153,4 +153,79 @@ test('repair-merged does nothing when the old ids cannot be recovered', async ()
   expect(out).toContain(`${into}  from ${other}: merge did not finish; nothing changed`);
   expect(await readFile(threadFile(into))).toEqual(before);
   expect(await readFile(threadFile(from))).toEqual(sourceBefore);
+});
+
+test('a message or answer posted on a merged thread is forwarded, and ask is refused', async () => {
+  const into = (await store.createThread(dir, { title: 'Main', text: 'tgt hello', origin: 'user' })).id;
+  const from = (await store.createThread(dir, { title: 'Side', text: 'src hello', origin: 'user' })).id;
+  await ask(from, 'Which project?');
+  await store.mergeThreads(dir, from, into, 'agent');
+  const before = (await readThread(from)).messages.length;
+
+  const quoted = await store.appendMessage(dir, from, { author: 'user', text: 'about the first note', reply_to: 'm1' });
+  expect(quoted.forwarded_to).toBe(into);
+  expect(quoted.text).toContain('Sent in Side after the merge');
+  expect(quoted.text).toContain('about the first note');
+  expect(quoted.reply_to).toBe((await readThread(into)).messages.find(m => m.text === 'src hello')!.id);
+  expect((await readThread(from)).messages).toHaveLength(before);
+
+  const answer = await store.appendMessage(dir, from, { author: 'user', text: '', answer: { question_id: 'q2', option_ids: ['o1'] } });
+  expect(answer.forwarded_to).toBe(into);
+  const target = await readThread(into);
+  const question = target.messages.find(m => m.question?.prompt === 'Which project?')!;
+  expect(answer.answer!.question_id).toBe(question.question!.id);
+  expect(answer.answer!.question_id).not.toBe('q2');
+  expect(store.openQuestions(target.messages)).toEqual([]);
+  expect(target.summary.open_question).toBe(false);
+  expect((await readThread(from)).messages).toHaveLength(before);
+
+  await expect(store.appendMessage(dir, from, { author: 'agent', text: 'More?', question: { prompt: 'More?', options: [{ label: 'A' }] } })).rejects.toThrow(/ask on that thread/);
+  await expect(run(['ask', from, 'More?', '--option', 'No'], dir)).rejects.toThrow(/ask on that thread/);
+  const cli = await run(['reply', from, 'via the cli'], dir);
+  expect(cli).toContain(`Replied to ${into}`);
+  expect(cli).toContain(`forwarded from ${from}`);
+  expect((await readThread(into)).messages.some(m => m.text.includes('via the cli') && m.text.includes('Sent in Side after the merge'))).toBe(true);
+});
+
+test('repair carries a stranded answer and un-withdraws only then; a later Settled withdrawal with no answer stays', async () => {
+  const into = (await store.createThread(dir, { title: 'Main', text: 'tgt hello', origin: 'user' })).id;
+  const from = (await store.createThread(dir, { title: 'Side', text: 'src hello', origin: 'user' })).id;
+  await ask(from, 'Which project?');
+  await ask(from, 'Ship it?');
+  await store.mergeThreads(dir, from, into, 'agent');
+  const note = JSON.parse(await readFile(join(dir, from, 'merged.json'), 'utf8'));
+  const source = await readThread(from);
+  const stranded = { id: `m${source.messages.length + 1}`, author: 'user', text: 'Chose: A', images: [], created_at: new Date(Date.parse(note.at) + 1000).toISOString(), answer: { question_id: 'q2', option_ids: ['o1'] } };
+  await appendFile(threadFile(from), `${JSON.stringify(stranded)}\n`);
+  const copied = await readThread(into);
+  const which = copied.messages.find(m => m.question?.prompt === 'Which project?')!;
+  const ship = copied.messages.find(m => m.question?.prompt === 'Ship it?')!;
+  await store.cancelQuestion(dir, into, which.question!.id, 'Answered: looked open');
+  await store.cancelQuestion(dir, into, ship.question!.id, 'Settled: shipped on purpose');
+  const sourceBefore = await readFile(threadFile(from));
+
+  const dry = await run(['repair-merged', '--dry-run'], dir);
+  expect(dry).toContain(`carried ${stranded.id}`);
+  expect(dry).toContain('q2 ->');
+  expect(dry).toContain(`un-withdrew ${which.question!.id}`);
+  expect(dry).toContain('Answered: looked open');
+  expect(dry).not.toContain('Settled: shipped on purpose');
+  expect(await readFile(threadFile(from))).toEqual(sourceBefore);
+
+  await run(['repair-merged'], dir);
+  const after = await readThread(into);
+  const carried = after.messages.find(m => m.text.includes('Sent in Side after the merge'))!;
+  expect(carried.answer!.question_id).toBe(which.question!.id);
+  expect(carried.text).toContain('Chose: A');
+  expect(after.messages.find(m => m.question?.prompt === 'Which project?')!.question!.withdrawn).toBeUndefined();
+  expect(after.messages.find(m => m.question?.prompt === 'Ship it?')!.question!.withdrawn?.reason).toBe('Settled: shipped on purpose');
+  expect(store.openQuestions(after.messages)).toEqual([]);
+  expect(JSON.parse(await readFile(join(dir, from, 'merged.json'), 'utf8')).carried[stranded.id]).toBe(carried.id);
+  expect(await readFile(threadFile(from))).toEqual(sourceBefore);
+
+  const fixed = await readFile(threadFile(into));
+  expect(await run(['repair-merged'], dir)).toContain('nothing to change');
+  expect(await run(['repair-merged', '--dry-run'], dir)).toContain('nothing to change');
+  expect(await readFile(threadFile(into))).toEqual(fixed);
+  expect((await readThread(into)).messages.filter(m => m.answer)).toHaveLength(1);
 });
