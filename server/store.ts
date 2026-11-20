@@ -44,7 +44,7 @@ export interface Message { id: string; author: Author; text: string; images: str
   moved_to?: string; moved_from?: string;
   // `kind: 'secret_request'` is the agent asking for a key: `secret` holds what to ask for and, once the user has saved it (straight to the app, never here), a non-secret `status` and `hint`.
   // `redacted` replaces a sensitive message's text and images, which live in the vault; `key` says which vault file.
-  kind?: 'secret_request' | 'share_notice'; secret?: SecretRequest; redacted?: Redaction; share_id?: string; artifact_id?: string;
+  kind?: 'secret_request' | 'share_notice' | 'project_move'; secret?: SecretRequest; redacted?: Redaction; share_id?: string; artifact_id?: string;
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
   client_id?: string; written_at?: string;
   // `agent_name`: which agent wrote an agent message, when it is not the default one (an MCP client's FEEDBACK_AGENT_NAME). Absent means the inbox's agent profile.
@@ -261,6 +261,7 @@ function parseMessages(raw: string | null): Message[] {
           ...(m.author === 'agent' && typeof m.agent_name === 'string' && m.agent_name.trim() && m.agent_name.length <= MAX_NAME ? { agent_name: m.agent_name } : {}),
           ...(parseSecret(m) ? { kind: 'secret_request' as const, secret: parseSecret(m)! } : {}),
           ...(m.kind === 'share_notice' && typeof m.share_id === 'string' ? { kind: 'share_notice' as const, share_id: m.share_id, ...(typeof m.artifact_id === 'string' ? { artifact_id: m.artifact_id } : {}) } : {}),
+          ...(m.kind === 'project_move' && m.divider === true ? { kind: 'project_move' as const } : {}),
           ...(parseRedaction(m.redacted) ? { redacted: parseRedaction(m.redacted)! } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
@@ -403,7 +404,8 @@ async function readAcked(path: string): Promise<string | null> {
   return typeof v.acked_through === 'string' ? v.acked_through : null;
 }
 // The newest time in the thread, not the last line's: a merge copies older messages after its divider, and the clock must not go back.
-const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) => (m.created_at > hi ? m.created_at : hi), item.created_at as string);
+// A project-move divider is a system line: it neither moves the clock nor counts as the last message.
+const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) => (m.created_at > hi && m.kind !== 'project_move' ? m.created_at : hi), item.created_at as string);
 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
 // `aside`: a side question (user) or its answer (agent, with `reply_to` naming the aside). `add_items` and `check_items` ride on the message:
@@ -1622,7 +1624,7 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const path = await itemDir(dir, id);
   const item = await readItem(path);
   const messages = await readMessages(path, item);
-  const main = mainMessages(messages).filter(m => !m.moved_to && m.kind !== 'share_notice'); // asides, move stubs and share notices never decide who spoke last
+  const main = mainMessages(messages).filter(m => !m.moved_to && m.kind !== 'share_notice' && m.kind !== 'project_move'); // asides, move stubs, share notices and project-move lines never decide who spoke last
   const last = [...main].reverse().find(m => !m.divider); // a system divider (a project move) is not someone speaking
   const created_at = item.created_at as string;
   const last_author: Author = last?.author ?? 'user';

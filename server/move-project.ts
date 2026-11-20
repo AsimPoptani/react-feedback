@@ -246,7 +246,7 @@ async function rewriteThread(path: string, plan: Plan, fromId: string, line: str
     if (rec.divider === true && rec.text === line) has = true;
     out.push(JSON.stringify(rec));
   }
-  if (!has) out.push(JSON.stringify({ id: `m${max + 1}`, author: 'agent', text: line, images: [], created_at: plan.journal.at, divider: true }));
+  if (!has) out.push(JSON.stringify({ id: `m${max + 1}`, author: 'agent', text: line, images: [], created_at: plan.journal.at, divider: true, kind: 'project_move' }));
   await writeAtomic(file, `${out.join('\n')}\n`);
   await rewriteNote(join(path, 'merged.json'), note => { if (typeof note.into === 'string' && plan.ids.has(note.into)) note.into = plan.ids.get(note.into); });
   await rewriteNote(join(path, 'awaiting-agent.json'), note => { if (typeof note.from === 'string' && plan.ids.has(note.from)) note.from = plan.ids.get(note.from); });

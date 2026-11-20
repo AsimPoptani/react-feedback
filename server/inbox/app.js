@@ -407,6 +407,8 @@ const imageButtonBlock = imageFig;
 
 // Structured questions: the agent asks, the user answers with a normal message carrying `answer`.
 function answerFor(d, q) { return d.messages.find(m => m.answer && m.answer.question_id === q.id) || null; }
+// A typed or kept answer is remembered per thread (question ids repeat from thread to thread).
+const qk = qid => `${state.openId}:${qid}`;
 function activeQuestion() {
   const d = state.detail; if (!d || d.merged_into || d.read_only) return null;
   const open = d.messages.filter(m => m.question && !m.question.withdrawn && !m.question.reasked && !answerFor(d, m.question)).map(m => m.question);
@@ -432,9 +434,9 @@ function harvestDrafts() {
     if (!prev || focused || (!prev.focused && input.value.length >= prev.value.length)) found.set(qid, { value: input.value, focused });
   }
   for (const [qid, draft] of found) {
-    const prev = state.qsel[qid] ?? { ids: [], other: '' };
-    if (!prev.ids.length && !draft.value.trim()) delete state.qsel[qid];
-    else state.qsel[qid] = { ids: prev.ids, other: draft.value };
+    const prev = state.qsel[qk(qid)] ?? { ids: [], other: '' };
+    if (!prev.ids.length && !draft.value.trim()) delete state.qsel[qk(qid)];
+    else state.qsel[qk(qid)] = { ids: prev.ids, other: draft.value };
   }
 }
 function revealKept(d) {
@@ -443,7 +445,7 @@ function revealKept(d) {
   for (const m of d.messages || []) {
     const q = m.question;
     if (!q || (!q.withdrawn && !q.reasked)) continue;
-    const s = state.qsel[q.id];
+    const s = state.qsel[qk(q.id)];
     if (!s || (!s.ids.length && !s.other.trim())) continue;
     const key = `${d.id}:${q.id}`;
     if (state.keptShown.has(key)) continue;
@@ -452,20 +454,20 @@ function revealKept(d) {
   }
 }
 async function sendKept(d, m) {
-  const q = m.question, s = state.qsel[q.id];
+  const q = m.question, s = state.qsel[qk(q.id)];
   const text = s ? keptText(s, q) : '';
   if (!d || !text || state.busy) return;
   state.busy = true;
   try {
     await post(`threads/${d.id}/messages`, { text, reply_to: m.id });
-    delete state.qsel[q.id];
+    delete state.qsel[qk(q.id)];
     state.shown = '';
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
   finally { state.busy = false; }
 }
 async function useOnCopy(d, m, copy) {
-  const q = m.question, nq = copy?.question, s = state.qsel[q.id];
+  const q = m.question, nq = copy?.question, s = state.qsel[qk(q.id)];
   if (!d || !nq || !s || state.busy) return;
   const option_ids = s.ids.map(id => { const label = q.options.find(o => o.id === id)?.label; return nq.options.find(o => o.label === label)?.id; }).filter(Boolean);
   const other = s.other.trim();
@@ -473,14 +475,14 @@ async function useOnCopy(d, m, copy) {
   state.busy = true;
   try {
     await post(`threads/${d.id}/answer`, { question_id: nq.id, option_ids, ...(other ? { other_text: other } : {}) });
-    delete state.qsel[q.id];
+    delete state.qsel[qk(q.id)];
     state.shown = '';
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
   finally { state.busy = false; }
 }
 function rescueFor(d, m, copy) {
-  const q = m.question, s = state.qsel[q.id];
+  const q = m.question, s = state.qsel[qk(q.id)];
   if (!s || (!s.ids.length && !s.other.trim()) || (!q.withdrawn && !q.reasked)) return null;
   const box = el('div', { class: 'qrescue' });
   const labels = s.ids.map(id => q.options.find(o => o.id === id)?.label).filter(Boolean);
@@ -522,7 +524,7 @@ function closedQuestion(d, m) {
   if (rescue) card.append(rescue);
   return card;
 }
-const selFor = q => (state.qsel[q.id] ??= { ids: [], other: '' });
+const selFor = q => (state.qsel[qk(q.id)] ??= { ids: [], other: '' });
 function toggleOption(q, optId) {
   const s = selFor(q);
   if (q.multi) s.ids = s.ids.includes(optId) ? s.ids.filter(i => i !== optId) : [...s.ids, optId]; else s.ids = [optId];
@@ -542,7 +544,7 @@ async function submitAnswer(q) {
   state.busy = true;
   try {
     const sent = await post(`threads/${d.id}/answer`, { question_id: q.id, option_ids: s.ids, ...(s.other.trim() ? { other_text: s.other.trim() } : {}) });
-    delete state.qsel[q.id];
+    delete state.qsel[qk(q.id)];
     if (sent?.forwarded_to) { showToast('Sent in the merged thread'); location.hash = `#/${sent.forwarded_to}`; return; }
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) {
@@ -1050,7 +1052,7 @@ function keepDraft(d) {
   const text = $('text')?.value || '';
   const open = (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked);
   const bar = $('waiting-bar')?.querySelector('.qother')?.value || '';
-  const stored = open.map(m => ({ q: m.question, other: state.qsel[m.question.id]?.other || '' })).filter(x => x.other.trim()).pop();
+  const stored = open.map(m => ({ q: m.question, other: state.qsel[qk(m.question.id)]?.other || '' })).filter(x => x.other.trim()).pop();
   const typed = bar.trim() ? { q: open[open.length - 1]?.question, other: bar } : stored;
   const prev = state.carryDraft?.from === d.id ? state.carryDraft : null;
   const draft = { from: d.id, into: d.merged_into, text: text || prev?.text || '', other: typed?.other || prev?.other || '', prompt: typed?.q?.prompt || prev?.prompt || '' };
@@ -1176,6 +1178,7 @@ function drawThread() {
   $('toggle-done').replaceChildren(d.status === 'done' ? 'Reopen' : 'Mark done', kbd('E'));
   if (state.captureFor !== d.id) { drawCapture(d); state.captureFor = d.id; }
   $('merge-open').hidden = !!d.merged_into || d.read_only === true;
+  $('move-open').hidden = state.projects.length < 2 || !!d.merged_into;
   drawPinThread(); drawChecklist(d);
   const typing = document.activeElement;
   const typingQ = typing?.classList?.contains('qother') ? (typing.closest('[data-question]')?.getAttribute('data-question') || ($('waiting-bar')?.contains(typing) ? $('waiting-bar').dataset.question || '' : '')) : '';
@@ -1211,7 +1214,10 @@ function route() {
   state.focusItem = id && item ? item : null;
   if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn && artsPage === state.artifactsOn && artifactId === state.artifactId && artifactVer === state.artifactVer) { if (state.focusItem && state.detail) focusItemNow(); return; }
   state.metricsOn = metrics; state.trackerOn = tracker; state.artifactsOn = artsPage; state.artifactOn = !!artMatch; state.artifactId = artifactId; state.artifactVer = artifactVer;
-  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); state.qsel = {}; closeMenu(false);
+  harvestDrafts(); // keep what was typed in the thread being left, under its own id
+  for (const stale of document.querySelectorAll('.qother')) stale.remove(); // a redraw for the next thread must not read the old thread's boxes as its own
+  const waitingBar = $('waiting-bar'); if (waitingBar) { waitingBar.dataset.key = ''; delete waitingBar.dataset.question; }
+  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); closeMenu(false);
   $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
@@ -1498,7 +1504,7 @@ function openMore() {
   const d = state.detail; if (!d) return;
   openMenu($('more'), [{ label: isPinned('thread', d.id) ? 'Unpin' : 'Pin', onclick: () => togglePin('thread', d.id) },
     ...(!d.merged_into && !d.read_only ? [{ label: 'Merge into…', onclick: openMerge }] : []),
-    ...(state.projects.length > 1 ? [{ label: 'Move to project…', onclick: () => openMoveMenu($('more')) }] : []),
+    ...(state.projects.length > 1 && !d.merged_into ? [{ label: 'Move to project…', onclick: () => openMoveMenu($('more')) }] : []),
     { label: 'Reminders', onclick: openReminders },
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
@@ -1715,7 +1721,7 @@ function drawWaiting(d) {
   // so an answer being typed in it is never wiped. Typed text carries over a rebuild of the same question.
   const key = `${d.id}|${open.map(m => m.question.id).join(',')}|${inline ? 'inline' : state.waitingOpen ? 'open' : 'closed'}`;
   if (bar.dataset.key === key && bar.childElementCount) { bar.dataset.question = q.id; return; }
-  const typed = bar.dataset.question === q.id && (bar.dataset.key || '').split('|')[0] === d.id ? bar.querySelector('.qother')?.value || '' : '';
+  const typed = (bar.dataset.question === q.id && (bar.dataset.key || '').split('|')[0] === d.id ? bar.querySelector('.qother')?.value || '' : '') || state.qsel[qk(q.id)]?.other || '';
   bar.dataset.key = key;
   bar.dataset.question = q.id;
   bar.hidden = false;
@@ -1765,7 +1771,7 @@ function drawProjects() {
   const box = $('project-switch');
   const move = $('move-open');
   const many = state.projects.length > 1;
-  if (move) move.hidden = !many;
+  if (move) move.hidden = !many || !!state.detail?.merged_into;
   if (!box) return;
   box.hidden = !many;
   if (!many) return;
