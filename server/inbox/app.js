@@ -13,6 +13,8 @@ import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
 import { durationText, heatPositions, newSessionId, replaySummary } from './replays.js';
 import { parseShot } from './shot.js';
 import { initPair, notifyUnpaired } from './pair.js';
+import { composerKey, createDrafts, questionKey, typingPinger } from './drafts.js';
+import { topicNudge } from './nudge.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
 const PROJECT_KEY = 'fb-inbox-project';
@@ -41,7 +43,17 @@ const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfi
   view: null, q: '', replyTo: null, quote: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], files: [], newFiles: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, qopen: new Set(), keptShown: new Set(), folds: loadFolds(),
-  artTab: 'page', heat: false, replays: [], mysessions: null, recordInbox: false, recorder: null, projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
+  artTab: 'page', heat: false, replays: [], mysessions: null, recordInbox: false, recorder: null, projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, waiting: { count: 0, items: [] }, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
+// What the person types survives polls, withdrawals, re-asks, merges, moves and reloads: the composer per thread and each question's Other box per question, in localStorage (see drafts.js).
+const drafts = createDrafts();
+const dProject = () => state.project || state.defaultProject || 'default';
+const cKey = id => composerKey(dProject(), id);
+const qdKey = (thread, qid) => questionKey(dProject(), thread, qid);
+const THREAD_ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
+const persistQ = qid => { if (state.openId) drafts.set(qdKey(state.openId, qid), state.qsel[`${state.openId}:${qid}`]?.other || ''); };
+const forgetQ = qid => { for (const box of document.querySelectorAll(`[data-question="${qid}"] .qother`)) box.value = ''; delete state.qsel[`${state.openId}:${qid}`]; if (state.openId) drafts.clear(qdKey(state.openId, qid)); };
+// The server hears "the person is typing in this thread" (never what) so an agent does not withdraw, merge or move it from under them.
+const typingPing = typingPinger({ send: on => { const id = state.openId; if (THREAD_ID.test(id || '')) void post(`threads/${id}/typing`, { typing: on }).catch(noop); } });
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
 function loadClPref() { try { const v = JSON.parse(localStorage.getItem(CL_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -54,7 +66,7 @@ function projectQuery() {
   return `project=${encodeURIComponent(state.project)}`;
 }
 function withProject(path) {
-  if (path === 'projects' || path.startsWith('projects?')) return path;
+  if (path === 'projects' || path.startsWith('projects?') || path === 'waiting') return path;
   const q = projectQuery();
   if (!q) return path;
   return `${path}${path.includes('?') ? '&' : '?'}${q}`;
@@ -119,6 +131,14 @@ async function postQueued(e) {
       }
       attachments.push(f.id);
     }
+    if (e.answer) { // an answer to a question card that waited offline: same client id, so a retry never answers twice
+      const a = await fetch(`${API}threads/${e.thread}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...e.answer, client_id: e.cid, written_at: e.written_at }) });
+      if (a.ok || a.status < 500) setOffline(false);
+      let answered = {}; try { answered = await a.json(); } catch { /* no body */ }
+      // The question went away while this waited (withdrawn, expired, re-asked, answered elsewhere): the words are kept, and the card offers Send as a message. Nothing is lost.
+      if (a.status === 409 || a.status === 404) { keepRefusedAnswer(e); return { status: 200, kept: true }; }
+      return { status: a.status, reason: a.ok ? undefined : answered.detail, forwarded_to: typeof answered.forwarded_to === 'string' ? answered.forwarded_to : undefined };
+    }
     const r = await fetch(`${API}threads/${e.thread}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: e.text, images: e.images, ...(attachments.length ? { attachments } : {}), ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : e.quote ? { quote: e.quote } : {}), client_id: e.cid, written_at: e.written_at }) });
     if (r.status === 404 && attachments.length) { for (const f of e.files) { delete f.id; delete f.uploadId; } outbox.touch(e, true); return { status: 503 }; } // the server dropped a file we had sent (a day old): send it again
@@ -134,7 +154,7 @@ async function postQueued(e) {
 const queuedFile = f => ({ name: f.name, size: f.size, slice: (a, b) => f.blob.slice(a, b) });
 const outbox = createOutbox({ post: postQueued, canSend: () => !isOffline(),
   onChange: () => { drawOffline(); if (state.detail) drawMessages(state.detail); },
-  onSent: (e, result) => { state.echo.set(e.cid, e); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast(forwardedToast(e.thread, result.forwarded_to)); if (state.carryDraft?.from === e.thread) state.carryDraft = null; if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); if (state.detail) drawMessages(state.detail); }); } });
+  onSent: (e, result) => { if (!result?.kept) state.echo.set(e.cid, e); else showToast('That question changed while you were offline. Your answer is kept under it.'); const id = result?.forwarded_to || e.thread; if (result?.forwarded_to) { showToast(forwardedToast(e.thread, result.forwarded_to)); if (state.carryDraft?.from === e.thread) state.carryDraft = null; if (e.thread === state.openId) location.hash = `#/${result.forwarded_to}`; } Promise.all([id === state.openId ? loadThread(id, { quiet: true }) : null, refreshList()]).finally(() => { state.echo.delete(e.cid); state.shown = ''; if (state.detail) drawThread(); }); } });
 function drawOffline() {
   const banner = $('offline-banner'), n = outbox.pending(), off = isOffline();
   const waiting = n ? ` · ${n} waiting to send` : '';
@@ -502,6 +522,7 @@ function drawList() {
   $('count-agent').textContent = String(state.threads.filter(waitingAgent).length);
   $('count-you').textContent = String(state.threads.filter(waitingYou).length);
   const unreadN = state.threads.filter(t => t.unread_for_user).length;
+  drawCloseDone();
   $('rail-unread').hidden = !unreadN; $('rail-unread').textContent = String(unreadN); $('rail-unread').setAttribute('aria-label', `${unreadN} unread`);
 }
 async function refreshPins() {
@@ -594,8 +615,8 @@ function harvestDrafts() {
   }
   for (const [qid, draft] of found) {
     const prev = state.qsel[qk(qid)] ?? { ids: [], other: '' };
-    if (!prev.ids.length && !draft.value.trim()) delete state.qsel[qk(qid)];
-    else state.qsel[qk(qid)] = { ids: prev.ids, other: draft.value };
+    if (!prev.ids.length && !draft.value.trim()) forgetQ(qid);
+    else { state.qsel[qk(qid)] = { ids: prev.ids, other: draft.value }; persistQ(qid); }
   }
 }
 function revealKept(d) {
@@ -619,7 +640,7 @@ async function sendKept(d, m) {
   state.busy = true;
   try {
     await post(`threads/${d.id}/messages`, { text, reply_to: m.id });
-    delete state.qsel[qk(q.id)];
+    forgetQ(q.id);
     state.shown = '';
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
@@ -634,7 +655,7 @@ async function useOnCopy(d, m, copy) {
   state.busy = true;
   try {
     await post(`threads/${d.id}/answer`, { question_id: nq.id, option_ids, ...(other ? { other_text: other } : {}) });
-    delete state.qsel[qk(q.id)];
+    forgetQ(q.id);
     state.shown = '';
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) { showError($('error'), error.message); }
@@ -649,7 +670,7 @@ function rescueFor(d, m, copy) {
   if (s.other.trim()) {
     const other = el('input', { type: 'text', class: 'qother', maxlength: '1000', 'aria-label': 'Kept answer' });
     other.value = s.other;
-    other.addEventListener('input', () => { s.other = other.value; });
+    other.addEventListener('input', () => { s.other = other.value; persistQ(q.id); typingPing.note(); });
     other.addEventListener('keydown', event => {
       if (event.key !== 'Enter') return;
       event.preventDefault();
@@ -685,17 +706,40 @@ function closedQuestion(d, m) {
   if (rescue) card.append(rescue);
   return card;
 }
-const selFor = q => (state.qsel[qk(q.id)] ??= { ids: [], other: '' });
+const selFor = q => (state.qsel[qk(q.id)] ??= { ids: [], other: state.openId ? drafts.get(qdKey(state.openId, q.id)) : '' });
+// Typed text kept from before a reload: brought back into each question's state as the thread opens, so a closed question still offers it.
+function hydrateDrafts(d) {
+  for (const m of d.messages || []) {
+    const q = m.question; if (!q) continue;
+    const k = qk(q.id); if (state.qsel[k]) continue;
+    const text = drafts.get(qdKey(d.id, q.id));
+    if (text) state.qsel[k] = { ids: [], other: text };
+  }
+}
+// A short line on the card when an option and the Other box would have been sent together by accident: one clears the other, and it says so.
+function hint(q, text, undo) {
+  for (const card of document.querySelectorAll(`[data-question="${q.id}"]`)) {
+    let line = card.querySelector('.qhint');
+    if (!line) { line = el('p', { class: 'qhint', role: 'status' }); card.insertBefore(line, card.querySelector('.qbar') || null); }
+    line.replaceChildren(text, ...(undo ? [' ', el('button', { type: 'button', class: 'qlink', onclick: undo }, 'Undo')] : []));
+  }
+}
+const otherBoxes = q => [...document.querySelectorAll(`[data-question="${q.id}"] .qother, #waiting-bar[data-question="${q.id}"] .qother`)];
+// Picks (or unpicks) an option. Typed Other text is cleared by a pick, with a visible hint and an Undo; true when it was.
 function toggleOption(q, optId) {
   const s = selFor(q);
+  const cleared = s.other.trim() ? s.other : '';
+  if (cleared) { s.other = ''; for (const box of otherBoxes(q)) box.value = ''; persistQ(q.id); }
   if (q.multi) s.ids = s.ids.includes(optId) ? s.ids.filter(i => i !== optId) : [...s.ids, optId]; else s.ids = [optId];
   paintCard(q);
+  if (cleared) hint(q, 'Your own answer was cleared because you picked an option.', () => { s.ids = []; s.other = cleared; for (const box of otherBoxes(q)) box.value = cleared; persistQ(q.id); paintCard(q); hint(q, 'Your own answer is back, and the option is unpicked.'); });
+  return !!cleared;
 }
 function paintCard(q) {
   const cards = document.querySelectorAll(`[data-question="${q.id}"]`); if (!cards.length) return;
   const s = selFor(q);
   for (const card of cards) {
-    for (const b of card.querySelectorAll('.qopt')) b.setAttribute('aria-pressed', String(s.ids.includes(b.dataset.opt)));
+    for (const b of card.querySelectorAll('.qopt')) { const on = s.ids.includes(b.dataset.opt), box = b.querySelector('input[type="checkbox"]'); if (box) box.checked = on; else b.setAttribute('aria-pressed', String(on)); }
     const submit = card.querySelector('.qsubmit'); if (submit) submit.disabled = !s.ids.length && !s.other.trim();
   }
 }
@@ -703,9 +747,19 @@ async function submitAnswer(q) {
   const d = state.detail, s = selFor(q);
   if (!d || d.merged_into || state.busy || (!s.ids.length && !s.other.trim())) return;
   state.busy = true;
+  const answer = { question_id: q.id, option_ids: [...s.ids], ...(s.other.trim() ? { other_text: s.other.trim() } : {}) };
+  const cid = newCid(), written_at = new Date().toISOString();
+  // With no signal (or messages already waiting, which go first), the answer joins the outbox and the card says it will send when you are back online.
+  const queue = async () => {
+    await outbox.add({ cid, thread: d.id, text: '', answer, summary: `Chose: ${keptText(s, q)}`, written_at });
+    forgetQ(q.id); state.shown = ''; drawThread();
+  };
   try {
-    const sent = await post(`threads/${d.id}/answer`, { question_id: q.id, option_ids: s.ids, ...(s.other.trim() ? { other_text: s.other.trim() } : {}) });
-    delete state.qsel[qk(q.id)];
+    if (isOffline() || outbox.pending()) { await queue(); return; }
+    let sent;
+    try { sent = await post(`threads/${d.id}/answer`, { ...answer, client_id: cid, written_at }); }
+    catch (error) { if (error.network) { await queue(); return; } throw error; }
+    forgetQ(q.id); typingPing.stop();
     if (sent?.forwarded_to) { showToast('Sent in the merged thread'); location.hash = `#/${sent.forwarded_to}`; return; }
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) {
@@ -726,20 +780,49 @@ async function submitAnswer(q) {
   }
   finally { state.busy = false; }
 }
+// An answer given with no signal waits in the outbox; the card shows it as pending until it goes (or the server says the question is gone: then the words come back as a kept answer).
+const pendingAnswer = (thread, qid) => outbox.forThread(thread).find(e => e.answer?.question_id === qid && e.state === 'queued' && !e.sending) || null;
+async function cancelPendingAnswer(d, q, entry) {
+  if (!(await outbox.remove(entry.cid))) return;
+  state.qsel[`${d.id}:${q.id}`] = { ids: [...entry.answer.option_ids], other: entry.answer.other_text || '' };
+  if (entry.answer.other_text) drafts.set(qdKey(d.id, q.id), entry.answer.other_text);
+  state.shown = ''; drawThread();
+}
+// The server turned a queued answer down (the question was withdrawn, expired, re-asked or answered elsewhere): nothing typed is lost. The words are kept under the question and offered as a message.
+function keepRefusedAnswer(entry) {
+  const text = entry.summary.replace(/^Chose: /, '');
+  const k = `${entry.thread}:${entry.answer.question_id}`;
+  state.qsel[k] = { ids: [], other: text };
+  drafts.set(questionKey(dProject(), entry.thread, entry.answer.question_id), text);
+}
 function questionCard(d, m) {
   const q = m.question;
   if (q.withdrawn || q.reasked || q.expired) return closedQuestion(d, m);
   const ans = answerFor(d, q), s = selFor(q);
+  const waitingAnswer = ans ? null : pendingAnswer(d.id, q.id);
   const card = el('div', { class: 'qcard', 'data-question': q.id, role: 'group', 'aria-label': 'Question' }, el('p', { class: 'prompt', text: q.prompt }));
-  const chosen = ans ? ans.answer.option_ids : [];
+  const chosen = ans ? ans.answer.option_ids : waitingAnswer ? waitingAnswer.answer.option_ids : [];
   const opts = el('div', { class: 'qopts' }, ...q.options.map((o, i) => {
-    const b = el('button', { type: 'button', class: `qopt${chosen.includes(o.id) ? ' chosen' : ''}`, 'data-opt': o.id, 'aria-pressed': String(ans ? chosen.includes(o.id) : s.ids.includes(o.id)),
-      onclick: () => { toggleOption(q, o.id); if (!q.multi && !s.other.trim()) submitAnswer(q); } },
-      el('span', { class: 'n', 'aria-hidden': 'true', text: String(i + 1) }), el('span', {}, o.label, ...(o.description ? [el('span', { class: 'd', text: o.description })] : [])));
-    if (ans) b.disabled = true;
+    const words = [el('span', { class: 'n', 'aria-hidden': 'true', text: String(i + 1) }), el('span', {}, o.label, ...(o.recommended ? [' ', el('span', { class: 'rec', text: 'Recommended' })] : []), ...(o.description ? [el('span', { class: 'd', text: o.description })] : []))];
+    if (q.multi) { // several may be picked: real checkboxes
+      const box = el('input', { type: 'checkbox', 'aria-label': o.label });
+      box.checked = ans || waitingAnswer ? chosen.includes(o.id) : s.ids.includes(o.id);
+      const row = el('label', { class: `qopt qcheck${chosen.includes(o.id) ? ' chosen' : ''}`, 'data-opt': o.id }, box, ...words);
+      box.addEventListener('change', () => { toggleOption(q, o.id); });
+      if (ans || waitingAnswer) box.disabled = true;
+      return row;
+    }
+    const b = el('button', { type: 'button', class: `qopt${chosen.includes(o.id) ? ' chosen' : ''}`, 'data-opt': o.id, 'aria-pressed': String(ans || waitingAnswer ? chosen.includes(o.id) : s.ids.includes(o.id)),
+      onclick: () => { const had = toggleOption(q, o.id); if (!had) submitAnswer(q); } }, ...words);
+    if (ans || waitingAnswer) b.disabled = true;
     return b;
   }));
   card.append(opts);
+  if (waitingAnswer) {
+    card.append(el('p', { class: 'qpending', role: 'status', 'data-state': 'waiting' }, clockIcon(), el('span', { text: ` Answered: ${waitingAnswer.summary.replace(/^Chose: /, '')} · will send when you're back online` }),
+      el('button', { type: 'button', onclick: () => { void cancelPendingAnswer(d, q, waitingAnswer); } }, 'Change')));
+    return card;
+  }
   if (ans) {
     if (ans.answer.other_text) card.append(el('p', { class: 'info', text: `Other: ${ans.answer.other_text}` }));
     card.append(el('p', { class: 'locked', text: `Answered: ${ans.text.replace(/^Chose: /, '')}` }));
@@ -748,7 +831,7 @@ function questionCard(d, m) {
   if (q.allow_other) {
     const other = el('input', { type: 'text', class: 'qother', placeholder: 'Other (write your own answer)', maxlength: '1000', 'aria-label': 'Other answer' });
     other.value = s.other;
-    other.addEventListener('input', () => { s.other = other.value; paintCard(q); });
+    other.addEventListener('input', () => { if (other.value.trim() && s.ids.length) { s.ids = []; hint(q, 'Typing your own answer cleared the option you picked.'); } s.other = other.value; persistQ(q.id); paintCard(q); typingPing.note(); });
     other.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitAnswer(q); } });
     card.append(other);
   }
@@ -781,6 +864,44 @@ function jumpToQuestion(qid) {
   card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
 }
+// One-tap answers to an agent's message. The agent sees them as events, not messages: nothing new is waiting on it, and "Done, close it" also closes the thread.
+function reactionsNode(d, m) {
+  if (m.author !== 'agent' || m.redacted || m.divider || m.kind || m.question || d.merged_into) return null;
+  const mine = d.reactions?.[m.id] || {};
+  const tap = async reaction => {
+    try { await post(`threads/${d.id}/messages/${m.id}/react`, { reaction }); state.shown = ''; await Promise.all([loadThread(d.id, { quiet: true }), refreshList()]); }
+    catch (error) { showError($('error'), error.message); }
+  };
+  const row = el('div', { class: 'reacts', role: 'group', 'aria-label': 'Quick reactions' },
+    el('button', { type: 'button', class: 'react', 'aria-pressed': String(!!mine.thumbs_up), 'aria-label': 'Thumbs up', title: 'Thumbs up', onclick: () => { void tap('thumbs_up'); } }, '\u{1F44D}'));
+  if (d.status !== 'done' || mine.done) {
+    const done = el('button', { type: 'button', class: 'react', 'aria-pressed': String(!!mine.done), onclick: () => { void tap('done'); } }, 'Done, close it');
+    done.disabled = d.status === 'done';
+    row.append(done);
+  }
+  return row;
+}
+// Copy puts the message's own words on the clipboard as plain Markdown (not the drawn HTML, and without the quote of what it replied to). navigator.clipboard where there is one,
+// a hidden textarea and execCommand where there is not (older iOS, or a page the browser will not let write).
+const copyIcon = () => svg('svg', { viewBox: '0 0 24 24', width: 16, height: 16, 'aria-hidden': 'true' }, svg('rect', { x: 9, y: 9, width: 11, height: 11, rx: 2, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }), svg('path', { d: 'M5 15V6a2 2 0 0 1 2-2h9', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round' }));
+const copyTextOf = m => String((m.question ? m.question.prompt : shownText(m)) ?? '');
+function legacyCopy(text) {
+  const box = el('textarea', { readonly: '', 'aria-hidden': 'true', tabindex: '-1', style: 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0' });
+  box.value = text;
+  document.body.append(box);
+  let ok = false;
+  try { box.select(); box.setSelectionRange(0, text.length); ok = !!document.execCommand?.('copy'); } catch { ok = false; }
+  box.remove();
+  return ok;
+}
+async function copyMessage(m) {
+  if (m.redacted) return;
+  const text = copyTextOf(m);
+  if (!text.trim()) return;
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch { ok = legacyCopy(text); }
+  showToast(ok ? 'Copied' : "Couldn't copy");
+}
 function messageNode(d, m) {
   if (m.divider && m.moved_to) return el('div', { class: 'divider', role: 'separator', 'data-mid': m.id }, el('span', {}, 'Moved to ', el('a', { href: `#/${m.moved_to}`, text: (/^Moved to \[(.*)\]\(#\//.exec(m.text) || [])[1] || 'another thread' })));
   if (m.divider && m.kind === 'share_notice') return el('div', { class: 'divider share-notice', role: 'status' }, el('span', { text: m.text.replace(/ · Revoke$/, '') }), ...(m.share_id ? [el('button', { type: 'button', onclick: () => { void revokeShare(m.share_id); } }, 'Revoke')] : []));
@@ -799,8 +920,13 @@ function messageNode(d, m) {
   if (quiet(d, m) && !farewell) head.append(el('button', { type: 'button', class: 'show', onclick: () => toggleExpanded(d, m) }, 'Hide'));
   if (m.author === 'user' && d.acked_through === m.created_at) head.append(el('span', { class: 'acked-note', text: `· ${state.profile.agent.name} acknowledged` }));
   const ticks = ticksFor(d, m); if (ticks) head.append(ticks);
+  const copyable = !m.redacted && !!copyTextOf(m).trim();
+  if (copyable) head.append(el('button', { type: 'button', class: 'copy-btn', 'aria-label': `Copy message from ${who.name}, ${when(m.created_at)}`, title: 'Copy as Markdown', onclick: () => { void copyMessage(m); } }, copyIcon()));
   if (!d.read_only && !d.merged_into) head.append(el('button', { type: 'button', class: 'reply-btn', 'aria-label': `Reply to ${who.name}, ${when(m.created_at)}`, onclick: () => startReply(m.id) }, 'Reply'));
-  if (m.author === 'user' && !m.redacted && state.config?.redact) head.append(el('button', { type: 'button', class: 'msg-more', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `More actions for your message of ${when(m.created_at)}`, onclick: e => openMenu(e.currentTarget, [{ label: 'Redact…', onclick: () => askRedact(d, m) }]) }, '⋯'));
+  // The ⋯ menu: Copy on every message that has text, and Redact… on your own when the server has a vault. (`msg-more` stays the one that can redact.)
+  const canRedact = m.author === 'user' && !m.redacted && state.config?.redact;
+  if (canRedact || copyable) head.append(el('button', { type: 'button', class: canRedact ? 'msg-more' : 'msg-actions', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `More actions for ${m.author === 'user' ? 'your' : 'this'} message of ${when(m.created_at)}`,
+    onclick: e => openMenu(e.currentTarget, [...(copyable ? [{ label: 'Copy', onclick: () => { void copyMessage(m); } }] : []), ...(canRedact ? [{ label: 'Redact…', onclick: () => askRedact(d, m) }] : [])]) }, '⋯'));
   const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '-1', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
   const picked = m.quote?.message_id ? selectionQuoteNode(d, m.quote) : null; if (picked) node.append(picked);
@@ -815,6 +941,7 @@ function messageNode(d, m) {
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
   appendFiles(node, d, m, who);
   const attached = attachedNode(d, m); if (attached) node.append(attached);
+  const reacts = reactionsNode(d, m); if (reacts) node.append(reacts);
   return node;
 }
 // ---- The key box. The value goes from this page straight to the app's own key store (FEEDBACK_SECRET_TARGET, a path on this same site).
@@ -954,12 +1081,13 @@ function queuedNode(d, e) {
   if (e.aside) node.append(el('p', { class: 'hint', style: 'margin:0 0 2px', text: 'Side question' }));
   const quoted = e.reply_to ? quoteNode(d, { reply_to: e.reply_to }) : null; if (quoted) node.append(quoted);
   const picked = e.quote ? selectionQuoteNode(d, e.quote) : null; if (picked) node.append(picked);
-  if (shownText(e)) node.append(markdown(shownText(e)));
+  if (e.answer) node.append(el('p', { text: e.summary }), el('button', { type: 'button', class: 'qchip', onclick: () => jumpToQuestion(e.answer.question_id) }, `↩ ${e.answer.question_id}`));
+  else if (shownText(e)) node.append(markdown(shownText(e)));
   if (e.images.length) node.append(el('div', { class: 'imgs' }, ...e.images.map((src, i) => el('span', {}, el('img', { src, alt: `Picture ${i + 1}, waiting to send` })))));
   if (e.files?.length) node.append(el('div', { class: 'files' }, ...e.files.map(f => el('div', { class: 'file-card' }, el('span', { class: 'fname', title: f.name, text: f.name }), el('span', { class: 'fmeta', text: `${humanSize(f.size)} · ${f.id ? 'uploaded' : 'waiting to upload'}` })))));
   if (sent) { node.classList.remove('queued'); return node; }
   if (failed) node.append(el('div', { class: 'qstate bad', role: 'note' }, el('span', { text: `Couldn't send: ${e.reason}` }), el('button', { type: 'button', onclick: () => outbox.retry(e.cid) }, 'Try again'), el('button', { type: 'button', onclick: () => outbox.remove(e.cid) }, 'Delete')));
-  else node.append(el('div', { class: 'qstate', 'data-state': e.sending ? 'sending' : 'waiting' }, clockIcon(), el('span', { text: e.sending ? (e.progress && e.files?.some(f => !f.id) ? `Sending… files ${e.progress}%` : 'Sending…') : e.attempts ? 'Waiting to send · will retry' : 'Waiting to send' }),
+  else node.append(el('div', { class: 'qstate', 'data-state': e.sending ? 'sending' : 'waiting' }, clockIcon(), el('span', { text: e.sending ? (e.progress && e.files?.some(f => !f.id) ? `Sending… files ${e.progress}%` : 'Sending…') : e.answer ? (e.attempts ? 'Will send when you are back online · retrying' : "Will send when you're back online") : e.attempts ? 'Waiting to send · will retry' : 'Waiting to send' }),
     ...(e.sending ? [] : [el('button', { type: 'button', 'aria-label': 'Delete this message before it sends', onclick: () => outbox.remove(e.cid) }, 'Delete')])));
   return node;
 }
@@ -967,7 +1095,7 @@ function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const qopen = [...state.qopen].sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.question?.expired ? 'x' : '') + (m.quote?.message_id ? 'k' : '') + (m.kind || '')),
+  const key = JSON.stringify([d.id, d.status, d.reactions || {}, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.moved_to ? `>${m.moved_to}` : '') + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.question?.expired ? 'x' : '') + (m.quote?.message_id ? 'k' : '') + (m.kind || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
@@ -1293,6 +1421,8 @@ function takeDraft(into) {
   const c = state.carryDraft;
   if (!c || c.into !== into) return '';
   state.carryDraft = null;
+  drafts.clear(cKey(c.from)); // it moves to the target with the merge
+  if (c.other.trim()) for (const stale of drafts.questions(dProject(), c.from)) drafts.clear(qdKey(c.from, stale.qid));
   const quoted = c.other.trim() ? `${c.prompt ? `> ${clip(c.prompt, 200)}\n` : ''}${c.other.trim()}` : '';
   return [quoted, c.text.trim() ? c.text : ''].filter(Boolean).join('\n\n');
 }
@@ -1381,10 +1511,47 @@ function askMerge(target) { // a merge cannot be undone, so ask once more
 async function doMerge(target) {
   const d = state.detail; if (!d) return;
   try {
-    await post(`threads/${d.id}/merge`, { into: target.id });
+    await post(`threads/${d.id}/merge`, { into: target.id, force: true }); // the person's own choice: the typing guard is for agents
     $('merge-dialog').close(); state.captureFor = null;
     await refreshList(); location.hash = `#/${target.id}`;
   } catch (error) { showError($('merge-error'), error.message); }
+}
+// A capture no project rule matched lands in the first project: a chip in the header offers the move, with the best match when there is one.
+function drawChip(d) {
+  const chip = $('move-chip'); if (!chip) return;
+  const want = d.unmatched === true && state.projects.length > 1 && !d.merged_into;
+  chip.hidden = !want;
+  if (!want) return;
+  const suggested = d.suggested_project && state.projects.find(p => p.id === d.suggested_project.id);
+  chip.textContent = suggested ? `Move to ${suggested.name}…` : 'Move to…';
+  chip.title = suggested ? `No project rule matched this page. ${suggested.name} looks closest.` : 'No project rule matched this page. Choose where it belongs.';
+  chip.onclick = () => { if (suggested) void moveToProject(suggested.id); else openMoveMenu(chip); };
+}
+// Typed answers whose card no longer takes them (the question is gone from this thread, or was answered elsewhere): kept here, with Send as a message.
+function drawKept(d) {
+  const host = $('kept-answers'); if (!host) return;
+  const known = new Map((d.messages || []).filter(m => m.question).map(m => [m.question.id, m]));
+  const answered = new Set((d.messages || []).flatMap(m => (m.answer ? [m.answer.question_id] : [])));
+  const rows = drafts.questions(dProject(), d.id).filter(x => (!known.has(x.qid) || answered.has(x.qid)) && x.text.trim());
+  const key = JSON.stringify(rows);
+  if (host.dataset.key === key && !host.contains(document.activeElement)) return;
+  if (host.contains(document.activeElement)) return; // do not rebuild a box being typed in
+  host.dataset.key = key;
+  host.hidden = !rows.length;
+  host.replaceChildren(...rows.map(x => {
+    const input = el('input', { type: 'text', class: 'qkept', maxlength: '1000', 'aria-label': 'Kept answer' });
+    input.value = x.text;
+    input.addEventListener('input', () => { drafts.set(qdKey(d.id, x.qid), input.value); typingPing.note(); });
+    const send = async () => {
+      const text = input.value.trim(); if (!text || state.busy) return;
+      state.busy = true;
+      try { await post(`threads/${d.id}/messages`, { text, client_id: newCid(), written_at: new Date().toISOString() }); drafts.clear(qdKey(d.id, x.qid)); host.dataset.key = ''; await Promise.all([loadThread(d.id, { quiet: true }), refreshList()]); }
+      catch (error) { showError($('error'), error.message); } finally { state.busy = false; }
+    };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); void send(); } });
+    return el('div', { class: 'qrescue qorphan', 'data-kept': x.qid }, el('span', { class: 'hint', text: 'Your answer was kept, but its question is no longer open.' }), input, el('button', { type: 'button', onclick: () => { void send(); } }, 'Send as a message'),
+      el('button', { type: 'button', onclick: () => { drafts.clear(qdKey(d.id, x.qid)); host.dataset.key = ''; drawKept(d); } }, 'Discard'));
+  }));
 }
 function drawThread() {
   const d = state.detail;
@@ -1413,8 +1580,9 @@ function drawThread() {
   drawPinThread(); drawChecklist(d);
   const typing = document.activeElement;
   const typingQ = typing?.classList?.contains('qother') ? (typing.closest('[data-question]')?.getAttribute('data-question') || ($('waiting-bar')?.contains(typing) ? $('waiting-bar').dataset.question || '' : '')) : '';
-  harvestDrafts();
-  drawMessages(d); drawArtifactCards(d); drawWaiting(d); drawReplyBar();
+  hydrateDrafts(d); harvestDrafts();
+  drawChip(d);
+  drawMessages(d); drawArtifactCards(d); drawWaiting(d); drawReplyBar(); drawKept(d);
   if (typingQ && !document.activeElement?.classList?.contains('qother')) document.querySelector(`#msgs [data-question="${typingQ}"] .qother`)?.focus();
   revealKept(d);
 }
@@ -1449,7 +1617,8 @@ function route() {
   for (const stale of document.querySelectorAll('.qother')) stale.remove(); // a redraw for the next thread must not read the old thread's boxes as its own
   const waitingBar = $('waiting-bar'); if (waitingBar) { waitingBar.dataset.key = ''; delete waitingBar.dataset.question; }
   state.quote = null; hideQuotePop(); state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; dropAll(state.files); state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); closeMenu(false);
-  $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); drawChips($('fchips'), state.files, redrawComposer); showError($('error'), '');
+  typingPing.stop();
+  $('text').value = id && THREAD_ID.test(id) ? [takeDraft(id), drafts.get(cKey(id))].filter(Boolean).join('\n\n') : id ? takeDraft(id) : ''; if (id && $('text').value) drafts.set(cKey(id), $('text').value); $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); drawChips($('fchips'), state.files, redrawComposer); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
   if (id) loadThread(id);
@@ -1629,6 +1798,29 @@ async function loadMetrics() {
 
 // ---- Composer
 // `/btw question` (or the Side question button) sends a side question: the prefix is dropped and the quote bar, if any, is left alone.
+let skipNudge = false;
+let nudgeFor = null;
+function askNewTopic(nudge, text) {
+  nudgeFor = { text, id: state.openId };
+  $('nudge-title').value = nudge.title;
+  $('nudge-why').textContent = nudge.reason === 'opener' ? 'This sounds like a new topic.' : 'This does not look like the rest of this thread.';
+  showError($('nudge-error'), '');
+  $('nudge-dialog').showModal();
+}
+async function sendAsNewThread(event) {
+  event.preventDefault();
+  const n = nudgeFor; if (!n) return;
+  try {
+    const { id } = await post('threads', { title: $('nudge-title').value.trim() || 'New topic', text: n.text, images: state.images });
+    $('nudge-dialog').close(); nudgeFor = null;
+    drafts.clear(cKey(n.id)); typingPing.stop(); $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); growText();
+    await refreshList(); location.hash = `#/${id}`;
+  } catch (error) { showError($('nudge-error'), error.message); }
+}
+function sendHereAnyway() {
+  $('nudge-dialog').close(); nudgeFor = null; skipNudge = true;
+  void send({ preventDefault() {} });
+}
 async function send(event, forceAside = false) {
   event.preventDefault();
   const id = state.openId, parsed = parseBtw($('text').value), aside = forceAside || parsed.aside, text = aside ? parsed.text : $('text').value;
@@ -1636,9 +1828,12 @@ async function send(event, forceAside = false) {
   if (aside && !text.trim() && !state.images.length && !state.files.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
   if (!text.trim() && !state.images.length && !state.files.length) return;
   if (state.detail?.read_only) { showError($('error'), 'This thread is read-only, so nothing can be sent or queued.'); return; }
+  // A message that reads like another subject is offered a thread of its own first. "Send here" always goes through.
+  if (!aside && !state.replyTo && !skipNudge) { const nudge = topicNudge(text, state.detail?.title); if (nudge) { askNewTopic(nudge, text); return; } }
+  skipNudge = false;
   const cid = newCid(), written_at = new Date().toISOString(), reply_to = !aside && state.replyTo ? state.replyTo : undefined, quote = !aside && !reply_to ? quoteToSend(text) ?? undefined : undefined, images = [...state.images], files = [...state.files];
   state.busy = true; $('send').disabled = true; $('btw').disabled = true; showError($('error'), '');
-  const cleared = () => { if (id === state.openId) { if (!aside) { state.replyTo = null; state.quote = null; } $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); state.files.length = 0; drawChips($('fchips'), state.files, redrawComposer); growText(); } };
+  const cleared = () => { drafts.clear(cKey(id)); if (id === state.openId) { typingPing.stop(); if (!aside) { state.replyTo = null; state.quote = null; } $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); state.files.length = 0; drawChips($('fchips'), state.files, redrawComposer); growText(); } };
   const queue = async () => { // the composer is emptied first, so anything typed while it is stored is not wiped
     const before = $('text').value, replying = state.replyTo, quoting = state.quote; cleared();
     // A file still on its way is stopped (its upload id is kept, so the queue carries on from there); a file already on the server is named by its id.
@@ -1680,6 +1875,55 @@ async function send(event, forceAside = false) {
     $('text').focus();
   }
 }
+// Threads the agent called done that wait on nobody: closed in one tap.
+const doneCandidates = () => state.threads.filter(t => t.status === 'open' && !t.merged_into && !t.read_only && t.last_flag === 'done' && t.last_author === 'agent' && t.waiting !== 'you');
+function drawCloseDone() {
+  const n = doneCandidates().length, b = $('close-done');
+  if (!b) return;
+  b.hidden = n === 0;
+  b.textContent = `Close all done threads (${n})`;
+}
+async function closeDone() {
+  try { const r = await post('threads/close-done', {}); showToast(`Closed ${r.closed?.length || 0} done ${r.closed?.length === 1 ? 'thread' : 'threads'}`); await refreshList(); if (state.openId) await loadThread(state.openId, { quiet: true }); }
+  catch (error) { showToast(error.message); }
+}
+// ---- Waiting on you, across every project: one list of every open question and needs-you item.
+async function refreshWaiting() {
+  try {
+    const data = await api('waiting');
+    const items = Array.isArray(data?.items) ? data.items : [];
+    if (JSON.stringify(items) === JSON.stringify(state.waiting.items)) return;
+    state.waiting = { count: items.length, items }; drawWaitingAll();
+  } catch { /* keep what we knew */ }
+}
+const KIND_TEXT = { question: 'Question', needs_you: 'Needs you', item: 'To do' };
+function drawWaitingAll() {
+  const btn = $('waiting-all'), n = state.waiting.count;
+  if (btn) { btn.setAttribute('data-count', String(n)); btn.setAttribute('aria-label', `Waiting on you, across every project: ${n}`); $('waiting-all-count').textContent = n ? String(n) : ''; }
+  const list = $('waiting-all-list'); if (!list) return;
+  if (!$('waiting-all-dialog')?.open) { list.replaceChildren(); return; } // the rows exist only while the list is open
+  if (!state.waiting.items.length) { list.replaceChildren(el('p', { class: 'hint', text: 'Nothing is waiting on you in any project.' })); return; }
+  const groups = new Map();
+  for (const it of state.waiting.items) (groups.get(it.project) ?? groups.set(it.project, { name: it.project_name, rows: [] }).get(it.project)).rows.push(it);
+  const many = groups.size > 1 || state.projects.length > 1;
+  list.replaceChildren(...[...groups.entries()].map(([pid, g]) => el('section', { class: 'wa-group', 'data-project': pid }, ...(many ? [el('h3', { text: g.name })] : []),
+    el('ul', {}, ...g.rows.map(it => el('li', {}, el('button', { type: 'button', class: 'wa-row', 'data-thread': it.thread, onclick: () => { void openWaitingRow(it); } },
+      el('span', { class: 'wa-kind', text: KIND_TEXT[it.kind] || 'Waiting' }), el('span', { class: 'wa-title', text: it.title }), el('span', { class: 'wa-text', text: it.text }))))))));
+}
+async function openWaitingRow(it) {
+  $('waiting-all-dialog').close(); drawWaitingAll();
+  if (it.project !== state.project && state.projects.some(p => p.id === it.project)) {
+    state.project = it.project;
+    try { localStorage.setItem(PROJECT_KEY, it.project); } catch { /* storage may be blocked */ }
+    state.threads = []; state.detail = null; state.openId = 'switching';
+    drawProjects();
+    await refreshList();
+  }
+  const next = `#/${it.thread}`;
+  state.openId = null;
+  if (location.hash === next) route(); else location.hash = next;
+}
+function openWaitingAll() { $('waiting-all-dialog').showModal(); drawWaitingAll(); void refreshWaiting(); }
 const redrawComposer = () => { drawPreviews($('previews'), state.images, redrawComposer); drawChips($('fchips'), state.files, redrawComposer); };
 async function toggleDone() {
   const d = state.detail; if (!d) return;
@@ -1738,7 +1982,8 @@ async function moveToProject(projectId) {
   const d = state.detail; if (!d || state.busy) return;
   state.busy = true;
   try {
-    const result = await post(`threads/${d.id}/move-project`, { project: projectId });
+    const result = await post(`threads/${d.id}/move-project`, { project: projectId, force: true });
+    drafts.move({ project: state.project, thread: d.id }, { project: result.project || projectId, thread: result.id });
     state.project = result.project || projectId;
     try { localStorage.setItem(PROJECT_KEY, state.project); } catch { /* storage may be blocked */ }
     state.openId = null; state.detail = null; state.shown = '';
@@ -1855,6 +2100,14 @@ function onKey(e) {
 paintKeys();
 $('help-rows').replaceChildren(...SHORTCUTS.map(([k, what]) => el('tr', {}, el('td', {}, ...k.split(' / ').flatMap((part, i) => [...(i ? [' or '] : []), kbd(part)])), el('td', { text: what }))));
 $('composer').addEventListener('submit', send);
+$('text').addEventListener('input', () => { if (THREAD_ID.test(state.openId || '')) drafts.set(cKey(state.openId), $('text').value); if ($('text').value.trim()) typingPing.note(); else typingPing.stop(); });
+$('close-done')?.addEventListener('click', () => { void closeDone(); });
+$('waiting-all')?.addEventListener('click', openWaitingAll);
+$('waiting-all-close')?.addEventListener('click', () => { $('waiting-all-dialog').close(); drawWaitingAll(); });
+$('waiting-all-dialog')?.addEventListener('close', drawWaitingAll);
+$('nudge-form')?.addEventListener('submit', sendAsNewThread);
+$('nudge-here')?.addEventListener('click', sendHereAnyway);
+$('nudge-cancel')?.addEventListener('click', () => { $('nudge-dialog').close(); nudgeFor = null; });
 document.addEventListener('selectionchange', scheduleSelection);
 document.addEventListener('keyup', e => { if (e.shiftKey || e.key === 'Shift') scheduleSelection(); });
 $('qpop')?.addEventListener('pointerdown', () => { qpop.hold = true; });
@@ -1987,7 +2240,7 @@ function clip(text, n) {
 function liveQuestions(d) {
   if (!d || d.read_only || d.merged_into) return [];
   const answered = new Set((d.messages || []).flatMap(m => (m.answer ? [m.answer.question_id] : [])));
-  return (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !m.question.expired && !answered.has(m.question.id));
+  return (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !m.question.expired && !answered.has(m.question.id) && !pendingAnswer(d.id, m.question.id));
 }
 function drawWaiting(d) {
   const bar = $('waiting-bar'); if (!bar) return;
@@ -2013,6 +2266,7 @@ function drawWaiting(d) {
     if (q.allow_other) {
       const other = el('input', { type: 'text', class: 'qother', placeholder: 'Other (write your own answer)', maxlength: '1000', 'aria-label': 'Other answer' });
       if (typed) other.value = typed;
+      other.addEventListener('input', () => { const s = selFor(q); s.other = other.value; persistQ(q.id); typingPing.note(); });
       other.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); const s = selFor(q); s.ids = []; s.other = other.value; void submitAnswer(q); } });
       kids.push(other);
     }
@@ -2539,7 +2793,7 @@ $('share-warn-go')?.addEventListener('click', () => { $('share-warn').close(); $
 $('manage-close')?.addEventListener('click', () => $('manage-dialog').close());
 async function poll() {
   if (document.visibilityState !== 'visible') return;
-  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig(), refreshPresence(), refreshProjects()]);
+  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig(), refreshPresence(), refreshProjects(), refreshWaiting()]);
   if (state.openId) await loadThread(state.openId, { quiet: true });
   if (state.metricsOn) await loadMetrics();
   if (state.trackerOn) await loadTracker();
@@ -2552,4 +2806,4 @@ drawMe();
 const pairing = initPair({ api, el, showToast, context: () => ({ thread: /^[\w-]{1,64}$/.test(state.openId || '') ? state.openId : '', project: state.project && state.project !== state.defaultProject ? state.project : '' }) });
 refreshPins();
 fitViewport(); drawOffline(); outbox.start();
-Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(route).then(refreshPresence).then(refreshReplaySetting);
+Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(() => { void refreshWaiting(); }).then(route).then(refreshPresence).then(refreshReplaySetting);

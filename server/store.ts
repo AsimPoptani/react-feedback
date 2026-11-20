@@ -30,7 +30,8 @@ export const MIME: Record<Extension, string> = { png: 'image/png', jpg: 'image/j
 export class Invalid extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
-export interface QuestionOption { id: string; label: string; description?: string }
+// `recommended` marks the option the agent suggests; the card shows it. Optional, and never required.
+export interface QuestionOption { id: string; label: string; description?: string; recommended?: true }
 export interface QuestionWithdrawal { at: string; reason?: string }
 // `expires_at` (an ISO time) is when an unanswered question lapses. Nothing runs at that time: a read compares it with the clock (see `isExpired`).
 export interface Question { id: string; prompt: string; options: QuestionOption[]; multi: boolean; allow_other: boolean; withdrawn?: QuestionWithdrawal; reasked?: true; expires_at?: string;
@@ -271,7 +272,7 @@ export const MAX_NAME = 40;
 const str = (v: unknown, max: number) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 
 // Questions are written by the agent only. Option ids are o1..on, assigned here.
-export interface QuestionInput { prompt: unknown; options: { label: string; description?: string }[]; multi?: boolean; allow_other?: boolean; expires?: unknown }
+export interface QuestionInput { prompt: unknown; options: { label: string; description?: string; recommended?: boolean }[]; multi?: boolean; allow_other?: boolean; expires?: unknown }
 const EXPIRY_UNITS: Record<string, number> = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 };
 export const MAX_EXPIRY_MS = 365 * 86400e3;
 // "30m", "2h", "1d", "2w" from now, or an absolute time ("2026-12-01T09:00:00Z", or a date, which is midnight UTC). Always an ISO string; it must be 1 minute to a year ahead.
@@ -300,7 +301,7 @@ export function buildQuestion(id: string, input: QuestionInput): Question {
     if (!o || !str(o.label, 100) || (o.description !== undefined && (typeof o.description !== 'string' || o.description.length > 300))) throw new Invalid('Option labels are 1–100 characters and descriptions up to 300');
     // One line each: a newline or control character in an option's words must not be able to start a line of its own in what a reader prints.
     const description = o.description === undefined ? undefined : oneLine(o.description);
-    return { id: `o${i + 1}`, label: oneLine(o.label), ...(description ? { description } : {}) };
+    return { id: `o${i + 1}`, label: oneLine(o.label), ...(description ? { description } : {}), ...(o.recommended === true ? { recommended: true as const } : {}) };
   });
   const expires_at = input.expires === undefined || input.expires === null || input.expires === '' ? undefined : parseExpiry(input.expires);
   return { id, prompt: (input.prompt as string).trim(), options, multi: input.multi === true, allow_other: input.allow_other !== false, ...(expires_at ? { expires_at } : {}) };
@@ -308,7 +309,7 @@ export function buildQuestion(id: string, input: QuestionInput): Question {
 function parseQuestion(q: unknown): Question | undefined {
   if (!isObject(q) || typeof q.id !== 'string' || typeof q.prompt !== 'string' || !Array.isArray(q.options)) return undefined;
   const options = q.options.filter((o): o is QuestionOption => isObject(o) && typeof o.id === 'string' && typeof o.label === 'string')
-    .map(o => ({ id: o.id, label: o.label, ...(typeof o.description === 'string' ? { description: o.description } : {}) }));
+    .map(o => ({ id: o.id, label: o.label, ...(typeof o.description === 'string' ? { description: o.description } : {}), ...((o as unknown as ItemData).recommended === true ? { recommended: true as const } : {}) }));
   const withdrawn = isObject(q.withdrawn) && typeof q.withdrawn.at === 'string'
     ? { at: q.withdrawn.at, ...(typeof q.withdrawn.reason === 'string' && q.withdrawn.reason ? { reason: q.withdrawn.reason.slice(0, 200) } : {}) } : undefined;
   const expires_at = typeof q.expires_at === 'string' && !Number.isNaN(Date.parse(q.expires_at)) ? q.expires_at : undefined;
@@ -514,7 +515,7 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder' | 'expired'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder' | 'expired' | 'reaction'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.set_by ? { set_by: event.set_by } : {}), ...(event.agent_name ? { agent_name: event.agent_name } : {}), ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -843,9 +844,114 @@ async function mapThreadLine(path: string, qid: string, edit: (message: ItemData
   if (!found) throw new Invalid('No such question', 404);
   await writeAtomic(file, `${lines.join('\n').replace(/\n*$/, '')}\n`);
 }
+// ---- Typing presence: the inbox says "the person is typing in thread X" while they type, and the marker lapses 15 seconds after the last word.
+// It is a small file of timestamps (never any text) because the CLI and the MCP server are separate processes from the server: they must be able to see it. A withdraw, a merge or a move refuses
+// with a 409 while it is live, unless the caller forces it.
+export const TYPING_TTL_MS = 15_000;
+export const TYPING_REFUSED = 'the person is typing here';
+export interface TypingGuard { force?: boolean; now?: number }
+const typingFile = (dir: string) => join(dir, '_typing.json');
+async function readTyping(dir: string): Promise<Record<string, number>> {
+  try {
+    const raw = JSON.parse(await optional(typingFile(dir)) ?? 'null');
+    if (!isObject(raw)) return {};
+    return Object.fromEntries(Object.entries(raw).filter((entry): entry is [string, number] => ID.test(entry[0]) && typeof entry[1] === 'number' && Number.isFinite(entry[1])));
+  } catch { return {}; }
+}
+export async function setTyping(dir: string, id: string, on: boolean, now = Date.now()): Promise<void> {
+  if (!ID.test(id)) throw new Invalid('Not found', 404);
+  const live = Object.fromEntries(Object.entries(await readTyping(dir)).filter(([, at]) => now - at < TYPING_TTL_MS));
+  if (on) live[id] = now; else delete live[id];
+  await mkdir(dir, { recursive: true });
+  await writeAtomic(typingFile(dir), JSON.stringify(live));
+}
+export async function isTyping(dir: string, id: string, now = Date.now()): Promise<boolean> {
+  const at = (await readTyping(dir))[id];
+  return at !== undefined && now - at < TYPING_TTL_MS && at <= now + 5000;
+}
+export async function assertNotTyping(dir: string, ids: string[], guard: TypingGuard = {}): Promise<void> {
+  if (guard.force === true) return;
+  for (const id of ids) if (await isTyping(dir, id, guard.now ?? Date.now())) throw new Invalid(TYPING_REFUSED, 409);
+}
+
+// ---- Quick reactions: a one-tap answer to an agent's message. A reaction is an event the agent sees (kind `reaction` in the event feed), never a message: it changes nothing about who is waiting.
+// "Done, close it" also closes the thread. They live in reactions.json beside the thread: { <message id>: { thumbs_up?: <time>, done?: <time> } }.
+export const REACTIONS = ['thumbs_up', 'done'] as const;
+export type Reaction = (typeof REACTIONS)[number];
+export type Reactions = Record<string, Partial<Record<Reaction, string>>>;
+export async function readReactions(path: string): Promise<Reactions> {
+  try {
+    const raw = JSON.parse(await optional(join(path, 'reactions.json')) ?? 'null');
+    if (!isObject(raw)) return {};
+    const out: Reactions = {};
+    for (const [mid, value] of Object.entries(raw)) {
+      if (!/^m\d+$/.test(mid) || !isObject(value)) continue;
+      const row: Partial<Record<Reaction, string>> = {};
+      for (const r of REACTIONS) if (typeof value[r] === 'string') row[r] = value[r] as string;
+      if (Object.keys(row).length) out[mid] = row;
+    }
+    return out;
+  } catch { return {}; }
+}
+export async function reactTo(dir: string, id: string, mid: string, reaction: unknown): Promise<{ reaction: Reaction; first: boolean; closed: boolean }> {
+  if (typeof reaction !== 'string' || !(REACTIONS as readonly string[]).includes(reaction)) throw new Invalid('reaction must be thumbs_up or done');
+  const kind = reaction as Reaction;
+  const path = await itemDir(dir, id);
+  const result = await withLock(path, async () => {
+    if ((await readMerge(path))?.state === 'done') throw new Invalid('That thread was merged into another one; react there', 409);
+    const message = (await materialise(path, await readItem(path))).find(m => m.id === mid);
+    if (!message || message.divider) throw new Invalid('No such message', 404);
+    if (message.author !== 'agent') throw new Invalid('Only an agent message can be reacted to');
+    const all = await readReactions(path);
+    const row = all[mid] ?? {};
+    const first = row[kind] === undefined;
+    if (first) { row[kind] = new Date().toISOString(); all[mid] = row; await writeAtomic(join(path, 'reactions.json'), JSON.stringify(all, null, 2)); }
+    if (kind === 'done') await writeStatus(path, 'done');
+    return { reaction: kind, first, closed: kind === 'done' };
+  });
+  if (result.first || result.closed) await logEvent(dir, { id, kind: 'reaction', text: kind === 'done' ? `Done, close it (on ${mid})` : `\u{1F44D} on ${mid}`, reply_to: mid });
+  return result;
+}
+// Closes every open thread whose agent said "done" last and that waits on nobody. One tap in the inbox ("Close all done threads").
+export async function closeDoneThreads(dir: string): Promise<{ closed: string[] }> {
+  const closed: string[] = [];
+  for (const t of await listThreads(dir)) {
+    if (t.status !== 'open' || t.merged_into || t.read_only || t.last_flag !== 'done' || t.last_author !== 'agent' || t.waiting === 'you') continue;
+    await setStatus(dir, t.id, 'done'); closed.push(t.id);
+  }
+  return { closed };
+}
+
+// ---- Split: an agent moves one message and everything that replies to it (and any question or side question tied to them) into a new thread. The old thread keeps a "Moved to <title>" link where each
+// message was, and the new one opens with "Moved from <title>": a link in both.
+export async function splitThread(dir: string, fromId: string, msgId: string, title: unknown, by: Author = 'agent', guard: TypingGuard = {}): Promise<{ id: string; moved: string[] }> {
+  const name = threadTitle(title);
+  const from = await itemDir(dir, fromId);
+  await assertNotTyping(dir, [fromId], guard);
+  const item = await readItem(from);
+  const messages = await materialise(from, item);
+  const first = messages.find(m => m.id === msgId);
+  if (!first) throw new Invalid(`No message ${msgId} in that thread`, 404);
+  if (first.divider || first.moved_to) throw new Invalid(`${msgId} cannot be split off`);
+  const chosen = new Set([msgId]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const m of messages) {
+      if (chosen.has(m.id) || m.divider || m.moved_to) continue;
+      const replying = (m.reply_to && chosen.has(m.reply_to)) || (m.quote && isMessageQuote(m.quote) && chosen.has(m.quote.message_id));
+      const tied = messages.some(x => chosen.has(x.id) && ((x.question && m.answer?.question_id === x.question.id) || (x.answer && m.question?.id === x.answer.question_id) || (x.aside && x.reply_to === m.id) || (m.aside && m.reply_to === x.id)));
+      if (replying || tied) { chosen.add(m.id); grew = true; }
+    }
+  }
+  const ids = messages.filter(m => chosen.has(m.id)).map(m => m.id);
+  const { id } = await createThread(dir, { title: name, text: `Split from "${titleOf(item, fromId)}": the messages below were moved here.`, origin: 'agent', flag: 'fyi' });
+  try { const moved = await moveMessages(dir, fromId, ids, id, by, undefined, { force: true }); return { id, moved: moved.moved }; }
+  catch (error) { await rm(join(dir, id), { recursive: true, force: true }); throw error; }
+}
 const questionMessage = (messages: Message[], qid: string) => messages.find(m => m.author === 'agent' && m.question?.id === qid);
 // Withdraws an unanswered question. It stays in the thread, struck through, and no longer waits on the person.
-export async function cancelQuestion(dir: string, id: string, qid: string, reason?: unknown): Promise<{ withdrawn: boolean }> {
+export async function cancelQuestion(dir: string, id: string, qid: string, reason?: unknown, guard: TypingGuard = {}): Promise<{ withdrawn: boolean }> {
+  await assertNotTyping(dir, [id], guard);
   if (reason !== undefined && reason !== null && reason !== '' && (typeof reason !== 'string' || reason.trim().length > 300)) throw new Invalid('A reason is at most 300 characters');
   const why = typeof reason === 'string' && reason.trim() ? reason.trim() : undefined;
   const path = await itemDir(dir, id);
@@ -883,7 +989,7 @@ export async function bumpQuestion(dir: string, id: string, qid: string): Promis
       if (parsed.flag === 'needs_you') parsed.flag = 'fyi';
     });
     const n = stored.length + 1;
-    const question = buildQuestion(`q${n}`, { prompt: q.prompt, options: q.options.map(o => ({ label: o.label, ...(o.description ? { description: o.description } : {}) })), multi: q.multi, allow_other: q.allow_other });
+    const question = buildQuestion(`q${n}`, { prompt: q.prompt, options: q.options.map(o => ({ label: o.label, ...(o.description ? { description: o.description } : {}), ...(o.recommended ? { recommended: true } : {}) })), multi: q.multi, allow_other: q.allow_other });
     const created: Message = { id: `m${n}`, author: 'agent', text: q.prompt, images: [], created_at: new Date().toISOString(), flag: 'needs_you', question, ...(message.agent_name ? { agent_name: message.agent_name } : {}) };
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
     return { id: created.id, question_id: question.id };
@@ -1354,9 +1460,10 @@ async function mergeLocked(dir: string, from: string, into: string, fromId: stri
   return true;
 }
 // Both threads are locked in id order, so two merges touching the same pair can never wait on each other.
-export async function mergeThreads(dir: string, fromId: string, intoId: string, by: Author, fileOptions?: FilesOptions): Promise<{ merged: boolean; into: string }> {
+export async function mergeThreads(dir: string, fromId: string, intoId: string, by: Author, fileOptions?: FilesOptions, guard: TypingGuard = {}): Promise<{ merged: boolean; into: string }> {
   if (fromId === intoId) throw new Invalid('A thread cannot be merged into itself');
   const from = await itemDir(dir, fromId), into = await itemDir(dir, intoId);
+  await assertNotTyping(dir, [fromId, intoId], guard);
   const [first, second] = fromId < intoId ? [from, into] : [into, from];
   const merged = await withLock(first, () => withLock(second, () => mergeLocked(dir, from, into, fromId, intoId, fileOptions)));
   if (merged) {
@@ -1705,10 +1812,11 @@ function pairsFromIds(source: Message[], target: Message[], span: RepairSpan): {
 // Each moved message leaves a divider stub with the same id and time ("Moved to <title>") so quotes of it still resolve and nothing shifts.
 // Copies in the target carry `moved_from`, so an interrupted move (copies written, stubs not) is finished by running it again.
 // Items a message added travel with it (new ids); items it ticked move only if they were added by a moved message, otherwise the reference is dropped.
-export async function moveMessages(dir: string, fromId: string, msgIds: string[], toId: string, by: Author = 'agent', fileOptions?: FilesOptions): Promise<{ moved: string[]; into: string }> {
+export async function moveMessages(dir: string, fromId: string, msgIds: string[], toId: string, by: Author = 'agent', fileOptions?: FilesOptions, guard: TypingGuard = {}): Promise<{ moved: string[]; into: string }> {
   if (fromId === toId) throw new Invalid('Choose a different thread to move into');
   if (!msgIds.length || new Set(msgIds).size !== msgIds.length) throw new Invalid('Name each message to move once');
   const from = await itemDir(dir, fromId), into = await itemDir(dir, toId);
+  await assertNotTyping(dir, [fromId, toId], guard);
   const [first, second] = fromId < toId ? [from, into] : [into, from];
   const result = await withLock(first, () => withLock(second, () => moveLocked(from, into, fromId, toId, msgIds, fileOptions)));
   if (result.moved.length) await logEvent(dir, { id: fromId, kind: 'move', text: `${result.moved.join(' ')} from ${fromId} into ${toId}`, author: by });
@@ -1947,6 +2055,32 @@ export async function listThreads(dir: string, query?: string): Promise<Summary[
     } catch { /* a broken folder must not hide the rest */ }
   }
   return out.sort((a, b) => b.last_message_at.localeCompare(a.last_message_at) || b.id.localeCompare(a.id));
+}
+
+// ---- Everything that waits on the person in one project: each open question, each needs-you message and each item of theirs. A thread that is done, merged away or read-only waits on nobody.
+export interface WaitingRow { thread: string; title: string; kind: 'question' | 'needs_you' | 'item'; text: string; at: string }
+export async function waitingRows(dir: string): Promise<WaitingRow[]> {
+  let entries: string[];
+  try { entries = await readdir(dir); } catch (error) { if (code(error) === 'ENOENT') return []; throw error; }
+  const rows: WaitingRow[] = [];
+  for (const id of entries.filter(entry => ID.test(entry))) {
+    try {
+      const { summary, messages, path } = await summarise(dir, id);
+      if (summary.status === 'done' || summary.merged_into || summary.read_only || summary.waiting !== 'you') continue;
+      const answered = new Set(messages.flatMap(m => (m.answer ? [m.answer.question_id] : [])));
+      const lastUser = messages.map(m => m.author).lastIndexOf('user');
+      const one = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 160);
+      const before = rows.length;
+      for (const m of messages.slice(lastUser + 1)) {
+        if (m.author !== 'agent' || m.divider) continue;
+        if (m.question) { if (questionLive(m.question) && !answered.has(m.question.id)) rows.push({ thread: id, title: summary.title, kind: 'question', text: one(m.question.prompt), at: m.created_at }); }
+        else if (m.flag === 'needs_you') rows.push({ thread: id, title: summary.title, kind: 'needs_you', text: one(m.text) || 'Needs you', at: m.created_at });
+      }
+      for (const i of await readChecklist(path)) if (i.owner === 'user' && !i.done && !i.claimed_by_user_at) rows.push({ thread: id, title: summary.title, kind: 'item', text: one(i.text), at: i.created_at });
+      if (rows.length === before) rows.push({ thread: id, title: summary.title, kind: 'needs_you', text: 'Waiting on you', at: summary.last_message_at });
+    } catch { /* a broken folder must not hide the rest */ }
+  }
+  return rows.sort((a, b) => b.at.localeCompare(a.at));
 }
 
 // ---- Presence: when the user last had the inbox open and when each agent last did something. Timestamps only (no address, no browser, no thread).

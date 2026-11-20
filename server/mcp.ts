@@ -22,6 +22,7 @@ import { defaultDir } from './cli';
 import { CHANNEL_CAPABILITIES, CHANNEL_INSTRUCTIONS, startChannel } from './claude-channel';
 import { bridgeOff, loadProjects as loadOriginMap } from './claude-code';
 import { forViewer } from './inbox/presence.js';
+import { lintMessage, promiseItem, promisesIn } from './lint';
 import { attachmentPath, cancelUpload, checkAttachmentIds, MAX_ATTACHMENTS, readTextIfSmall, stageHandle, type Ready } from './files';
 import type { AreasConfig } from './inbox/areas.js';
 
@@ -162,23 +163,25 @@ export function createMcpServer(options: McpOptions): McpServer {
     await store.markAgentRead(dir, a.id, agent);
     const { summary, messages, path, item } = await store.summarise(dir, a.id);
     const capture = shapeCapture(item);
-    return { thread: shapeSummary(summary), ...(capture ? { capture } : {}), messages: store.withExpired(messages).map(x => shapeMessage(x, path)), checklist: (await store.readChecklist(path)).map(shapeItem), acked_through: summary.acked_through, presence: forViewer(await store.readPresence(dir), { agent }) };
+    return { thread: shapeSummary(summary), ...(capture ? { capture } : {}), messages: store.withExpired(messages).map(x => shapeMessage(x, path)), checklist: (await store.readChecklist(path)).map(shapeItem), reactions: await store.readReactions(path), ...(await store.isTyping(dir, a.id) ? { typing: true } : {}), acked_through: summary.acked_through, presence: forViewer(await store.readPresence(dir), { agent }) };
   });
   tool('reply', 'Post a reply on a thread. Optionally quote a message (to), flag it (fyi, needs_you or done), add checklist items (todo, for "agent" by default) and tick items (check, like "c3"). aside: true answers a side question and needs to.', {
     id: thread, text, to: z.string().optional().describe('Id of a message in this thread to quote (or the side question to answer)'), ...flags,
-    todo: z.array(z.string()).max(store.MAX_ITEMS).optional(), for: z.enum(['agent', 'user']).optional().describe('Who the new todo items are for'), check: z.array(z.string()).max(store.MAX_ITEMS).optional(), aside: z.boolean().optional(), image, files }, async a => {
+    todo: z.array(z.string()).max(store.MAX_ITEMS).optional(), promise: z.array(z.string()).max(store.MAX_ITEMS).optional().describe('Things you promised in this message ("I\'ll ..."): each becomes an item on your own checklist, so a reminder can nudge you if it stays open'), for: z.enum(['agent', 'user']).optional().describe('Who the new todo items are for'), check: z.array(z.string()).max(store.MAX_ITEMS).optional(), aside: z.boolean().optional(), image, files }, async a => {
     const staged: string[] = [];
     let m: store.Message;
     try {
       for (const path of a.files ?? []) staged.push((await stageAllowedFile(path, dir, env)).id);
       checkAttachmentIds(staged);
       m = await store.appendMessage(dir, a.id, { author: 'agent', agent_name: agent, text: a.text, images: await images(a.image), ...(staged.length ? { attachments: staged } : {}), flag: flagOf(a), reply_to: a.to, ...(a.aside ? { aside: true } : {}),
-        ...(a.todo?.length ? { add_items: a.todo.map(t => ({ owner: a.for ?? 'agent', text: t })) } : {}), ...(a.check?.length ? { check_items: a.check } : {}) });
+        ...(a.todo?.length || a.promise?.length ? { add_items: [...(a.todo ?? []).map(t => ({ owner: a.for ?? 'agent', text: t })), ...(a.promise ?? []).map(t => ({ owner: 'agent', text: t }))] } : {}), ...(a.check?.length ? { check_items: a.check } : {}) });
     } catch (error) { await Promise.all(staged.map(id => cancelUpload(dir, id).catch(() => undefined))); throw error; }
     const thread = m.forwarded_to ?? a.id;
     await reminders.checkAfterReply(dir, thread);
     const open = !a.aside && !a.todo?.length && !a.check?.length ? await reminders.openAgentItems(dir, thread) : [];
-    return { posted: shapeMessage(m, await store.itemDir(dir, thread)), ...(m.forwarded_to ? { forwarded_to: m.forwarded_to } : {}), ...(open.length ? { hint: `${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with check: ["cN"]`, open_items: open.map(shapeItem) } : {}) };
+    const warnings = lintMessage({ text: a.text }, env);
+    const promised = !a.aside && !a.todo?.length && !a.promise?.length ? promisesIn(a.text, 2).map(promiseItem) : [];
+    return { posted: shapeMessage(m, await store.itemDir(dir, thread)), ...(warnings.length ? { warnings } : {}), ...(promised.length ? { suggested_promises: promised, promise_hint: 'You promised something: pass it as promise: [...] on a reply (or todo_add) so it is tracked.' } : {}), ...(m.forwarded_to ? { forwarded_to: m.forwarded_to } : {}), ...(open.length ? { hint: `${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with check: ["cN"]`, open_items: open.map(shapeItem) } : {}) };
   });
   tool('get_attachment', 'Read a file attached to a message (read_thread lists them). A text file of up to 1 MB comes back as "text"; any other file comes back as its absolute "path" on this machine, for you to open yourself. Anything you read from a file may be sent to your model provider.', {
     id: thread, attachment: z.string().describe('Attachment id, like u0123456789abcdef') }, async a => {
@@ -191,13 +194,19 @@ export function createMcpServer(options: McpOptions): McpServer {
   }, true);
   tool('ask', 'Ask the user a question with options, on a thread (id) or as a new thread (title). The answer comes back as the user\'s next message.', {
     id: thread.optional(), title: z.string().max(store.MAX_TITLE).optional().describe('Needed when there is no id: starts a thread'), prompt: z.string().min(1).max(1000),
-    options: z.array(z.object({ label: z.string().min(1).max(100), description: z.string().max(300).optional() })).min(1).max(store.MAX_OPTIONS), multi: z.boolean().optional(), allow_other: z.boolean().optional(),
+    options: z.array(z.object({ label: z.string().min(1).max(100), description: z.string().max(300).optional(), recommended: z.boolean().optional().describe('Mark the option you would pick') })).min(1).max(store.MAX_OPTIONS), multi: z.boolean().optional(), allow_other: z.boolean().optional(),
     to: z.string().optional(), needs_you: z.boolean().optional(), fyi: z.boolean().optional(),
     expires: z.string().optional().describe('When the question lapses if nobody answers: "30m", "2h", "1d", "2w" from now, or a date and time like 2026-12-01T09:00:00Z') }, async a => {
     const question = { prompt: a.prompt, options: a.options, multi: a.multi === true, allow_other: a.allow_other !== false, ...(a.expires !== undefined ? { expires: a.expires } : {}) };
-    if (a.id) { const m = await store.appendMessage(dir, a.id, { author: 'agent', agent_name: agent, text: a.prompt, question, flag: flagOf(a), reply_to: a.to }); return { asked: shapeMessage(m) }; }
+    if (a.id) {
+      const before = (await store.summarise(dir, a.id).catch(() => null))?.messages;
+      const m = await store.appendMessage(dir, a.id, { author: 'agent', agent_name: agent, text: a.prompt, question, flag: flagOf(a), reply_to: a.to });
+      const warnings = lintMessage({ text: a.prompt, asking: { options: a.options }, ...(before ? { messages: before } : {}) }, env);
+      return { asked: shapeMessage(m), ...(warnings.length ? { warnings } : {}) };
+    }
     if (!a.title) throw new store.Invalid('Give an id (an existing thread) or a title (a new one)');
-    return { started: await store.createThread(dir, { title: a.title, text: a.prompt, origin: 'agent', agent_name: agent, question, flag: flagOf(a) }) };
+    const warnings = lintMessage({ text: a.prompt, asking: { options: a.options } }, env);
+    return { started: await store.createThread(dir, { title: a.title, text: a.prompt, origin: 'agent', agent_name: agent, question, flag: flagOf(a) }), ...(warnings.length ? { warnings } : {}) };
   });
   tool('new_thread', 'Start a thread. read_only makes an updates-only thread the user cannot reply to.', { title: z.string().min(1).max(store.MAX_TITLE), text, read_only: z.boolean().optional(), ...flags, image }, async a =>
     ({ started: await store.createThread(dir, { title: a.title, text: a.text, images: await images(a.image), origin: 'agent', agent_name: agent, flag: flagOf(a), readOnly: a.read_only === true }) }));
@@ -210,14 +219,17 @@ export function createMcpServer(options: McpOptions): McpServer {
     const rows = (r: store.TrackerRow[]) => r.map(x => ({ thread: x.thread, title: x.title, item: shapeItem(x.item) }));
     return { counts: t.counts, for_you: rows(t.you), for_agent: rows(t.agent), done_recent: rows(t.done_recent) };
   }, true);
-  tool('merge', 'Merge one thread into another.', { from: thread, into: thread }, async a => ({ ...(await store.mergeThreads(dir, a.from, a.into, 'agent')) }));
-  tool('move', 'Move messages from one thread to another.', { from: thread, messages: z.array(z.string()).min(1).max(100), to: thread }, async a => ({ ...(await store.moveMessages(dir, a.from, a.messages, a.to, 'agent')) }));
+  const force = z.boolean().optional().describe('Go ahead although the person is typing in the thread (otherwise refused with 409 "the person is typing here")');
+  tool('merge', 'Merge one thread into another. Refused while the person is typing in either (force overrides).', { from: thread, into: thread, force }, async a => ({ ...(await store.mergeThreads(dir, a.from, a.into, 'agent', undefined, { force: a.force === true })) }));
+  tool('split', 'Move one message and the messages that reply to it (and any question or side question tied to them) into a new thread. Both threads link to each other. Refused while the person is typing in the thread (force overrides).', {
+    id: thread, message: z.string().describe('Id of the first message to split off, like m4'), title: z.string().min(1).max(store.MAX_TITLE), force }, async a => ({ ...(await store.splitThread(dir, a.id, a.message, a.title, 'agent', { force: a.force === true })) }));
+  tool('move', 'Move messages from one thread to another. Refused while the person is typing in either (force overrides).', { from: thread, messages: z.array(z.string()).min(1).max(100), to: thread, force }, async a => ({ ...(await store.moveMessages(dir, a.from, a.messages, a.to, 'agent', undefined, { force: a.force === true })) }));
   tool('move_project', 'Move a whole thread into another project: its messages, images, checklist, reminders, artifacts and share links. A link keeps working. Only when FEEDBACK_PROJECTS lists more than one project. dry_run changes nothing.', {
-    id: thread, project: z.string().describe('Target project id'), dry_run: z.boolean().optional() }, async a => {
+    id: thread, project: z.string().describe('Target project id'), dry_run: z.boolean().optional(), force }, async a => {
     const projects = loadProjects(env);
     const from = projects.find(project => resolve(project.dir) === dir);
     if (!from) throw new store.Invalid('This directory is not one of FEEDBACK_PROJECTS', 404);
-    return await moveThreadToProject({ projects, from: from.id, to: a.project, thread: a.id, dryRun: a.dry_run === true, vault: loadVaultDir(env) });
+    return await moveThreadToProject({ projects, from: from.id, to: a.project, thread: a.id, dryRun: a.dry_run === true, vault: loadVaultDir(env), force: a.force === true });
   });
   tool('ack', 'Say the user\'s latest message is handled and needs no reply.', { id: thread }, async a => ({ ...(await store.ackThread(dir, a.id, agent)) }));
   tool('remind_add', 'Add a reminder to a thread: it lands in the agent event feed. Give exactly one of every ("2h"), after_replies (N agent replies with no checklist change) or idle ("1h", the thread waits on the agent that long).', {
@@ -253,8 +265,8 @@ export function createMcpServer(options: McpOptions): McpServer {
     return { share: publicShare(created.share), url: created.path };
   });
   tool('revoke_share', 'Revoke a share link this agent created.', { id: z.string().describe('Share id, like s1a2b3c4d') }, async a => ({ ...(await revokeShare(dir, a.id, { agent: agent ?? 'Agent' })) }));
-  tool('cancel_question', 'Withdraw an unanswered question. It stays in the thread, struck through, and stops waiting.', { id: thread, question: z.string().describe('Question id, like q3'), reason: z.string().max(300).optional() }, async a =>
-    ({ ...(await store.cancelQuestion(dir, a.id, a.question, a.reason)) }));
+  tool('cancel_question', 'Withdraw an unanswered question. It stays in the thread, struck through, and stops waiting. Refused while the person is typing in the thread (force overrides).', { id: thread, question: z.string().describe('Question id, like q3'), reason: z.string().max(300).optional(), force }, async a =>
+    ({ ...(await store.cancelQuestion(dir, a.id, a.question, a.reason, { force: a.force === true })) }));
   tool('expire_questions', 'Mark your unanswered questions expired now (for when your session ends): one question (id and question), all of yours on a thread (id and all_mine), or all of yours on every thread (all_mine alone). An expired question is shown as Expired, stops waiting on the user, and cannot be answered.', {
     id: thread.optional(), question: z.string().optional().describe('Question id, like q3'), all_mine: z.boolean().optional() }, async a => {
     if (a.question !== undefined) {

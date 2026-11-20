@@ -98,12 +98,15 @@ export interface RemoteOptions {
   publicUrl?: () => string | null;
   clientIpHeader?: string;
   // Turns the Host check on: the env that names FEEDBACK_HOST and FEEDBACK_ALLOWED_HOSTS. The remote listener then answers only to the public address's host (read at each request,
-  // as a tunnel's arrives late) or a name the local listener would accept, on top of the device cookie. Off by default.
-  hostGuard?: Record<string, string | undefined>;
+  // as a tunnel's arrives late) or a name the local listener would accept, on top of the device cookie. On by default (the process environment) whenever a public address is
+  // in play (`publicUrl`); pass `false` to turn it off. A handler built with no `publicUrl` at all has no address to compare with and keeps the older "the Host header decides" rule.
+  hostGuard?: Record<string, string | undefined> | false;
 }
 export interface Remote { fetch: Fetch; pairing: Pairing }
 
-export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: RemoteOptions = {}): Fetch {
+export function createRemoteHandler(inner: Fetch, pairing: Pairing, rawOptions: RemoteOptions = {}): Fetch {
+  const guardEnv = rawOptions.hostGuard === false ? undefined : rawOptions.hostGuard ?? (rawOptions.publicUrl ? process.env : undefined);
+  const options = { ...rawOptions, hostGuard: guardEnv };
   const exchangeLimit = new Limiter([{ windowMs: 60e3, max: 5 }, { windowMs: 3600e3, max: 20 }]);
   const clock = () => options.now?.() ?? Date.now();
   // A write must come from the public address. Without a configured one, the Origin host must be the host the request was sent to.
@@ -159,6 +162,8 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: Rem
 
   const handle: Fetch = async (req, server) => {
     const path = new URL(req.url).pathname, method = req.method;
+    // A Host header that is there but empty is not a name at all: refused plainly, whatever else is configured.
+    if (req.headers.has('host') && !req.headers.get('host')!.trim()) return reply({ kind: 'invalid_request', detail: 'A Host header is required' }, 400);
     if (options.hostGuard && !remoteHostOk(req)) return reply({ kind: 'forbidden', detail: 'This host name is not allowed here. Use the public address, or list the name in FEEDBACK_ALLOWED_HOSTS.' }, 403);
     if (isShareRoute(path, method)) { markHostChecked(req); return inner(req, server); }
     if (path === EXCHANGE && method === 'POST') return exchange(req, server);
@@ -267,7 +272,9 @@ export async function startRemote(local: { fetch: Fetch; maxRequestBodySize: num
   let tunnel: Tunnel | null = null;
   const fromTunnel = !configured && Bun.which('cloudflared', env.PATH ? { PATH: env.PATH } : {}) !== null;
   const handler = createRemoteHandler(local.fetch, pairing, { publicUrl: () => state.publicUrl, hostGuard: env, ...(fromTunnel && !env.FEEDBACK_CLIENT_IP_HEADER?.trim() ? { clientIpHeader: 'cf-connecting-ip' } : {}) });
-  const server = Bun.serve({ hostname: '127.0.0.1', port, maxRequestBodySize: local.maxRequestBodySize, fetch: handler });
+  // A request with no Host header at all (HTTP/1.0) is turned away here, at the socket; the handler itself is called with in-process requests that carry none.
+  const withHost: Fetch = (req, srv) => (req.headers.get('host')?.trim() ? handler(req, srv) : Promise.resolve(reply({ kind: 'invalid_request', detail: 'A Host header is required' }, 400)));
+  const server = Bun.serve({ hostname: '127.0.0.1', port, maxRequestBodySize: local.maxRequestBodySize, fetch: withHost });
   const bound = server.port ?? port;
   log(`Remote mode: listening on http://127.0.0.1:${bound} (every request needs a paired device)`);
   if (configured && !env.FEEDBACK_CLIENT_IP_HEADER?.trim()) log('Warning: FEEDBACK_CLIENT_IP_HEADER is not set, so every caller through your proxy shares one pairing rate limit. Set it to the header your proxy sets (for Cloudflare, Cf-Connecting-Ip).');

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.15.0
+
+Working together: fixes from watching real person-and-agent threads. The inbox no longer changes under what you are typing, captures reach the right project, agents are nudged to write short plain messages, and the questions "is this done?" and "what are you waiting on me for?" each have a one-tap answer.
+
+### Added
+- **What you type is never lost.** The composer (per thread) and every question's Other box (per question) are kept in `localStorage` (every call wrapped, so blocked storage only means no memory across reloads) and survive polls, withdrawals, expiries, re-asks, merges, moves and reloads. A withdrawn, expired or re-asked question keeps the typed text and offers **Send as a message**; a kept answer whose question is gone from the thread (or was answered elsewhere) is shown under the thread with the same button.
+- **Typing presence.** The inbox tells the server "the person is typing in thread X" (a debounced ping, never the words; it lapses 15 seconds after the last one). While it is live, `ask-cancel` / MCP `cancel_question`, `merge`, `move`, `move-project`, `split` and the matching HTTP routes refuse with **409 "the person is typing here"**, unless `--force` (MCP and HTTP `force: true`). The inbox's own Merge and Move buttons are the person's choice and pass `force`. The marker is a small file of timestamps (`_typing.json`), because the CLI and the MCP server are separate processes from the server. `read` and MCP `read_thread` say when the person is typing.
+- **Captures go to the right project.** A project in `FEEDBACK_PROJECTS` may have `match: ["<url prefix or glob>", ...]` (a prefix ends at a path segment; `*` is a wildcard; the longest matching rule wins) and one project may have `inbox: true` to own captures taken on the inbox's own pages. A capture that matches no rule goes to the first project, is marked `unmatched`, and its thread header shows a one-tap **Move to ...** chip naming the closest project (the one with a rule on the same site). Without any `match` or `inbox`, nothing changes. The widget (which names no project) still lists and reads all its captures.
+- **Checks on agent messages.** CLI `reply` / `ask` / `ask-new` and MCP `reply` / `ask` still send, and report `warnings`: over ~120 words (suggest an artifact), internal codes and file paths (`R1-fix`, `q3`, `c14`, `src/a/B.tsx`, ALL-CAPS tokens), a question card with no option marked recommended, a second open question in the thread. `FEEDBACK_AGENT_LINT=off` turns them off. The CLI prints them to stderr; MCP returns them in the result.
+- **`recommended` options.** `--recommend <n>` on `ask` / `ask-new` (repeatable) and `recommended: true` on an MCP option. The card shows a Recommended mark. A re-ask keeps it.
+- **Waiting on you, across all projects.** A header button with a count opens one list of every open question and needs-you item in every project (`GET api/waiting`); a row opens its thread, switching project if need be.
+- **A new-topic nudge.** A message that starts with "Also", "Another thing" or "Separately", or is long and shares almost no words with the thread title, offers **Send as a new thread** (title filled in) before it goes. **Send here** always works.
+- **`split`** (`react-feedback split <id> <message> --title "..."`, MCP `split`): an agent moves a message and its replies (and any question or side question tied to them) into a new thread. The old thread keeps a "Moved to" link in place, the new one starts with "Moved from".
+- **Quick reactions.** A thumbs up and **Done, close it** on each agent message, and **Close all done threads** in the list. A reaction is an event in `_events.jsonl` (`kind: "reaction"`) that the agent sees, not a message: it changes nothing about who is waiting. `read` shows them.
+- **Clearer multi-choice cards.** Real checkboxes when `multi` is set. Picking an option clears the Other box (and typing Other clears the options), with a visible hint and an Undo, so the two are never sent together by accident.
+- **Promise tracking.** When an agent message says "I'll ..." or "I will ...", the CLI and MCP result suggest a checklist item; `reply --promise "..."` (MCP `promise: [...]`) adds it as an agent item, and the built-in reminder nudges if it is still open.
+- **Answers to question cards work offline.** An option pick, a multi-select or Other text given with no signal joins the offline outbox (with a `client_id` and `written_at`), shows on the card as "will send when you're back online" (with Change), and is sent when the connection returns. A retry never answers twice: the answer route returns the stored answer (200). If the question was withdrawn, expired, re-asked or answered elsewhere meanwhile, the 409 loses nothing: the words are kept under the question with **Send as a message**.
+
+- **Copy.** A **Copy** action on every message with text: a small copy icon beside Reply on a wide screen, and in the message's ⋯ menu (the only way on a phone, where a long press keeps native text selection in message bodies). It copies the message's Markdown, not the drawn HTML and without the quote of what it replied to, and shows a "Copied" toast. It uses `navigator.clipboard.writeText`, with a hidden textarea and `execCommand` where that is missing (older iOS). A redacted message has no Copy.
+
+### Changed
+- On a phone in a normal browser tab the composer sits 10 px from the bottom edge. The safe-area inset is added only in an installed (standalone or fullscreen) page, where nothing else keeps it clear. (It used to be added everywhere, leaving an empty band above the browser's own toolbar.)
+- A moved message's "Moved to" stub now appears in an open thread on the next poll (it used to wait for a reload).
+- The service worker cache is `fb-inbox-0.15.0`; `drafts.js` and `nudge.js` are in its file list.
+
+### Security
+- `createRemoteHandler`'s `hostGuard` is on by default whenever a public address is in play (pass `hostGuard: false` to turn it off). A handler built with no `publicUrl` at all keeps the older "the Host header decides" rule.
+- The remote listener answers a missing or empty `Host` with 400, not a generic 500.
+- A duplicated sentence in the comment above `guarded` in `server/server.ts` is gone.
+
 ## 0.14.0
 
 ### Breaking

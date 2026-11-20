@@ -10,7 +10,7 @@ import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
 import * as artifacts from './artifacts';
 import * as shares from './shares';
-import { checkIcons, loadProjects, projectById, readProjectIcon, type Project } from './projects';
+import { checkIcons, closestProject, loadProjects, matchProject, projectById, readProjectIcon, routesByUrl, type Project } from './projects';
 import { moveThreadToProject } from './move-project';
 import * as files from './files';
 import * as replay from './replay';
@@ -87,21 +87,21 @@ async function existingId(dir: string, client_id: string): Promise<string | null
   }
   return null;
 }
-async function create(dir: string, data: ObjectData) {
+async function create(dir: string, data: ObjectData, unmatched = false) {
   const valid = validate(data);
-  if (!valid.client_id) return json({ id: await write(dir, valid) }, 201);
+  if (!valid.client_id) return json({ id: await write(dir, valid, unmatched) }, 201);
   const key = `${dir}\0${valid.client_id}`;
   let job = writing.get(key);
   if (!job) {
     const client_id = valid.client_id;
-    job = (async () => { const old = await existingId(dir, client_id); return old ? { id: old, fresh: false } : { id: await write(dir, valid), fresh: true }; })();
+    job = (async () => { const old = await existingId(dir, client_id); return old ? { id: old, fresh: false } : { id: await write(dir, valid, unmatched), fresh: true }; })();
     writing.set(key, job);
     void job.then(() => writing.delete(key), () => writing.delete(key));
   }
   const { id, fresh } = await job;
   return json({ id }, fresh ? 201 : 200);
 }
-async function write(dir: string, valid: Valid): Promise<string> {
+async function write(dir: string, valid: Valid, unmatched = false): Promise<string> {
   const { id, path, created_at } = await store.makeItemFolder(dir);
   try {
     const save = async (name: string, bytes: Buffer | null) => {
@@ -109,7 +109,7 @@ async function write(dir: string, valid: Valid): Promise<string> {
       await writeFile(join(path, name), bytes, { flag: 'wx' });
       return name;
     };
-    const item = { id, created_at, ...(valid.client_id ? { client_id: valid.client_id } : {}), note: valid.note, mode: valid.mode, target: valid.target, context: valid.context,
+    const item = { id, created_at, ...(valid.client_id ? { client_id: valid.client_id } : {}), ...(unmatched ? { unmatched: true } : {}), note: valid.note, mode: valid.mode, target: valid.target, context: valid.context,
       image: await save('image.png', valid.image),
       ...(valid.annotated ? { annotated: await save('annotated.png', valid.annotated) } : {}),
       ...(valid.context_image ? { context_image: await save('context.png', valid.context_image) } : {}) };
@@ -146,17 +146,33 @@ async function listedItem(dir: string, id: string) {
       mode: item.mode, note_first_line: (item.note as string).split('\n')[0], status: stored === 'open' ? (lastAuthor === 'agent' ? 'seen' : 'new') : stored, reply }; // the widget's list keeps its old vocabulary
   } catch { return null; } // A broken item must not hide the rest of the feedback.
 }
-async function list(dir: string) {
-  let entries: string[];
-  try { entries = await readdir(dir); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json([]); throw error; }
+async function list(dirs: string | string[]) {
   const items = [];
-  for (const id of entries.filter(id => ID.test(id))) {
-    const item = await listedItem(dir, id);
-    if (item) items.push(item);
+  for (const dir of Array.isArray(dirs) ? dirs : [dirs]) {
+    let entries: string[];
+    try { entries = await readdir(dir); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    for (const id of entries.filter(id => ID.test(id))) {
+      const item = await listedItem(dir, id);
+      if (item) items.push(item);
+    }
   }
   items.sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
   return json(items);
+}
+// A capture goes to the project whose `match` fits the page it was taken on (the project with `inbox: true` for the inbox's own pages). One that fits none goes to the first project and is
+// flagged `unmatched`, so the inbox can offer to move it. A request that names a project (`?project=`) is taken at its word, and so is a server with no rules.
+function captureTarget(data: ObjectData, fallback: string, req: Request, projects: Project[] | undefined): { dir: string; unmatched: boolean } {
+  if (!routesByUrl(projects) || new URL(req.url).searchParams.has('project')) return { dir: fallback, unmatched: false };
+  const context = data.context && typeof data.context === 'object' && !Array.isArray(data.context) ? data.context as ObjectData : {};
+  const hit = matchProject(projects!, typeof context.url === 'string' ? context.url : '');
+  return hit ? { dir: hit.dir, unmatched: false } : { dir: projects![0]!.dir, unmatched: true };
+}
+// The widget names no project: with routing on it lists, reads and updates its captures across all of them.
+async function folderOfItem(id: string, fallback: string, req: Request, projects: Project[] | undefined): Promise<string> {
+  if (!routesByUrl(projects) || new URL(req.url).searchParams.has('project') || !ID.test(id)) return fallback;
+  for (const project of projects!) { try { if ((await lstat(join(project.dir, id))).isDirectory()) return project.dir; } catch { /* not in this one */ } }
+  return fallback;
 }
 async function itemRoute(req: Request, dir: string, id: string, file: string) {
   const path = await itemDir(dir, id);
@@ -177,7 +193,7 @@ async function itemRoute(req: Request, dir: string, id: string, file: string) {
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return json({ kind: 'not_found' }, 404); throw error; }
 }
 const INBOX = resolve(import.meta.dir, 'inbox');
-const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'replays.js': 'text/javascript; charset=utf-8', 'shot.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'pair.js': 'text/javascript; charset=utf-8', 'qr.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
+const INBOX_FILES: Record<string, string> = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'areas.js': 'text/javascript; charset=utf-8', 'quote.js': 'text/javascript; charset=utf-8', 'donut.js': 'text/javascript; charset=utf-8', 'aside.js': 'text/javascript; charset=utf-8', 'tracker.js': 'text/javascript; charset=utf-8', 'markdown.js': 'text/javascript; charset=utf-8', 'secret.js': 'text/javascript; charset=utf-8', 'outbox.js': 'text/javascript; charset=utf-8', 'sha256.js': 'text/javascript; charset=utf-8', 'uploader.js': 'text/javascript; charset=utf-8', 'presence.js': 'text/javascript; charset=utf-8', 'replays.js': 'text/javascript; charset=utf-8', 'shot.js': 'text/javascript; charset=utf-8', 'version.js': 'text/javascript; charset=utf-8', 'pair.js': 'text/javascript; charset=utf-8', 'drafts.js': 'text/javascript; charset=utf-8', 'nudge.js': 'text/javascript; charset=utf-8', 'qr.js': 'text/javascript; charset=utf-8', 'sw.js': 'text/javascript; charset=utf-8' };
 // The drop-in widget bundle (built to dist/embed.js), served so any page can load it from the feedback server itself.
 const EMBED = resolve(import.meta.dir, '../dist/embed.js');
 async function embedRoute(req: Request, path: string): Promise<Response | null> {
@@ -239,7 +255,7 @@ async function inboxRoute(req: Request, path: string): Promise<Response | null> 
   const body = name === 'index.html' ? Buffer.from(html) : file;
   return new Response(body, { headers: { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
 }
-async function threadDetail(dir: string, id: string) {
+async function threadDetail(dir: string, id: string, projects?: Project[]) {
   const { summary, messages, item } = await store.summarise(dir, id);
   const context = (item.context ?? {}) as ObjectData;
   const path = join(dir, id);
@@ -247,7 +263,12 @@ async function threadDetail(dir: string, id: string) {
   const allShares = await shares.readShares(dir);
   const published = (await artifacts.listArtifacts(dir, id)).map(meta => ({ id: meta.id, thread: meta.thread, title: meta.title, latest: meta.latest, updated_at: meta.updated_at,
     versions: meta.versions.map(version => version.n), ...(meta.suggest ? { suggest: true } : {}), ...shares.statsFor(allShares, meta.id) }));
-  return { ...summary, url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: store.cleanTarget(item.target ?? null),
+  const reactions = await store.readReactions(path);
+  const first = projects?.[0];
+  const unmatched = item.unmatched === true && !!first && resolve(first.dir) === resolve(dir) && routesByUrl(projects);
+  const suggested = unmatched ? closestProject(projects!, typeof context.url === 'string' ? context.url : '', first!.id) : null;
+  return { ...summary, ...(unmatched ? { unmatched: true, suggested_project: suggested ? { id: suggested.id, name: suggested.name } : null } : {}), ...(Object.keys(reactions).length ? { reactions } : {}),
+    url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: store.cleanTarget(item.target ?? null),
     note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages: store.withExpired(messages),
     reminders_fired: (await reminders.readStored(path)).fired, artifacts: published };
 }
@@ -512,13 +533,16 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (checklist) return checklist;
   const remind = await remindersRoute(req, dir, path, read);
   if (remind) return remind;
+  if (path === `${base}/close-done` && req.method === 'POST') { await read(req); return json(await store.closeDoneThreads(dir)); }
+  const reaction = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/messages\/([^/]+)\/react$/);
+  if (reaction && req.method === 'POST') { const data = await read(req); return json(await store.reactTo(dir, reaction[1]!, reaction[2]!, data.reaction)); }
   if (path === base && req.method === 'POST') {
     const data = await read(req);
     return json(await store.createThread(dir, { title: data.title, text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, origin: 'user' }), 201);
   }
   const downloaded = await attachmentRoute(req, dir, path);
   if (downloaded) return downloaded;
-  const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)(?:\/(messages|status|read|answer|merge|move-project))?$/);
+  const match = path.match(/^\/__feedback\/api\/threads\/([^/]+)(?:\/(messages|status|read|answer|merge|move-project|typing))?$/);
   if (!match) return null;
   const [, id, action] = match;
   if (action === 'move-project') {
@@ -529,11 +553,11 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     if (typeof data.project !== 'string' || !data.project.trim()) throw new Invalid('project is required');
     const from = projects.find(project => resolve(project.dir) === resolve(dir));
     if (!from) throw new Invalid('Not found', 404);
-    const result = await moveThreadToProject({ projects, from: from.id, to: data.project.trim(), thread: id!, vault: vaultDir });
+    const result = await moveThreadToProject({ projects, from: from.id, to: data.project.trim(), thread: id!, vault: vaultDir, force: data.force === true });
     return json({ moved: result.moved, id: result.id, project: result.to, from: result.from });
   }
   await itemDir(dir, id!);
-  if (!action && req.method === 'GET') return json(await threadDetail(dir, id!));
+  if (!action && req.method === 'GET') return json(await threadDetail(dir, id!, options.projects));
   if (req.method !== 'POST') return null;
   if (action === 'messages') {
     const data = await read(req);
@@ -548,8 +572,20 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     return json(created, store.wasDuplicate(created) ? 200 : 201); // 200: it had already arrived (a retry from the offline queue)
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }
-  if (action === 'merge') return json(await store.mergeThreads(dir, id!, (await read(req)).into as string, 'user', options.files));
-  if (action === 'answer') return json(await store.appendMessage(dir, id!, { author: 'user', text: undefined, answer: await read(req) }), 201);
+  if (action === 'merge') { const data = await read(req); return json(await store.mergeThreads(dir, id!, data.into as string, 'user', options.files, { force: data.force === true })); }
+  // The inbox says the person is typing here (or stopped). The marker lapses on its own 15 seconds after the last ping; nothing typed is ever sent.
+  if (action === 'typing') {
+    const data = await read(req);
+    if (typeof data.typing !== 'boolean') throw new Invalid('typing must be true or false');
+    await store.setTyping(dir, id!, data.typing, options.now?.() ?? Date.now());
+    return json({ ok: true });
+  }
+  if (action === 'answer') {
+    // An answer may carry the `client_id` and `written_at` of the offline outbox: a retry of one that already arrived returns that answer (200), and never answers twice.
+    const data = await read(req);
+    const created = await store.appendMessage(dir, id!, { author: 'user', text: undefined, answer: data, client_id: data.client_id, written_at: data.written_at });
+    return json(created, store.wasDuplicate(created) ? 200 : 201);
+  }
   if (action === 'read') {
     const data = await read(req); // JSON only, like the other writes: a sandboxed page cannot mark a thread read with a form post
     await store.markRead(dir, id!, data.seen);
@@ -646,6 +682,14 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
         await store.touchPresence(options.projects?.[0]?.dir ?? dir, 'user', now);
         return json({ projects: await projectList(options.projects ?? [], dir) });
       }
+      // Every open question and needs-you item in every project, for the one "Waiting on you" list.
+      if (path === `${PREFIX}/api/waiting` && req.method === 'GET') {
+        await store.touchPresence(options.projects?.[0]?.dir ?? dir, 'user', now);
+        const list = options.projects?.length ? options.projects : [{ id: 'default', name: 'Feedback', dir }];
+        const rows = [];
+        for (const project of list) { try { for (const row of await store.waitingRows(project.dir)) rows.push({ project: project.id, project_name: project.name, ...row }); } catch { /* one broken project must not hide the rest */ } }
+        return json({ count: rows.length, items: rows });
+      }
       const iconRoute = path.match(/^\/__feedback\/api\/projects\/([^/]+)\/icon$/);
       if (iconRoute && req.method === 'GET') {
         // Only the file named for that project in FEEDBACK_PROJECTS is ever read; the path is never sent anywhere.
@@ -670,10 +714,10 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
       // The user is here when the inbox page loads, polls or sends: the widget's own captures (api/items) and the health check do not count.
       if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares|uploads)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
       if (req.method === 'GET' && path === `${PREFIX}/healthz`) return json({ status: 'ok' });
-      if (path === `${PREFIX}/api/items` && req.method === 'POST') return await create(dataDir, await body(req));
-      if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dataDir);
+      if (path === `${PREFIX}/api/items` && req.method === 'POST') { const data = await body(req); const target = captureTarget(data, dataDir, req, options.projects); return await create(target.dir, data, target.unmatched); }
+      if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(routesByUrl(options.projects) && !new URL(req.url).searchParams.has('project') ? options.projects!.map(project => project.dir) : dataDir);
       const match = path.match(/^\/__feedback\/api\/items\/([^/]+)\/([^/]+)$/);
-      if (match) return await itemRoute(req, dataDir, match[1]!, match[2]!);
+      if (match) return await itemRoute(req, await folderOfItem(match[1]!, dataDir, req, options.projects), match[1]!, match[2]!);
       const uploaded = await uploadsRoute(req, dataDir, path, body, options);
       if (uploaded) return uploaded;
       const threads = await threadRoute(req, dataDir, path, body, areas, options);
@@ -707,8 +751,7 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
   files.validateLimits(env);
   const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env }, extra: pairRoutes(pairingFor(feedbackDir), { host: env.FEEDBACK_HOST ?? null, allowedHosts: env.FEEDBACK_ALLOWED_HOSTS ?? '' }) });
-  // Only the names we expect (see hosts.ts) reach the handler: a rebinding page cannot talk to the inbox under its own name. The remote listener has its own Host check (remote.ts) and marks the requests it lets through. The remote listener has its own
-  // Host check (remote.ts) and marks the requests it lets through.
+  // Only the names we expect (see hosts.ts) reach the handler: a rebinding page cannot talk to the inbox under its own name. The remote listener has its own Host check (remote.ts) and marks the requests it lets through.
   const guarded = async (req: Request, server?: ServerLike) => (hostAllowed(req, env) || hostChecked(req) ? fetch(req, server) : hostRefusal());
   return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch: guarded };
 }

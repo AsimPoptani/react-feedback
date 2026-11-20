@@ -48,6 +48,7 @@ import { createShare, readShares, revokeShare, sharePill, statsFor, type Expiry 
 import { loadProjects, projectById } from './projects';
 import { describeMove, moveThreadToProject } from './move-project';
 import { devicesCommand } from './pair';
+import { lintMessage, promiseItem, promisesIn } from './lint';
 import { attachmentPath, cancelUpload, checkAttachmentIds, MAX_ATTACHMENTS, stagePath } from './files';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
@@ -87,6 +88,9 @@ const USAGE = `Usage:
   react-feedback ask-cancel <id> <qid> [--reason "why"]   (withdraw an unanswered question)
   react-feedback ask-bump <id> <qid>   (re-ask it at the bottom of the thread)
   react-feedback ask-expire <id> [<qid>|--all-mine]   (mark your open questions expired, for when a session ends; --all-mine without an id covers every thread)
+  react-feedback split <id> <message-id> --title "Title"   (move a message and its replies into a new thread)
+  (ask|ask-new) ... --recommend <option number>   (mark the option you would pick)   reply ... --promise "I'll ..."   (an agent checklist item)
+  merge, move, move-project, ask-cancel and split refuse while the person is typing in the thread; --force overrides
   react-feedback artifact publish <id> <file.html|file.md> --title "Title" [--id <artifact>]
   react-feedback artifact list [<id>]
   react-feedback artifact suggest-share <artifact>
@@ -95,10 +99,11 @@ const USAGE = `Usage:
   react-feedback mcp   (an MCP server on stdio; FEEDBACK_AGENT_NAME names the agent)
   --project <id> or FEEDBACK_PROJECT selects a project (FEEDBACK_PROJECTS); the default is the first`;
 
-function split(args: string[]): { words: string[]; images: string[]; files: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string> } {
+function split(args: string[]): { words: string[]; images: string[]; files: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string>; recommend: number[]; promises: string[] } {
   const words: string[] = [], images: string[] = [], files: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
   let avatar: string | null = null, window: string | null = null, to: string | null = null, owner: string | null = null;
   const named: Record<string, string> = {};
+  const recommend: number[] = [], promises: string[] = [];
   let collecting = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -114,6 +119,13 @@ function split(args: string[]): { words: string[]; images: string[]; files: stri
       if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else if (arg === '--todo') todos.push(value); else if (arg === '--check') checks.push(value); else if (arg === '--for') owner = value; else avatar = value;
       collecting = false; continue;
     }
+    if (arg === '--recommend' || arg === '--promise') {
+      const value = args[++i];
+      if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
+      if (arg === '--promise') promises.push(value);
+      else { const n = Number(value); if (!Number.isInteger(n) || n < 1) throw new store.Invalid('--recommend takes the number of an option, counting from 1'); recommend.push(n); }
+      collecting = false; continue;
+    }
     if (arg === '--name' || arg === '--label' || arg === '--help-url' || arg === '--reason' || arg === '--every' || arg === '--after-replies' || arg === '--idle' || arg === '--say' || arg === '--title' || arg === '--id' || arg === '--expires') {
       const value = args[++i];
       if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
@@ -122,11 +134,12 @@ function split(args: string[]): { words: string[]; images: string[]; files: stri
     if (arg.startsWith('--')) { flags.push(arg); collecting = false; continue; }
     (collecting ? images : words).push(arg);
   }
-  return { words, images, files, flags, options, avatar, window, to, todos, checks, owner, named };
+  return { words, images, files, flags, options, avatar, window, to, todos, checks, owner, named, recommend, promises };
 }
-function question(prompt: string, options: string[], flags: string[], expires?: string): store.QuestionInput {
+function question(prompt: string, options: string[], flags: string[], expires?: string, recommend: number[] = []): store.QuestionInput {
+  if (recommend.some(n => n > options.length)) throw new store.Invalid('--recommend names an option that is not there');
   return { prompt, multi: flags.includes('--multi'), allow_other: !flags.includes('--no-other'), ...(expires !== undefined ? { expires } : {}),
-    options: options.map(o => { const [label, ...rest] = o.split('|'); return { label: label!.trim(), ...(rest.length ? { description: rest.join('|').trim() } : {}) }; }) };
+    options: options.map((o, i) => { const [label, ...rest] = o.split('|'); return { label: label!.trim(), ...(rest.length ? { description: rest.join('|').trim() } : {}), ...(recommend.includes(i + 1) ? { recommended: true } : {}) }; }) };
 }
 async function load(paths: string[]): Promise<store.Image[]> {
   if (paths.length > store.MAX_IMAGES) throw new store.Invalid(`At most ${store.MAX_IMAGES} images per message`);
@@ -234,7 +247,7 @@ function takeProject(args: string[]): { args: string[]; project?: string } {
   return { args: out, project };
 }
 // `path` is the thread's folder: with it, each attachment is listed with the absolute path of its file.
-export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null; path?: string }
+export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null; path?: string; reactions?: store.Reactions }
 export function transcript(messages: store.Message[], names: Record<store.MessageAuthor, string> = { user: 'user', agent: 'agent', viewer: 'viewer' }, extra: TranscriptExtra = {}): string {
   const byId = new Map(messages.map(m => [m.id, m]));
   const itemText = (id: string) => `${id}${extra.items?.find(i => i.id === id) ? ` ${extra.items.find(i => i.id === id)!.text}` : ''}`;
@@ -252,7 +265,9 @@ export function transcript(messages: store.Message[], names: Record<store.Messag
     const asked = m.question && !m.redacted && !m.divider ? questionNote(messages, m.question) : [];
     const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}${m.secret.check === 'rejected' ? ', but the provider rejected it' : ''}` : 'not saved yet'}]`] : [];
     const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
-    const text = `${m.id}  ${m.author === 'user' ? 'user ' : m.author === 'viewer' ? 'viewer' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[...viewer, ...(own ? [own] : []), body, ...asked, ...attachments, ...secret, ...attached].join('\n')}`;
+    const reacted = Object.keys(extra.reactions?.[m.id] ?? {}).map(r => (r === 'done' ? 'Done, close it' : 'thumbs up'));
+    const reaction = reacted.length ? [`  [you reacted: ${reacted.join(', ')}]`] : [];
+    const text = `${m.id}  ${m.author === 'user' ? 'user ' : m.author === 'viewer' ? 'viewer' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[...viewer, ...(own ? [own] : []), body, ...asked, ...attachments, ...secret, ...attached, ...reaction].join('\n')}`;
     return pad ? text.split('\n').map(l => `${pad}${l}`).join('\n') : text;
   };
   const groups = asideGroups(messages, extra.acked ?? null);
@@ -336,15 +351,21 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     const id = env.FEEDBACK_PROJECT?.trim();
     dir = id ? projectById(projects, id).dir : projects[0]!.dir;
   }
-  const { words, images, files, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
+  const { words, images, files, flags, options, avatar, window, to, todos: addTodos, checks, owner, named, recommend, promises } = split(rest);
+  const guard: store.TypingGuard = { force: flags.includes('--force') };
   let me: string | undefined;
   try { me = store.checkAgentName(env.FEEDBACK_AGENT_NAME); } catch { /* an unusable name: the unnamed agent */ }
   if (command === 'devices') return devicesCommand(dir, words); // an owner's command, not the agent being here: no presence
   if (!(command === 'move-project' && flags.includes('--dry-run'))) await store.touchPresence(dir, { agent: me }); // any command is the agent being here, under its own name. A dry run must not write.
   if (command === 'todo') return todo(dir, words);
   if (command === 'merge' && words.length === 2) {
-    const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent');
+    const r = await store.mergeThreads(dir, words[0]!, words[1]!, 'agent', undefined, guard);
     return r.merged ? `Merged ${words[0]} into ${words[1]}` : `${words[0]} was already merged into ${words[1]}`;
+  }
+  if (command === 'split' && words.length === 2) {
+    if (!named.title) throw new store.Invalid('split needs --title "Title" for the new thread');
+    const r = await store.splitThread(dir, words[0]!, words[1]!, named.title, 'agent', guard);
+    return `Split ${r.moved.join(' ')} from ${words[0]} into ${r.id} (${named.title})`;
   }
   if (command === 'repair-merged' && words.length === 0) {
     const dry = flags.includes('--dry-run');
@@ -354,14 +375,14 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   }
   if (command === 'move' && words.length >= 2) {
     if (!to) throw new store.Invalid('move needs --to <thread>');
-    const r = await store.moveMessages(dir, words[0]!, words.slice(1), to, 'agent');
+    const r = await store.moveMessages(dir, words[0]!, words.slice(1), to, 'agent', undefined, guard);
     return r.moved.length ? `Moved ${r.moved.join(' ')} from ${words[0]} to ${to}` : `Those messages were already moved to ${to}`;
   }
   if (command === 'move-project' && words.length === 2) {
     const projects = loadProjects(env);
     const from = projects.find(project => resolve(project.dir) === resolve(dir));
     if (!from) throw new store.Invalid('This directory is not one of FEEDBACK_PROJECTS', 404);
-    return describeMove(await moveThreadToProject({ projects, from: from.id, to: words[1]!, thread: words[0]!, dryRun: flags.includes('--dry-run'), vault: loadVaultDir(env) }));
+    return describeMove(await moveThreadToProject({ projects, from: from.id, to: words[1]!, thread: words[0]!, dryRun: flags.includes('--dry-run'), vault: loadVaultDir(env), force: guard.force }));
   }
   if (command === 'ask-secret' && words.length === 1) {
     if (!named.name || !named.label) throw new store.Invalid('ask-secret needs --name and --label');
@@ -399,12 +420,14 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     let message: store.Message;
     try {
       message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], images: await load(images), ...(staged.ids.length ? { attachments: staged.ids } : {}), flag: flagOf(flags), reply_to: to ?? undefined, ...(aside ? { aside: true } : {}),
-        ...(addTodos.length ? { add_items: addTodos.map(text => ({ owner: owner ?? 'agent', text })) } : {}), ...(checks.length ? { check_items: checks } : {}) });
+        ...(addTodos.length || promises.length ? { add_items: [...addTodos.map(text => ({ owner: owner ?? 'agent', text })), ...promises.map(text => ({ owner: 'agent', text }))] } : {}), ...(checks.length ? { check_items: checks } : {}) });
     } catch (error) { await staged.drop(); throw error; }
     const thread = message.forwarded_to ?? words[0]!;
     const closed = message.flag === 'done' ? ((await store.readStatus(await store.itemDir(dir, thread))) === 'done' ? ', thread closed' : ', thread left open: the user still has open items') : '';
     const extras = `${aside ? `, side answer to ${message.reply_to}` : ''}${message.added_items ? `, added ${message.added_items.join(' ')}` : ''}${message.ticked_items ? `, ticked ${message.ticked_items.join(' ')}` : ''}`;
     const via = message.forwarded_to ? `; forwarded from ${words[0]}` : '';
+    for (const warning of lintMessage({ text: words[1]! }, env)) notice(`warning: ${warning}`);
+    if (!aside && !addTodos.length && !promises.length) for (const clause of promisesIn(words[1]!, 2)) notice(`You promised "I'll ${clause}": add it to the checklist with --promise "${promiseItem(clause).replace(/"/g, "'")}"`);
     await reminders.checkAfterReply(dir, thread);
     const open = !aside && !addTodos.length && !checks.length ? await reminders.openAgentItems(dir, thread) : [];
     if (open.length) notice(`${open.length} open item${open.length === 1 ? '' : 's'} here; tick any you shipped with --check cN (open: ${open.map(i => i.id).join(' ')})`);
@@ -414,11 +437,12 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     await store.markAgentRead(dir, words[0]!);
     const { messages, summary, path, item } = await store.summarise(dir, words[0]!);
     for (const line of (await presenceText(dir, me)).split('\n').filter(Boolean)) notice(line);
+    if (await store.isTyping(dir, words[0]!)) notice('The person is typing in this thread right now: a withdraw, merge or move is refused for a few seconds (--force overrides).');
     const captured = captureLines(item);
-    return `Marked ${words[0]} read${captured ? `\n\n${captured}` : ''}${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through, path })}` : ''}`;
+    return `Marked ${words[0]} read${captured ? `\n\n${captured}` : ''}${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through, path, reactions: await store.readReactions(path) })}` : ''}`;
   }
   if (command === 'ask-cancel' && words.length === 2) {
-    const result = await store.cancelQuestion(dir, words[0]!, words[1]!, named.reason);
+    const result = await store.cancelQuestion(dir, words[0]!, words[1]!, named.reason, guard);
     return result.withdrawn ? `Withdrew ${words[1]} on ${words[0]}` : `${words[1]} on ${words[0]} was already withdrawn`;
   }
   if (command === 'ask-expire') {
@@ -438,11 +462,16 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
   }
   if (command === 'artifact') return artifactCommand(dir, words, named, flags, me);
   if (command === 'ask' && words.length === 2) {
-    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags, named.expires), flag: flagOf(flags), reply_to: to ?? undefined, ...(me ? { agent_name: me } : {}) });
+    const asked = question(words[1]!, options, flags, named.expires, recommend);
+    const before = (await store.summarise(dir, words[0]!).catch(() => null))?.messages;
+    const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: asked, flag: flagOf(flags), reply_to: to ?? undefined, ...(me ? { agent_name: me } : {}) });
+    for (const warning of lintMessage({ text: words[1]!, asking: { options: asked.options }, ...(before ? { messages: before } : {}) }, env)) notice(`warning: ${warning}`);
     return `Asked on ${words[0]} (${message.id}, question ${message.question!.id})`;
   }
   if (command === 'ask-new' && words.length === 2) {
-    const { id } = await store.createThread(dir, { title: words[0], text: words[1], origin: 'agent', question: question(words[1]!, options, flags, named.expires), flag: flagOf(flags), ...(me ? { agent_name: me } : {}) });
+    const asked = question(words[1]!, options, flags, named.expires, recommend);
+    const { id } = await store.createThread(dir, { title: words[0], text: words[1], origin: 'agent', question: asked, flag: flagOf(flags), ...(me ? { agent_name: me } : {}) });
+    for (const warning of lintMessage({ text: words[1]!, asking: { options: asked.options } }, env)) notice(`warning: ${warning}`);
     return `Started ${id} (question q1)`;
   }
   if (command === 'profile' && words.length === 1 && words[0] === 'agent' && avatar) {

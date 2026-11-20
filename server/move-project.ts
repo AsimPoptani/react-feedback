@@ -11,9 +11,9 @@ import { projectById, type Project } from './projects';
 import { isActive, readShares, transferShares, type Share } from './shares';
 import { replayFolder, stageReplays } from './replay';
 import { checkVault, copyVaultEntry, removeVaultEntry } from './sensitive';
-import { ID, Invalid, itemDir, logEvent, materialise, newId, optional, readItem, readPins, setPin, summarise, withLock, writeAtomic } from './store';
+import { ID, Invalid, assertNotTyping, itemDir, logEvent, materialise, newId, optional, readItem, readPins, setPin, summarise, withLock, writeAtomic } from './store';
 
-export interface MoveInput { projects: Project[]; from: string; to: string; thread: string; dryRun?: boolean; vault?: string | null }
+export interface MoveInput { projects: Project[]; from: string; to: string; thread: string; dryRun?: boolean; vault?: string | null; force?: boolean }
 export interface MoveProjectResult {
   moved: boolean; dryRun: boolean; id: string; fromId: string; from: string; to: string; fromName: string; toName: string;
   threads: { from: string; to: string }[]; artifacts: { from: string; to: string }[]; shares: number; views: number; redacted: number;
@@ -430,6 +430,7 @@ export async function moveThreadToProject(input: MoveInput): Promise<MoveProject
     const title = await summarise(from.dir, parent).then(result => result.summary.title, () => parent);
     throw new Invalid(`This thread was merged into ${title}; move that one instead`, 409);
   }
+  if (!input.dryRun) await assertNotTyping(from.dir, [input.thread], { force: input.force });
   if (input.dryRun) return planResult(from, to, input.thread, await buildPlan(from, to, input.thread, existing), false, true);
   const paths = (await movedSet(from.dir, input.thread)).map(id => join(from.dir, id));
   return withLocks(paths, async () => {

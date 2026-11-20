@@ -255,6 +255,34 @@ button.primary kbd { color: var(--paper); border-color: currentColor; background
 .qclosed .qlink { flex-shrink: 0; white-space: nowrap; }
 .qclosed .qsum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qcard .qlink { color: var(--teal); text-decoration: underline; background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
+/* Working together: recommended options, checkboxes for multi, the hint when an option and Other would clash, a pending offline answer, reactions, kept answers, the cross-project list. */
+.qopt .rec { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; border: 1px solid var(--teal); color: var(--teal); border-radius: 999px; padding: 0 7px; margin-left: 4px; vertical-align: 1px; }
+label.qopt { cursor: pointer; border: 2px solid var(--ink); border-radius: 10px; padding: 8px 10px; background: var(--white); min-height: 44px; }
+label.qopt.qcheck input[type="checkbox"] { width: 22px; height: 22px; flex: none; margin: 1px 2px 0 0; accent-color: var(--teal); }
+label.qopt.qcheck:has(input:checked) { background: var(--teal-tint); border-color: var(--teal); }
+label.qopt.qcheck:has(input:focus-visible) { outline: 3px solid var(--teal); outline-offset: 2px; }
+.qhint { margin: 8px 0 0; font-size: 13px; color: var(--ink-2); }
+.qpending { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; font-size: 14px; font-weight: 700; color: var(--ink-2); }
+.qpending .clock { flex: none; }
+.reacts { display: flex; gap: 6px; margin-top: 6px; }
+.react { min-height: 34px; padding: 2px 10px; border-width: 1px; border-radius: 999px; font-size: 14px; background: transparent; }
+.react[aria-pressed="true"] { background: var(--teal-tint); border-color: var(--teal); }
+.kept-answers { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.kept-answers[hidden] { display: none; }
+.qkept { flex: 1 1 12rem; min-height: 44px; }
+.close-done { margin: 8px 14px 0; min-height: 36px; border-width: 1px; font-weight: 700; }
+.close-done[hidden] { display: none; }
+.chip-move { min-height: 34px; padding: 2px 12px; border-radius: 999px; border-width: 1px; background: var(--teal-tint); border-color: var(--teal); font-weight: 700; flex: none; }
+.chip-move[hidden] { display: none; }
+.waiting-all[data-count="0"] .count { display: none; }
+.waiting-all:not([data-count="0"]) { border-color: var(--berry); }
+.wa-list { max-height: 60dvh; overflow-y: auto; overscroll-behavior: contain; }
+.wa-group h3 { margin: 12px 0 4px; font-size: 14px; color: var(--ink-2); }
+.wa-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.wa-row { width: 100%; text-align: left; display: grid; gap: 2px; min-height: 44px; padding: 8px 10px; border-width: 1px; border-radius: 10px; }
+.wa-kind { font: 700 11px var(--f-mono); text-transform: uppercase; color: var(--berry); }
+.wa-title { font-weight: 700; overflow-wrap: anywhere; }
+.wa-text { color: var(--ink-2); font-size: 13px; overflow-wrap: anywhere; }
 .qrescue { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 .qrescue .qother { margin-top: 0; flex: 1 1 12rem; }
 .light-wrap { position: relative; }
@@ -487,6 +515,16 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 .secret .secret-slot { font-weight: 400; font-family: var(--f-mono); font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
 .secret .secret-note { color: var(--ink-2); font-size: 13px; margin: 6px 0 0; }
 .secret .error { margin: 6px 0 0; font-size: 14px; }
+/* Copy: a small icon beside Reply on a wide screen; on a phone it is in the message's ⋯ menu, and a long press keeps its native text selection. */
+.msg, .msg .md, .msg p { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+.msg .who button { -webkit-user-select: none; user-select: none; }
+.msg .who .copy-btn { margin-left: auto; min-height: 28px; min-width: 28px; padding: 0 6px; border-width: 1px; border-radius: 999px; opacity: 0; display: inline-flex; align-items: center; justify-content: center; }
+.msg .who .copy-btn + .reply-btn { margin-left: 0; }
+.msg:hover .copy-btn, .msg:focus-within .copy-btn, .msg:focus .copy-btn { opacity: 1; }
+@media (hover: none) { .msg .who .copy-btn { display: none; } .msg .who .copy-btn ~ .reply-btn { margin-left: auto; } }
+.msg-actions { margin-left: 0; min-height: 28px; min-width: 28px; padding: 0 8px; border-width: 1px; border-radius: 999px; font-size: 16px; line-height: 1; opacity: 0; }
+.msg:hover .msg-actions, .msg:focus-within .msg-actions, .msg:focus .msg-actions { opacity: 1; }
+@media (hover: none) { .msg-actions { opacity: 1; min-height: 32px; } }
 .msg-more { margin-left: 0; min-height: 28px; min-width: 28px; padding: 0 8px; border-width: 1px; border-radius: 999px; font-size: 16px; line-height: 1; opacity: 0; }
 .msg:hover .msg-more, .msg:focus-within .msg-more, .msg:focus .msg-more { opacity: 1; }
 @media (hover: none) { .msg-more { opacity: 1; min-height: 32px; } }
@@ -500,7 +538,9 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 .popmenu .ver { border-top: 1px solid var(--rule); margin-top: 4px; font-size: 12px; text-align: center; overflow-wrap: anywhere; }
 button.danger { background: var(--berry); border-color: var(--berry); color: #fff; }
 .cl-btn .cl-n:empty { display: none; }
-@media (hover: none) and (pointer: coarse) { kbd, #help { display: none; } [data-react-feedback-root] .fb-launchers { display: none; } .composer { padding-bottom: calc(8px + env(safe-area-inset-bottom)) !important; } } /* touch: no floating launcher (it sat over the text); Feedback on this page is in the header's ⋯ menu */
+@media (hover: none) and (pointer: coarse) { kbd, #help { display: none; } [data-react-feedback-root] .fb-launchers { display: none; } .composer { padding-bottom: 10px !important; } }
+/* A phone in a normal browser tab: the browser already keeps the page clear of its own toolbar and the home indicator, so the composer sits 10px from the bottom. The inset is added only when the page is installed (standalone or fullscreen), where nothing else does. */
+@media (display-mode: standalone), (display-mode: fullscreen) { .composer { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)) !important; } } /* touch: no floating launcher (it sat over the text); Feedback on this page is in the header's ⋯ menu */
 /* Phone: one slim header, a one-line composer, and the page follows the visual viewport so an open keyboard leaves the list its height. */
 @media (max-width: 759px) {
   body { position: fixed; left: 0; right: 0; top: var(--vvt, 0px); height: var(--vvh, 100dvh); }
@@ -528,14 +568,14 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
   .composer #send { grid-area: send; width: 44px; height: 44px; padding: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
   .composer #send .send-label, .composer #send kbd { display: none; }
   .composer #send .send-arrow { display: block; }
-  html.kb .composer { padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+  html.kb .composer { padding-bottom: 8px; }
   body:has(#composer:focus-within) [data-react-feedback-root], body:has(#popmenu:not([hidden])) [data-react-feedback-root], html.kb [data-react-feedback-root] { display: none; }
   html.kb #open > .thread-head { min-height: 40px; padding-top: 0; padding-bottom: 0; }
   html.kb #open > .thread-head h2 { font-size: 15px; }
   .secret .secret-row { flex-wrap: wrap; }
 }
 /* The strip under the composer keeps the Feedback launcher clear; with a keyboard (or any short screen) there is no room for it, and the launcher hides. It never changes on focus, so a tap on a button cannot move the button. */
-@media (max-width: 759px) and (max-height: 520px) { .composer { padding-bottom: calc(8px + env(safe-area-inset-bottom)); } }
+@media (max-width: 759px) and (max-height: 520px) { .composer { padding-bottom: 10px; } }
 .send-arrow { display: none; }
 @media (min-width: 760px) { .composer #send .send-arrow { display: none; } }
 #threads, #groups, .scroll, .cl-body, .merge-list, .metrics-body, .composer textarea, .cl-panel { overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
@@ -641,7 +681,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     </div>
     <header>
       <button type="button" class="icon-btn side-toggle" id="side-toggle" aria-expanded="true" aria-controls="app" aria-label="Collapse sidebar" title="Collapse sidebar ([)"><span aria-hidden="true">&laquo;</span></button><div class="brand"><h1 id="app-title">Feedback inbox</h1></div>
-      <span style="display:flex;gap:6px;align-items:center"><button type="button" class="icon-btn" id="help" aria-label="Keyboard shortcuts"><kbd data-keys="?" style="margin:0">?</kbd></button><button type="button" class="primary" id="new-thread" aria-label="New thread">New thread<kbd data-keys="N">N</kbd></button></span>
+      <span style="display:flex;gap:6px;align-items:center"><button type="button" class="icon-btn waiting-all" id="waiting-all" aria-haspopup="dialog" aria-label="Waiting on you, across every project">Waiting<span class="count" id="waiting-all-count"></span></button><button type="button" class="icon-btn" id="help" aria-label="Keyboard shortcuts"><kbd data-keys="?" style="margin:0">?</kbd></button><button type="button" class="primary" id="new-thread" aria-label="New thread">New thread<kbd data-keys="N">N</kbd></button></span>
     </header>
     <span class="rail-unread" id="rail-unread" role="status" hidden></span>
     <div class="search"><label class="sr" for="search">Search threads</label><input type="search" id="search" placeholder="Search titles and messages" autocomplete="off"><kbd data-keys="mod+K">K</kbd></div>
@@ -654,6 +694,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
       <button type="button" data-filter="open" aria-pressed="false">Open</button>
       <button type="button" data-filter="done" aria-pressed="false">Done</button>
     </div>
+    <button type="button" class="close-done" id="close-done" hidden>Close all done threads</button>
     <div id="groups"></div>
     <p class="empty" id="list-empty" hidden>No threads here.</p>
     <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.10.0</span></div><p class="rec" id="rec-dot" role="status" hidden><span aria-hidden="true">●</span> Recording</p><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
@@ -720,6 +761,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
         <h2 id="title"></h2>
         <span class="rec-mini" id="rec-mini" role="status" aria-label="Recording" title="Recording" hidden>&#9679;</span>
         <span class="flag upd" id="ro-badge" hidden>Updates</span>
+        <button type="button" id="move-chip" class="chip-move" hidden></button>
         <button type="button" id="pin-thread" class="desk" aria-pressed="false"></button>
         <button type="button" id="merge-open" class="desk">Merge into…</button>
         <button type="button" id="move-open" class="desk" hidden>Move to project…</button>
@@ -736,6 +778,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
             <section class="capture" id="capture" aria-label="Original capture" hidden></section>
             <div id="artifact-cards"></div>
             <div class="msgs" id="msgs" aria-live="polite"></div>
+            <div class="kept-answers" id="kept-answers" hidden></div>
           </div>
           <div class="waiting" id="waiting-bar" hidden></div>
           <p class="merged-note" id="merged-note" role="note" hidden></p>
@@ -905,6 +948,22 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
   <div id="merge-confirm" class="confirm" hidden><p id="merge-confirm-text"></p><div class="bar"><button type="button" id="merge-back">Back</button><button type="button" class="primary" id="merge-go">Merge</button></div></div>
   <p class="error" id="merge-error" role="alert" hidden></p>
   <div class="bar"><span class="grow"></span><button type="button" id="merge-cancel">Cancel<kbd data-keys="Esc">Esc</kbd></button></div>
+</dialog>
+<dialog id="waiting-all-dialog" aria-labelledby="wa-h">
+  <h2 id="wa-h">Waiting on you</h2>
+  <p class="hint">Every open question and needs-you item, in every project.</p>
+  <div id="waiting-all-list" class="wa-list"></div>
+  <div class="bar"><button type="button" id="waiting-all-close">Close</button></div>
+</dialog>
+<dialog id="nudge-dialog" aria-labelledby="nudge-h">
+  <form id="nudge-form">
+    <h2 id="nudge-h">Send as a new thread?</h2>
+    <p class="hint" id="nudge-why"></p>
+    <label for="nudge-title">Title</label>
+    <input type="text" id="nudge-title" maxlength="200" required>
+    <p class="error" id="nudge-error" role="alert" hidden></p>
+    <div class="bar"><button type="submit" class="primary" id="nudge-new">Send as a new thread</button><button type="button" id="nudge-here">Send here</button><button type="button" id="nudge-cancel">Keep editing</button></div>
+  </form>
 </dialog>
 <dialog id="new-dialog" aria-labelledby="new-h">
   <form id="new-form">

@@ -47,6 +47,7 @@ export function openStore() {
   };
 }
 
+// An entry may also be an answer to a question card: `answer` ({ question_id, option_ids, other_text? }) and `summary` (what to show on the card, like "Chose: Yes"); it is sent to the answer route with the same client id.
 // `post(entry)` sends one message and resolves `{ status }`; it throws when the network failed (no answer at all).
 // A 2xx removes the entry. A network error, 408, 429 or 5xx keeps it and backs off: nothing behind it goes first, so order holds.
 // Any other answer (the thread is read-only or gone, the message was refused) marks that one `failed` with a reason and the rest carry on.
@@ -55,7 +56,7 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
   const emit = () => onChange();
   const save = entry => { if (entries.includes(entry)) void store.put(snapshotOf(entry)).catch(() => {}); };
   // `files` are the files that go with the message: { name, size, type, blob } until each is uploaded (a Blob is kept in IndexedDB as it is), then also { id } (the server's upload id). `uploadId` keeps a half-finished upload resumable.
-  const snapshotOf = ({ cid, seq, thread, text, images, files, reply_to, quote, aside, written_at, state, reason }) => ({ cid, seq, thread, text, images, ...(files?.length ? { files } : {}), ...(reply_to ? { reply_to } : {}), ...(quote ? { quote } : {}), ...(aside ? { aside: true } : {}), written_at, state, ...(reason ? { reason } : {}) });
+  const snapshotOf = ({ cid, seq, thread, text, images, files, reply_to, quote, aside, answer, summary, written_at, state, reason }) => ({ cid, seq, thread, text, images, ...(answer ? { answer, summary } : {}), ...(files?.length ? { files } : {}), ...(reply_to ? { reply_to } : {}), ...(quote ? { quote } : {}), ...(aside ? { aside: true } : {}), written_at, state, ...(reason ? { reason } : {}) });
   const loading = (async () => {
     persistent = await store.ready;
     const records = await store.load().catch(() => []);
@@ -98,7 +99,7 @@ export function createOutbox({ store = openStore(), post, canSend = () => true, 
     async add(input) {
       await loading;
       last = Math.max(now(), last + 1);
-      const entry = { cid: input.cid || newCid(), seq: last, thread: input.thread, text: input.text ?? '', images: input.images ?? [], ...(input.files?.length ? { files: input.files } : {}), ...(input.reply_to ? { reply_to: input.reply_to } : {}), ...(input.quote ? { quote: input.quote } : {}), ...(input.aside ? { aside: true } : {}),
+      const entry = { cid: input.cid || newCid(), seq: last, thread: input.thread, text: input.text ?? '', images: input.images ?? [], ...(input.answer ? { answer: input.answer, summary: input.summary ?? '' } : {}), ...(input.files?.length ? { files: input.files } : {}), ...(input.reply_to ? { reply_to: input.reply_to } : {}), ...(input.quote ? { quote: input.quote } : {}), ...(input.aside ? { aside: true } : {}),
         written_at: input.written_at || new Date(now()).toISOString(), state: 'queued', attempts: 0, nextAt: 0, sending: false };
       entries.push(entry);
       await store.put(snapshotOf(entry)).catch(() => {});
