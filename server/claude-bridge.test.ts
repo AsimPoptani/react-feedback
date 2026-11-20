@@ -13,7 +13,7 @@ import { createMcpServer } from './mcp';
 import { defaultDir } from './cli';
 import { clean, fence, MAX_WAKE } from './wake';
 import { hostAllowed } from './hosts';
-import { serverOptions } from './server';
+import { createHandler, serverOptions } from './server';
 import { proxyOptions } from './proxy';
 import { shellQuote } from './claude-code';
 
@@ -377,4 +377,45 @@ test('a malformed Host is a 403, never an error, and IPv6 only counts in bracket
     for (const host of ['attacker.test:abc', 'a.example, b.example']) expect(await rawGet(srv.port!, '/__feedback/api/threads', host)).toContain(' 403 ');
     expect(await rawGet(srv.port!, '/__feedback/api/threads')).toContain(' 200 ');
   } finally { srv.stop(true); }
+});
+
+// ---- the Host rules on the local and the remote listener (0.13 pairing and remote mode)
+test('the remote listener answers to the public host and a paired device, the local one keeps its own rules', async () => {
+  const { Pairing } = await import('./pair');
+  const { pairRoutes } = await import('./pair-routes');
+  const { createRemoteHandler } = await import('./remote');
+  const { hostOfUrl } = await import('./hosts');
+  const pairing = new Pairing(dir);
+  pairing.remote = { on: true, publicUrl: 'https://phone.example.test', source: 'env' };
+  const env = { FEEDBACK_DIR: dir };
+  const opts = serverOptions(env); // the guarded local handler
+  const local = createHandler(dir, undefined, { extra: pairRoutes(pairing) });
+  void local;
+  const state = { publicUrl: 'https://phone.example.test' as string | null };
+  const remote = createRemoteHandler(opts.fetch, pairing, { publicUrl: () => state.publicUrl, hostGuard: env });
+  const { token } = await pairing.create('Test phone');
+  const at = (host: string, path = '/__feedback/api/threads', cookie = true) => remote(new Request(`https://${host}${path}`, { headers: { host, ...(cookie ? { Cookie: `rf_device=${token}` } : {}) } }));
+  expect(hostOfUrl('https://phone.example.test/x')).toBe('phone.example.test');
+  expect((await at('phone.example.test')).status).toBe(200); // public host and a valid device
+  expect((await at('attacker.example')).status).toBe(403); // wrong host, valid device
+  expect((await at('phone.example.test', '/__feedback/api/threads', false)).status).toBe(401); // right host, no device
+  state.publicUrl = 'https://abc-def-ghi.trycf.example'; // a tunnel's address learned later
+  expect((await at('abc-def-ghi.trycf.example')).status).toBe(200);
+  expect((await at('phone.example.test')).status).toBe(403);
+  expect((await at('localhost:8100')).status).toBe(200); // a name the local listener accepts too
+  // the local listener is unchanged: the public host is not one of its names
+  const get = (host: string) => opts.fetch(new Request(`http://${host}/__feedback/api/threads`, { headers: { host } }));
+  expect((await get('phone.example.test')).status).toBe(403);
+  expect((await get('localhost:8099')).status).toBe(200);
+  const named = serverOptions({ ...env, FEEDBACK_ALLOWED_HOSTS: 'feedback' });
+  expect((await named.fetch(new Request('http://feedback/__feedback/api/threads', { headers: { host: 'feedback' } }))).status).toBe(200);
+});
+
+test('the pairing routes use the same Host rules as everything else (one implementation)', async () => {
+  const { Pairing } = await import('./pair');
+  const { pairRoutes } = await import('./pair-routes');
+  const h = createHandler(dir, undefined, { extra: pairRoutes(new Pairing(dir), { allowedHosts: 'Box.Lan, other.lan:8099' }) });
+  const call = (host: string) => h(new Request('http://x/__feedback/api/devices', { headers: { host } }));
+  for (const ok of ['box.lan', 'other.lan:1', '[::1]:8099', 'localhost']) expect((await call(ok)).status).toBe(200);
+  for (const bad of ['evil.test', 'attacker.test:abc', '::1', 'box.lan, evil.test']) expect((await call(bad)).status).toBe(403);
 });

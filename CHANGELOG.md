@@ -3,7 +3,7 @@
 ## 0.14.0
 
 ### Breaking
-- **The server now refuses unexpected `Host` names** (DNS rebinding protection). It answers only to `localhost`, `*.localhost`, IP addresses, `FEEDBACK_HOST` and the names in the new `FEEDBACK_ALLOWED_HOSTS` (comma-separated); anything else gets 403 with a message naming the variable. **A custom domain, a tunnel host or a Docker service name (for example `feedback`) must be added to `FEEDBACK_ALLOWED_HOSTS`.** Share links are exempt. The allowed names are logged at startup.
+- **The server now refuses unexpected `Host` names** (DNS rebinding protection). It answers only to `localhost`, `*.localhost`, IP addresses, `FEEDBACK_HOST` and the names in the new `FEEDBACK_ALLOWED_HOSTS` (comma-separated); anything else gets 403 with a message naming the variable. **A custom domain, a tunnel host or a Docker service name (for example `feedback`) must be added to `FEEDBACK_ALLOWED_HOSTS`.** Share links are exempt. The allowed names are logged at startup. The pairing and device routes use the same check (one implementation, `server/hosts.ts`), with stricter parsing: IPv6 only in brackets, and a malformed Host is a 403. The remote listener answers only to the `FEEDBACK_PUBLIC_URL` host (or the quick tunnel's, once known) or a name the local listener accepts, on top of the device cookie.
 
 ### Added
 - **Claude Code sessions as threads** (`react-feedback claude-code`). Hooks give every Claude Code session its own thread. Your prompts and Claude's turn-end replies are mirrored in, and an `asyncRewake` Stop hook wakes the session when you write in its thread from the inbox, even when it is idle. Each thread is grouped by folder through `context.url = /claude/<folder>`. `id`, `title` and `flag` work from inside a session. A key saved in the key box wakes the session that asked.
@@ -25,6 +25,7 @@
 - A thread the session follows that is merged into one it does not follow no longer goes quiet: the session follows the target too, from the merge on. Merge chains are followed.
 
 ### Changed
+- The service worker cache is `fb-inbox-0.14.0`.
 - A thread that carries a `context.url` is grouped by the area rules like a capture. Threads without one still go under Conversations.
 - New environment variables: `FEEDBACK_ORIGIN_MAP`, `FEEDBACK_CLAIM_CONVERSATIONS`, `REACT_FEEDBACK_CLAUDE=off` and `FEEDBACK_URL` (where the proxy sends `/__feedback`). `FEEDBACK_PROJECTS` stays the server's project list.
 

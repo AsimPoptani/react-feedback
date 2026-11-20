@@ -18,11 +18,17 @@ export function allowedNames(env: Record<string, string | undefined> = process.e
   const own = hostName(env.FEEDBACK_HOST);
   return [...(own ? [own] : []), ...(env.FEEDBACK_ALLOWED_HOSTS ?? '').split(',').map(x => hostName(x)).filter(Boolean)];
 }
+// Requests the remote listener (remote.ts) has already checked against its own Host rules and a device cookie: the local guard lets exactly those objects through.
+const checked = new WeakSet<Request>();
+export const markHostChecked = (req: Request) => { checked.add(req); };
+export const hostChecked = (req: Request) => checked.has(req);
+// The host of a URL such as FEEDBACK_PUBLIC_URL, as a Host header names it.
+export const hostOfUrl = (url: string | null | undefined): string => { try { return url ? hostName(new URL(url).host) : ''; } catch { return ''; } };
 // Never throws: a header that cannot be read is a refusal.
 export function hostAllowed(req: Request, env: Record<string, string | undefined> = process.env): boolean {
   try {
     if (SHARE.test(new URL(req.url).pathname)) return true;
-    const host = parseHost(req.headers.get('host'));
+    const host = parseHost(req.headers.get('host') ?? new URL(req.url).host); // no Host header (HTTP/1.0): the address the server saw
     if (!host) return false;
     if (host.ip || host.name === 'localhost' || host.name.endsWith('.localhost')) return true;
     return allowedNames(env).includes(host.name);

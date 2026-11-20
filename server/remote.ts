@@ -10,6 +10,7 @@ import { Invalid } from './store';
 import { Limiter, clientKey, type ServerLike } from './limits';
 import { CODE_SHAPE, COOKIE_NAME, DEVICE_TTL_MS, deviceName, pairingFor, type Pairing } from './pair';
 import { remoteRequests } from './pair-routes';
+import { hostAllowed, hostOfUrl, markHostChecked, parseHost } from './hosts';
 
 type Fetch = (req: Request, server?: ServerLike) => Promise<Response>;
 const PREFIX = '/__feedback';
@@ -96,6 +97,9 @@ export interface RemoteOptions {
   // The address the phone uses (FEEDBACK_PUBLIC_URL or the tunnel's), read at each request because a tunnel's arrives after start. Unset: the Host header decides.
   publicUrl?: () => string | null;
   clientIpHeader?: string;
+  // Turns the Host check on: the env that names FEEDBACK_HOST and FEEDBACK_ALLOWED_HOSTS. The remote listener then answers only to the public address's host (read at each request,
+  // as a tunnel's arrives late) or a name the local listener would accept, on top of the device cookie. Off by default.
+  hostGuard?: Record<string, string | undefined>;
 }
 export interface Remote { fetch: Fetch; pairing: Pairing }
 
@@ -110,6 +114,12 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: Rem
       const configured = options.publicUrl?.();
       return configured ? new URL(origin).origin === new URL(configured).origin : new URL(origin).host === req.headers.get('host');
     } catch { return false; }
+  }
+  function remoteHostOk(req: Request): boolean {
+    const host = parseHost(req.headers.get('host') ?? new URL(req.url).host);
+    if (!host) return false;
+    const pub = hostOfUrl(options.publicUrl?.());
+    return (!!pub && host.name === pub) || hostAllowed(req, options.hostGuard!);
   }
   const unpaired = (stale: boolean) => reply({ kind: 'unpaired', detail: 'This device is not paired. Scan a new QR code from the desktop inbox.' }, 401, stale ? { 'Set-Cookie': clearCookie(), 'Clear-Site-Data': '"cache", "storage"' } : {}); // a revoked phone drops what it kept
 
@@ -149,7 +159,8 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: Rem
 
   const handle: Fetch = async (req, server) => {
     const path = new URL(req.url).pathname, method = req.method;
-    if (isShareRoute(path, method)) return inner(req, server);
+    if (options.hostGuard && !remoteHostOk(req)) return reply({ kind: 'forbidden', detail: 'This host name is not allowed here. Use the public address, or list the name in FEEDBACK_ALLOWED_HOSTS.' }, 403);
+    if (isShareRoute(path, method)) { markHostChecked(req); return inner(req, server); }
     if (path === EXCHANGE && method === 'POST') return exchange(req, server);
 
     const token = cookieOf(req);
@@ -171,6 +182,7 @@ export function createRemoteHandler(inner: Fetch, pairing: Pairing, options: Rem
       request = new Request(req);
       remoteRequests.set(request, { device: auth.device.id });
     }
+    markHostChecked(request);
     const response = await inner(request, server);
     const out = new Response(response.body, response);
     if (auth.renewed && token) out.headers.append('Set-Cookie', deviceCookie(token)); // the sliding 30 days
@@ -254,7 +266,7 @@ export async function startRemote(local: { fetch: Fetch; maxRequestBodySize: num
   pairing.remote = { on: true, publicUrl: configured, source: configured ? 'env' : null };
   let tunnel: Tunnel | null = null;
   const fromTunnel = !configured && Bun.which('cloudflared', env.PATH ? { PATH: env.PATH } : {}) !== null;
-  const handler = createRemoteHandler(local.fetch, pairing, { publicUrl: () => state.publicUrl, ...(fromTunnel && !env.FEEDBACK_CLIENT_IP_HEADER?.trim() ? { clientIpHeader: 'cf-connecting-ip' } : {}) });
+  const handler = createRemoteHandler(local.fetch, pairing, { publicUrl: () => state.publicUrl, hostGuard: env, ...(fromTunnel && !env.FEEDBACK_CLIENT_IP_HEADER?.trim() ? { clientIpHeader: 'cf-connecting-ip' } : {}) });
   const server = Bun.serve({ hostname: '127.0.0.1', port, maxRequestBodySize: local.maxRequestBodySize, fetch: handler });
   const bound = server.port ?? port;
   log(`Remote mode: listening on http://127.0.0.1:${bound} (every request needs a paired device)`);

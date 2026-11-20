@@ -1,26 +1,17 @@
 // The routes the inbox uses to pair a phone and to manage paired devices. They are served by the ordinary handler, so they exist on the local listener (unchanged trust: whoever
 // reaches it is the user) and, behind the remote listener's device check, for an already-paired device. Pairing itself (the exchange) lives only on the remote listener.
 import { CODE_TTL_MS, DEVICE_ID, type Pairing } from './pair';
+import { hostAllowed as hostsAllowed } from './hosts';
 
 export type ExtraRoute = (req: Request, path: string) => Promise<Response | null>;
 // The remote wrapper marks the request objects it hands inward. This is a WeakMap on the object itself, never a header: a page that reaches the local listener (DNS rebinding makes
 // it same-origin) can send any header it likes, but cannot put its request in this map.
 export const remoteRequests = new WeakMap<Request, { device: string }>();
 export interface PairRouteOptions { host?: string | null; allowedHosts?: string }
-const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
-// The hostname a request was sent to, from its Host header (port and brackets handled).
-export function hostnameOf(req: Request): string {
-  const raw = (req.headers.get('host') ?? new URL(req.url).host).toLowerCase();
-  const v6 = /^\[[0-9a-f:.]+\]/.exec(raw);
-  return v6 ? v6[0] : raw.replace(/:\d*$/, '');
-}
 // On the local listener the pairing routes answer only to this machine's own names (or an IP address, or a name the operator listed): a rebinding page at a name the attacker
-// controls has the same Origin and Host, so the Origin check alone proves nothing.
+// controls has the same Origin and Host, so the Origin check alone proves nothing. One implementation, shared with the whole server: hosts.ts.
 export function hostAllowed(req: Request, options: PairRouteOptions = {}): boolean {
-  const name = hostnameOf(req);
-  if (name === 'localhost' || name.endsWith('.localhost') || IPV4.test(name) || name.startsWith('[')) return true;
-  const named = [options.host ?? '', ...(options.allowedHosts ?? '').split(',')].map(h => h.trim().toLowerCase().replace(/:\d*$/, '')).filter(Boolean);
-  return named.includes(name);
+  return hostsAllowed(req, { FEEDBACK_HOST: options.host ?? undefined, FEEDBACK_ALLOWED_HOSTS: options.allowedHosts });
 }
 
 const PREFIX = '/__feedback/api';
