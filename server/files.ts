@@ -301,7 +301,8 @@ export async function stagePath(dir: string, path: string, by: Author, options: 
 }
 
 // ---- Taking uploads into a thread
-// Validates every id first (ready, uploaded by this author, listed once), then renames each file into `<thread>/files/<id>/<name>`. `undo` puts them back.
+// Validates every id first (ready, uploaded by this author, listed once), then renames each file into `<thread>/files/<id>/<name>`. The upload folders (and their meta) stay until `commit`,
+// which the caller runs once the message is written; `undo` renames the files back, so a failed write loses nothing and the same ids can be sent again.
 export function checkAttachmentIds(value: unknown): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) throw new Invalid(`At most ${MAX_ATTACHMENTS} files per message`);
@@ -309,7 +310,7 @@ export function checkAttachmentIds(value: unknown): string[] {
   if (new Set(ids).size !== ids.length) throw new Invalid('Name each file once');
   return ids;
 }
-export async function claimUploads(dir: string, threadPath: string, ids: string[], by: Author): Promise<{ attachments: Attachment[]; undo: () => Promise<void> }> {
+export async function claimUploads(dir: string, threadPath: string, ids: string[], by: Author): Promise<{ attachments: Attachment[]; undo: () => Promise<void>; commit: () => Promise<void> }> {
   const planned: { meta: UploadMeta; from: string }[] = [];
   for (const id of ids) {
     let meta: UploadMeta;
@@ -330,8 +331,7 @@ export async function claimUploads(dir: string, threadPath: string, ids: string[
       attachments.push({ id: meta.id, name: meta.name, size: meta.size, sha256: meta.sha256!, type: meta.type!, by: meta.by, at: new Date().toISOString() });
     }
   } catch (error) { await undo(); throw error; }
-  for (const id of ids) await rm(uploadDir(dir, id), { recursive: true, force: true });
-  return { attachments, undo: async () => { await undo(); } };
+  return { attachments, undo: async () => { await undo(); }, commit: async () => { for (const id of ids) await rm(uploadDir(dir, id), { recursive: true, force: true }).catch(() => undefined); } };
 }
 // Parses the `attachments` field of a stored message; anything malformed is dropped.
 export function parseAttachments(value: unknown): Attachment[] {
@@ -356,6 +356,13 @@ export async function moveFile(from: string, to: string): Promise<void> {
   }
 }
 const present = async (path: string) => { try { await stat(path); return true; } catch { return false; } };
+// Copies into `<to>.part` and renames, so a crash never leaves a partial file under the final name.
+async function copyAtomic(from: string, to: string): Promise<void> {
+  const part = `${to}.part`;
+  await rm(part, { force: true });
+  try { await copyFile(from, part, fsConstants.COPYFILE_FICLONE); await rename(part, to); }
+  catch (error) { await rm(part, { force: true }); throw error; }
+}
 // A copy in another thread (a merge or a move). A claimed file never changes, so a hard link costs no space; when the link cannot be made (another volume)
 // the bytes are copied, after the same disk check an upload gets. Already there means done.
 export async function cloneAttachments(fromThread: string, toThread: string, list: Attachment[], options: FilesOptions = {}): Promise<void> {
@@ -367,7 +374,7 @@ export async function cloneAttachments(fromThread: string, toThread: string, lis
     await mkdir(attachmentDir(toThread, a.id), { recursive: true });
     try { await (options.link ?? link)(from, to); continue; } catch { /* not linkable here: copy */ }
     await checkDisk(attachmentDir(toThread, a.id), (await stat(from)).size, options);
-    await copyFile(from, to, fsConstants.COPYFILE_FICLONE);
+    await copyAtomic(from, to);
   }
 }
 export async function removeAttachments(threadPath: string, list: Attachment[]): Promise<void> {
@@ -383,15 +390,17 @@ export async function filesToVault(threadPath: string, vault: string, key: strin
   }
 }
 // A thread moved to another project changes the vault key of its redacted messages: their files follow, and the old copy goes when the move has committed.
-export async function copyVaultFiles(vault: string, oldKey: string, newKey: string): Promise<void> {
+export async function copyVaultFiles(vault: string, oldKey: string, newKey: string, options: Pick<FilesOptions, 'link'> = {}): Promise<void> {
   const from = vaultFiles(vault, oldKey), to = vaultFiles(vault, newKey);
   if (from === to || !(await present(from))) return;
   for (const id of await readdir(from)) {
     for (const name of await readdir(join(from, id))) {
       const target = join(to, id, name);
+      await rm(`${target}.part`, { force: true }); // a leftover of an interrupted copy is never trusted
       if (await present(target)) continue;
       await mkdir(join(to, id), { recursive: true, mode: 0o700 });
-      await copyFile(join(from, id, name), target, fsConstants.COPYFILE_FICLONE);
+      try { await (options.link ?? link)(join(from, id, name), target); continue; } catch { /* not linkable here: copy */ }
+      await copyAtomic(join(from, id, name), target);
     }
   }
 }

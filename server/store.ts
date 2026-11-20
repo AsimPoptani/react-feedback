@@ -513,10 +513,16 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
     ticked = attached.check.filter(c => tickItem(items, c));
     await writeAtomic(join(path, 'checklist.json'), JSON.stringify({ items }, null, 2));
   }
-  const taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.author) : null;
-  const created: Message = { id: `m${n}`, author: input.author, text, images: await saveImages(path, images), ...(taken ? { attachments: taken.attachments } : {}), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
-    ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
-  try { await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`); } catch (error) { await taken?.undo(); throw error; }
+  const imageNames = await saveImages(path, images); // before the claim: a failure here leaves every upload where it was
+  let taken: Awaited<ReturnType<typeof claimUploads>> | null = null;
+  let created: Message;
+  try {
+    taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.author) : null;
+    created = { id: `m${n}`, author: input.author, text, images: imageNames, ...(taken ? { attachments: taken.attachments } : {}), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+      ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
+    await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
+  } catch (error) { await taken?.undo(); for (const name of imageNames) await rm(join(path, name), { force: true }); throw error; }
+  await taken?.commit(); // the upload folders go only once the message is written
   if (input.author === 'agent' || stored[stored.length - 1]?.author === 'agent') await stampRead(path, input.author === 'agent' ? agentReadFile(agentName) : 'read.json', lastAt(stored, item));
   if (flag === 'done') await closeForDone(path);
   if (input.author === 'user') await writeStatus(path, 'open');
@@ -607,16 +613,19 @@ export async function createThread(dir: string, input: NewThread): Promise<{ id:
   const agentName = checkAgentName(input.agent_name);
   await notTheUser(dir, agentName);
   const { id, path, created_at } = await makeItemFolder(dir);
+  let taken: Awaited<ReturnType<typeof claimUploads>> | null = null;
   try {
-    const taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.origin) : null;
-    const message: Message = { id: 'm1', author: input.origin, text, images: await saveImages(path, images), ...(taken ? { attachments: taken.attachments } : {}), created_at, ...(agentName ? { agent_name: agentName } : {}),
+    const imageNames = await saveImages(path, images);
+    taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.origin) : null;
+    const message: Message = { id: 'm1', author: input.origin, text, images: imageNames, ...(taken ? { attachments: taken.attachments } : {}), created_at, ...(agentName ? { agent_name: agentName } : {}),
       ...(flag ? { flag } : {}), ...(input.question ? { question: buildQuestion('q1', input.question) } : {}) };
     await writeFile(join(path, 'item.json'), JSON.stringify({ id, created_at, mode: 'thread', title, origin: input.origin, note: text, ...(input.readOnly ? { read_only: true } : {}) }, null, 2));
     await writeStatus(path, 'open');
     await writeFile(join(path, 'feedback.md'), `${title}\n\n${text}\n`);
     await writeFile(join(path, 'thread.jsonl'), `${JSON.stringify(message)}\n`);
     if (flag === 'done') await closeForDone(path);
-  } catch (error) { await rm(path, { recursive: true, force: true }); throw error; }
+  } catch (error) { await taken?.undo(); await rm(path, { recursive: true, force: true }); throw error; }
+  await taken?.commit();
   if (input.origin === 'user') await logEvent(dir, { id, kind: 'thread', text: `${title}: ${text}` });
   return { id };
 }

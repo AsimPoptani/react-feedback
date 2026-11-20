@@ -19,6 +19,7 @@
 - The MCP tool list has one more tool, `get_attachment`.
 
 ### Fixed (before release)
+- A write that fails after files were attached (a full disk, say) puts the uploads back in `_uploads` with their details instead of losing them, so the same message can be sent again; images are saved before the files are taken. A project move that crashes part way through a redacted message's files no longer leaves a truncated file that is later trusted: the vault copy hard-links, or copies to a `.part` file and renames, and a leftover `.part` is redone. A merge or move copy of a file does the same.
 - The 24 hour upload sweep now runs when the server is started with `react-feedback serve` (it once ran only when `server.ts` was run directly), once at startup and then hourly. A new upload cleans stale partials before it checks free space, so a full volume cannot lock new uploads out.
 - A merge or a move links a message's files (a hard link, no extra space) instead of copying them. When a link cannot be made (another volume), the copy is checked against the same free-space floor as an upload. Redaction still moves every linked copy into the vault.
 - A post with files to a thread that was already merged is written on the target with its files. A move to another project carries a redacted message's vault files to the new vault key (and removes the old ones once the move is done), so Unredact still finds them; `repair-merged` links the files of a message it carries.
