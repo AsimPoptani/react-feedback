@@ -14,6 +14,10 @@ import * as reminders from './reminders';
 import { loadAreas, loadVaultDir } from './config';
 import { packageVersion } from './version';
 import { areaOf } from './inbox/areas.js';
+import { publishArtifact, listArtifacts, suggestShare, type ArtifactFormat } from './artifacts';
+import { createShare, readShares, revokeShare, sharePill, statsFor, publicShare, type Expiry } from './shares';
+import { loadProjects, projectById } from './projects';
+import { defaultDir } from './cli';
 import { forViewer } from './inbox/presence.js';
 import type { AreasConfig } from './inbox/areas.js';
 
@@ -60,7 +64,8 @@ export async function readAllowedImage(path: string, dir: string, env: Record<st
 }
 const shapeMessage = (m: store.Message) => ({ id: m.id, author: m.author, ...(m.agent_name ? { agent_name: m.agent_name } : {}), created_at: m.created_at, text: m.redacted ? '' : m.text, ...(m.redacted ? { redacted: true } : {}),
   ...(m.flag ? { flag: m.flag } : {}), ...(m.reply_to ? { reply_to: m.reply_to } : {}), ...(m.aside ? { aside: true } : {}), ...(m.divider ? { divider: true } : {}), ...(m.images.length ? { images: m.images } : {}),
-  ...(m.question ? { question: { id: m.question.id, prompt: m.redacted ? '' : m.question.prompt, options: m.question.options, multi: m.question.multi, allow_other: m.question.allow_other } } : {}), ...(m.answer ? { answer: m.answer } : {}),
+  ...(m.question ? { question: { id: m.question.id, prompt: m.redacted ? '' : m.question.prompt, options: m.question.options, multi: m.question.multi, allow_other: m.question.allow_other, ...(m.question.withdrawn ? { withdrawn: m.question.withdrawn } : {}), ...(m.question.reasked ? { reasked: true } : {}) } } : {}), ...(m.answer ? { answer: m.answer } : {}),
+  ...(m.kind === 'share_notice' ? { kind: 'share_notice' as const, share_id: m.share_id, artifact_id: m.artifact_id } : {}),
   ...(m.added_items ? { added_items: m.added_items } : {}), ...(m.ticked_items ? { ticked_items: m.ticked_items } : {}) });
 const shapeItem = (i: store.ChecklistItem) => ({ id: i.id, owner: i.owner, text: i.text, done: i.done, ...(i.claimed_by_user_at && !i.done ? { claimed_by_user_at: i.claimed_by_user_at } : {}), ...(i.unclaim_note ? { unclaim_note: i.unclaim_note } : {}) });
 const shapeSummary = (t: store.Summary) => ({ id: t.id, title: t.title, status: t.status, waiting: t.waiting, last_author: t.last_author, last_message_at: t.last_message_at, last_flag: t.last_flag, read_only: t.read_only,
@@ -158,10 +163,49 @@ export function createMcpServer(options: McpOptions): McpServer {
   tool('remind_remove', 'Remove a reminder.', { id: thread, reminder: z.string().describe('Reminder id, like r1') }, async a => { await reminders.removeReminder(dir, a.id, a.reminder); return { removed: a.reminder }; });
   tool('events_since', 'Poll the event feed (what the user and the reminders did). Pass the cursor from the last call; with no cursor you get no events and a cursor for "now"; cursor 0 replays the feed.', {
     cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(500).optional() }, async a => eventsSince(dir, a.cursor, a.limit ?? 100), true);
+  const artifactId = z.string().describe('Artifact id, like a1b2c3d4e5f6');
+  tool('publish_artifact', 'Publish an HTML or Markdown page on a thread. The same id publishes the next version.', {
+    thread, title: z.string().min(1).max(store.MAX_TITLE), content: z.string().min(1), id: artifactId.optional(), format: z.enum(['html', 'md']).optional() }, async a => {
+    const format: ArtifactFormat = a.format ?? (/^\s*</.test(a.content) ? 'html' : 'md');
+    const meta = await publishArtifact(dir, { thread: a.thread, title: a.title, content: a.content, format, ...(a.id ? { id: a.id } : {}) });
+    return { artifact: { id: meta.id, thread: meta.thread, title: meta.title, latest: meta.latest } };
+  });
+  tool('list_artifacts', 'List published artifacts, newest first.', { thread: thread.optional() }, async a => {
+    const shares = await readShares(dir);
+    const rows = await listArtifacts(dir, a.thread);
+    return { artifacts: rows.map(meta => ({ id: meta.id, thread: meta.thread, title: meta.title, latest: meta.latest, updated_at: meta.updated_at, ...(meta.suggest ? { suggest: true } : {}), ...statsFor(shares, meta.id), pill: sharePill(statsFor(shares, meta.id).links, statsFor(shares, meta.id).views) })) };
+  }, true);
+  tool('suggest_share', 'Ask the user to share an artifact. This does not create a link.', { id: artifactId }, async a => {
+    const meta = await suggestShare(dir, a.id);
+    return { suggested: { id: meta.id, title: meta.title } };
+  });
+  tool('share_artifact', 'Create a secret link to an artifact. Expiry is 1d, 7d or 30d (the default is 7d). A link with no expiry is only created from the inbox. A secret-looking page is refused.', {
+    id: artifactId, expires: z.enum(['1d', '7d', '30d']).optional(), latest: z.boolean().optional() }, async a => {
+    const by = agent ?? 'Agent';
+    const created = await createShare(dir, { artifact: a.id, expires: (a.expires ?? '7d') as Expiry, latest: a.latest === true, by, agent: true });
+    return { share: publicShare(created.share), url: created.path };
+  });
+  tool('revoke_share', 'Revoke a share link this agent created.', { id: z.string().describe('Share id, like s1a2b3c4d') }, async a => ({ ...(await revokeShare(dir, a.id, { agent: agent ?? 'Agent' })) }));
+  tool('cancel_question', 'Withdraw an unanswered question. It stays in the thread, struck through, and stops waiting.', { id: thread, question: z.string().describe('Question id, like q3'), reason: z.string().max(300).optional() }, async a =>
+    ({ ...(await store.cancelQuestion(dir, a.id, a.question, a.reason)) }));
+  tool('bump_question', 'Re-ask a question at the bottom of the thread. The old copy is marked re-asked below.', { id: thread, question: z.string() }, async a =>
+    ({ ...(await store.bumpQuestion(dir, a.id, a.question)) }));
   return server;
 }
 // Serves on stdio until the client disconnects. FEEDBACK_AGENT_NAME names this agent (for example "Codex").
-export async function runMcp(dir: string, env: Record<string, string | undefined> = process.env): Promise<void> {
+// --project or FEEDBACK_PROJECT picks a project when FEEDBACK_PROJECTS is set. A caller that passed its own directory is left on that directory.
+export async function runMcp(dir: string, env: Record<string, string | undefined> = process.env, args: string[] = process.argv.slice(2)): Promise<void> {
+  let chosen: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--project') chosen = args[++i];
+    else if (arg?.startsWith('--project=')) chosen = arg.slice('--project='.length);
+  }
+  if (chosen || (dir === defaultDir() && (env.FEEDBACK_PROJECT?.trim() || env.FEEDBACK_PROJECTS?.trim()))) {
+    const projects = loadProjects(env);
+    const id = chosen ?? env.FEEDBACK_PROJECT?.trim();
+    dir = id ? projectById(projects, id).dir : projects[0]!.dir;
+  }
   const server = createMcpServer({ dir, agentName: env.FEEDBACK_AGENT_NAME, env });
   await server.connect(new StdioServerTransport());
 }

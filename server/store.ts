@@ -27,7 +27,8 @@ export class Invalid extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 export interface QuestionOption { id: string; label: string; description?: string }
-export interface Question { id: string; prompt: string; options: QuestionOption[]; multi: boolean; allow_other: boolean }
+export interface QuestionWithdrawal { at: string; reason?: string }
+export interface Question { id: string; prompt: string; options: QuestionOption[]; multi: boolean; allow_other: boolean; withdrawn?: QuestionWithdrawal; reasked?: true }
 export interface Answer { question_id: string; option_ids: string[]; other_text?: string }
 export const FLAGS = ['needs_you', 'done', 'fyi'] as const;
 export type Flag = (typeof FLAGS)[number];
@@ -43,7 +44,7 @@ export interface Message { id: string; author: Author; text: string; images: str
   moved_to?: string; moved_from?: string;
   // `kind: 'secret_request'` is the agent asking for a key: `secret` holds what to ask for and, once the user has saved it (straight to the app, never here), a non-secret `status` and `hint`.
   // `redacted` replaces a sensitive message's text and images, which live in the vault; `key` says which vault file.
-  kind?: 'secret_request'; secret?: SecretRequest; redacted?: Redaction;
+  kind?: 'secret_request' | 'share_notice'; secret?: SecretRequest; redacted?: Redaction; share_id?: string; artifact_id?: string;
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
   client_id?: string; written_at?: string;
   // `agent_name`: which agent wrote an agent message, when it is not the default one (an MCP client's FEEDBACK_AGENT_NAME). Absent means the inbox's agent profile.
@@ -184,7 +185,17 @@ function parseQuestion(q: unknown): Question | undefined {
   if (!isObject(q) || typeof q.id !== 'string' || typeof q.prompt !== 'string' || !Array.isArray(q.options)) return undefined;
   const options = q.options.filter((o): o is QuestionOption => isObject(o) && typeof o.id === 'string' && typeof o.label === 'string')
     .map(o => ({ id: o.id, label: o.label, ...(typeof o.description === 'string' ? { description: o.description } : {}) }));
-  return { id: q.id, prompt: q.prompt, options, multi: q.multi === true, allow_other: q.allow_other !== false };
+  const withdrawn = isObject(q.withdrawn) && typeof q.withdrawn.at === 'string'
+    ? { at: q.withdrawn.at, ...(typeof q.withdrawn.reason === 'string' && q.withdrawn.reason ? { reason: q.withdrawn.reason.slice(0, 200) } : {}) } : undefined;
+  return { id: q.id, prompt: q.prompt, options, multi: q.multi === true, allow_other: q.allow_other !== false, ...(withdrawn ? { withdrawn } : {}), ...(q.reasked === true ? { reasked: true as const } : {}) };
+}
+// A question still waiting on the person: not withdrawn, not replaced by a re-ask.
+const questionLive = (q: Question | undefined): q is Question => !!q && !q.withdrawn && !q.reasked;
+// The answer line in `read` and in `_events.jsonl`: the question id, a short prompt, and the choice.
+export function answerLine(qid: string, prompt: string, labels: string[]): string {
+  const flat = prompt.trim().replace(/\s+/g, ' ');
+  const short = flat.length > 40 ? `${flat.slice(0, 39)}…` : flat;
+  return `${qid} (${short}): ${labels.join(', ')}`;
 }
 function parseAnswer(a: unknown): Answer | undefined {
   if (!isObject(a) || typeof a.question_id !== 'string' || !Array.isArray(a.option_ids)) return undefined;
@@ -192,13 +203,15 @@ function parseAnswer(a: unknown): Answer | undefined {
 }
 export function openQuestions(messages: Message[]): Question[] {
   const answered = new Set(messages.flatMap(m => (m.answer ? [m.answer.question_id] : [])));
-  return messages.flatMap(m => (m.author === 'agent' && m.question && !answered.has(m.question.id) ? [m.question] : []));
+  return messages.flatMap(m => (m.author === 'agent' && questionLive(m.question) && !answered.has(m.question.id) ? [m.question] : []));
 }
 // Checks an answer against the thread's open questions; returns the readable text.
 export function checkAnswer(messages: Message[], raw: unknown): { answer: Answer; text: string; labels: string[] } {
   if (!isObject(raw) || typeof raw.question_id !== 'string') throw new Invalid('Answer needs a question_id');
   const asked = messages.find(m => m.author === 'agent' && m.question?.id === raw.question_id)?.question;
   if (!asked) throw new Invalid('No such question', 404);
+  if (asked.withdrawn) throw new Invalid('That question was withdrawn', 409);
+  if (asked.reasked) throw new Invalid('That question was re-asked', 409);
   if (!openQuestions(messages).some(q => q.id === asked.id)) throw new Invalid('That question is already answered', 409);
   const ids = raw.option_ids ?? [];
   if (!Array.isArray(ids) || ids.some(i => typeof i !== 'string') || new Set(ids).size !== ids.length) throw new Invalid('option_ids must be a list of distinct ids');
@@ -244,7 +257,9 @@ function parseMessages(raw: string | null): Message[] {
           ...(ids(m.added_items) ? { added_items: ids(m.added_items)! } : {}), ...(ids(m.ticked_items) ? { ticked_items: ids(m.ticked_items)! } : {}),
           ...(typeof m.client_id === 'string' && CLIENT_ID.test(m.client_id) ? { client_id: m.client_id } : {}), ...(typeof m.written_at === 'string' && !Number.isNaN(Date.parse(m.written_at)) ? { written_at: m.written_at } : {}),
           ...(m.author === 'agent' && typeof m.agent_name === 'string' && m.agent_name.trim() && m.agent_name.length <= MAX_NAME ? { agent_name: m.agent_name } : {}),
-          ...(parseSecret(m) ? { kind: 'secret_request' as const, secret: parseSecret(m)! } : {}), ...(parseRedaction(m.redacted) ? { redacted: parseRedaction(m.redacted)! } : {}) });
+          ...(parseSecret(m) ? { kind: 'secret_request' as const, secret: parseSecret(m)! } : {}),
+          ...(m.kind === 'share_notice' && typeof m.share_id === 'string' ? { kind: 'share_notice' as const, share_id: m.share_id, ...(typeof m.artifact_id === 'string' ? { artifact_id: m.artifact_id } : {}) } : {}),
+          ...(parseRedaction(m.redacted) ? { redacted: parseRedaction(m.redacted)! } : {}) });
       }
     } catch { /* a torn line must not hide the thread */ }
   }
@@ -484,7 +499,8 @@ export async function appendMessage(dir: string, id: string, input: NewMessage):
     if (input.answer !== undefined) {
       const checked = checkAnswer(stored, input.answer);
       text = checked.text; extra = { answer: checked.answer };
-      eventKind = 'answer'; eventText = `${checked.answer.question_id}: ${checked.labels.join(', ')}`;
+      const asked = stored.find(x => x.question?.id === checked.answer.question_id)?.question;
+      eventKind = 'answer'; eventText = answerLine(checked.answer.question_id, asked?.prompt ?? '', checked.labels);
     }
     // Attached checklist changes are checked in full first, then written together with the message.
     let added: ChecklistItem[] = [], ticked: string[] = [];
@@ -540,6 +556,80 @@ export async function createThread(dir: string, input: NewThread): Promise<{ id:
 export async function startCaptureThread(dir: string, id: string, note: string, created_at: string): Promise<void> {
   const message: Message = { id: 'm1', author: 'user', text: note, images: [], created_at };
   await writeFile(join(dir, id, 'thread.jsonl'), `${JSON.stringify(message)}\n`);
+}
+
+// Rewrites one JSON line of thread.jsonl and leaves every other line byte for byte. Used when a question is withdrawn or re-asked.
+async function mapThreadLine(path: string, qid: string, edit: (message: ItemData) => void): Promise<void> {
+  const file = join(path, 'thread.jsonl');
+  const raw = await optional(file);
+  if (raw === null) throw new Invalid('No such question', 404);
+  let found = false;
+  const lines = raw.split('\n').map(line => {
+    if (!line.trim()) return line;
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { return line; }
+    if (!isObject(parsed) || !isObject(parsed.question) || parsed.question.id !== qid) return line;
+    found = true;
+    edit(parsed);
+    return JSON.stringify(parsed);
+  });
+  if (!found) throw new Invalid('No such question', 404);
+  await writeAtomic(file, `${lines.join('\n').replace(/\n*$/, '')}\n`);
+}
+const questionMessage = (messages: Message[], qid: string) => messages.find(m => m.author === 'agent' && m.question?.id === qid);
+// Withdraws an unanswered question. It stays in the thread, struck through, and no longer waits on the person.
+export async function cancelQuestion(dir: string, id: string, qid: string, reason?: unknown): Promise<{ withdrawn: boolean }> {
+  if (reason !== undefined && reason !== null && reason !== '' && (typeof reason !== 'string' || reason.trim().length > 300)) throw new Invalid('A reason is at most 300 characters');
+  const why = typeof reason === 'string' && reason.trim() ? reason.trim() : undefined;
+  const path = await itemDir(dir, id);
+  return withLock(path, async () => {
+    const stored = await materialise(path, await readItem(path));
+    const message = questionMessage(stored, qid);
+    if (!message?.question) throw new Invalid('No such question', 404);
+    if (stored.some(m => m.answer?.question_id === qid)) throw new Invalid('That question is already answered', 409);
+    if (message.question.reasked) throw new Invalid('That question was re-asked; cancel the newer one', 409);
+    if (message.question.withdrawn) return { withdrawn: false };
+    const at = new Date().toISOString();
+    await mapThreadLine(path, qid, parsed => {
+      const question = parsed.question as ItemData;
+      question.withdrawn = why ? { at, reason: why } : { at };
+      if (parsed.flag === 'needs_you') parsed.flag = 'fyi';
+    });
+    return { withdrawn: true };
+  });
+}
+// Marks the question "re-asked below" and posts the same question again at the end of the thread.
+export async function bumpQuestion(dir: string, id: string, qid: string): Promise<{ id: string; question_id: string }> {
+  const path = await itemDir(dir, id);
+  return withLock(path, async () => {
+    const item = await readItem(path);
+    if (item.read_only === true) throw new Invalid('A read-only thread cannot hold a question: nobody could answer it', 409);
+    const stored = await materialise(path, item);
+    const message = questionMessage(stored, qid);
+    if (!message?.question) throw new Invalid('No such question', 404);
+    if (message.question.withdrawn) throw new Invalid('That question was withdrawn', 409);
+    if (message.question.reasked) throw new Invalid('That question was already re-asked', 409);
+    if (stored.some(m => m.answer?.question_id === qid)) throw new Invalid('That question is already answered', 409);
+    const q = message.question;
+    await mapThreadLine(path, qid, parsed => {
+      (parsed.question as ItemData).reasked = true;
+      if (parsed.flag === 'needs_you') parsed.flag = 'fyi';
+    });
+    const n = stored.length + 1;
+    const question = buildQuestion(`q${n}`, { prompt: q.prompt, options: q.options.map(o => ({ label: o.label, ...(o.description ? { description: o.description } : {}) })), multi: q.multi, allow_other: q.allow_other });
+    const created: Message = { id: `m${n}`, author: 'agent', text: q.prompt, images: [], created_at: new Date().toISOString(), flag: 'needs_you', question };
+    await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
+    return { id: created.id, question_id: question.id };
+  });
+}
+// A system line in the thread when an agent creates a share. A divider, so it does not change who the thread is waiting on. It does count as unread.
+export async function appendShareNotice(dir: string, id: string, text: string, shareId: string, artifactId: string): Promise<void> {
+  const path = await itemDir(dir, id);
+  await withLock(path, async () => {
+    const stored = await materialise(path, await readItem(path));
+    const message: Message = { id: `m${stored.length + 1}`, author: 'agent', text, images: [], created_at: new Date().toISOString(), divider: true, kind: 'share_notice', share_id: shareId, artifact_id: artifactId };
+    await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(message)}\n`);
+  });
 }
 
 // `seen` is the last_message_at the client actually displayed; it is clamped to the newest message so it cannot pre-read later ones.
@@ -1085,7 +1175,7 @@ export interface Summary {
   last_flag: Flag | null; waiting_aside?: true; checklist: ChecklistCounts; open_for_you: number; merged_into: string | null; read_only: boolean; acked_through: string | null;
 }
 // A thread is unread for the user only when a message that needs them (a `needs_you` flag or an unanswered question) arrived after they last read.
-const needsUser = (m: Message, answered: Set<string>) => m.author === 'agent' && (m.flag === 'needs_you' || (!!m.question && !answered.has(m.question.id)));
+const needsUser = (m: Message, answered: Set<string>) => m.author === 'agent' && !m.question?.withdrawn && !m.question?.reasked && (m.flag === 'needs_you' || (questionLive(m.question) && !answered.has(m.question.id)));
 // Waiting on you: a `needs_you` message or unanswered question since you last spoke, or (when you have not just spoken) an open, unclaimed item of yours.
 // Waiting for the agent: you spoke last (and the agent has not acknowledged it), you claimed something it has not checked, or a merge left something unanswered (`awaitAgent`) and no agent message has come since.
 function waitingOn(status: Status, messages: Message[], items: ChecklistItem[], awaitAgent: string | null, readOnly: boolean, ackedThrough: string | null): Summary['waiting'] {
@@ -1105,7 +1195,7 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const path = await itemDir(dir, id);
   const item = await readItem(path);
   const messages = await readMessages(path, item);
-  const main = mainMessages(messages).filter(m => !m.moved_to); // asides and move stubs never decide who spoke last
+  const main = mainMessages(messages).filter(m => !m.moved_to && m.kind !== 'share_notice'); // asides, move stubs and share notices never decide who spoke last
   const last = main[main.length - 1];
   const created_at = item.created_at as string;
   const last_author: Author = last?.author ?? 'user';
@@ -1120,7 +1210,7 @@ export async function summarise(dir: string, id: string): Promise<{ summary: Sum
   const acked = await readAcked(path);
   const summary: Summary = { id, title, origin: item.origin === 'agent' ? 'agent' : 'user', mode: item.mode as string, status: await readStatus(path),
     created_at, url: typeof context.url === 'string' ? context.url : null, last_message_at, last_author,
-    unread_for_user: messages.some(m => (readOnly ? m.author === 'agent' && !m.divider : needsUser(m, answered)) && (read === null || m.created_at > read)), user_read_at: read, // a read-only thread's updates all count
+    unread_for_user: messages.some(m => (m.kind === 'share_notice' || (readOnly ? m.author === 'agent' && !m.divider : needsUser(m, answered))) && (read === null || m.created_at > read)), user_read_at: read, // a read-only thread's updates all count; a share notice does too
     agent_read_at: await readAgentAt(path), open_question: openQuestions(messages).length > 0, waiting: 'done',
     last_flag: lastAgent?.flag ?? null, checklist: checklistCounts(items), open_for_you: items.filter(i => i.owner === 'user' && !i.done && !i.claimed_by_user_at).length,
     merged_into: (await readMerge(path))?.state === 'done' ? (await readMerge(path))!.into : null, read_only: readOnly, acked_through: acked };

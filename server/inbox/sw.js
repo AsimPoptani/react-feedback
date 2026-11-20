@@ -1,6 +1,6 @@
 // The inbox's service worker, scoped to the inbox path. It keeps the page itself and the last thread data the inbox loaded, so the inbox opens with no signal.
 // It only ever handles GET requests for the files and API reads listed below. It never sees a key (those are PUT requests to the app), and it caches no image.
-const VERSION = 'fb-inbox-0.8.2';
+const VERSION = 'fb-inbox-0.9.0';
 const SHELL = `${VERSION}-shell`, DATA = `${VERSION}-data`;
 const FILES = ['./', 'app.js', 'areas.js', 'markdown.js', 'donut.js', 'quote.js', 'aside.js', 'tracker.js', 'secret.js', 'outbox.js', 'presence.js', 'version.js'];
 const SCOPE = new URL('./', self.location.href).pathname;

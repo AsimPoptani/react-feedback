@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+- **Artifacts.** An agent can publish an HTML or Markdown page on a thread (`artifact publish`, MCP `publish_artifact`). Pages live in `_artifacts/<id>/v<n>/` and stay when a new version is published. Markdown is rendered with the inbox's safe renderer. A page is at most 5 MB. The thread shows a card (title, version, Open, and a Shared pill when a link exists). The sidebar links to an Artifacts page. The viewer is `…/inbox/#/artifact/<id>`. The page itself is served from `/__feedback/a/<id>/v<n>` with `Content-Security-Policy: sandbox allow-scripts allow-popups` (no `allow-same-origin`), `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, and the viewer embeds it in a matching sandboxed iframe, so a page cannot read the inbox's storage, cookies or API.
+- **Secret share links.** From the viewer, or by an agent (`artifact share`, MCP `share_artifact`). The link is `/__feedback/s/<token>` (32 random bytes, only the sha256 stored). It serves the version that was current, or the latest version when that was chosen, with the same sandbox, `X-Robots-Tag: noindex`, and no inbox chrome. Revoked, expired and unknown tokens are the same 404. Views and the last view are counted; no address or user agent is stored. The pill reads "Shared · 2 links · viewed 5×". Manage lists each link (who created it, expiry, views, last viewed) with Revoke. An agent's link expires in 1, 7 (the default) or 30 days; a link with no expiry is created from the inbox only. An agent share is refused when the page looks like it contains a secret; the person can still share it after a warning. An agent can revoke only a link it created. `suggest_share` asks with a Share? button and does not create a link. When an agent creates a link, the thread gets a line the person can revoke from.
+- **Projects.** `FEEDBACK_PROJECTS` is a JSON list of `{id, name, dir}`. Unset, the server is the one project `FEEDBACK_DIR` has always been, and `?project=` is ignored. Set, each project has its own threads, artifacts, shares, events and agents. The API takes `?project=<id>` (omitted means the first). The sidebar shows the project name and, when there are two or more, a menu with unread counts. The last choice is remembered on the device. CLI and MCP take `--project` or `FEEDBACK_PROJECT`.
+- **Pinned questions.** Unanswered questions sit in a "Waiting for your answer" bar above the composer (the newest, and "2 more" when several are open). `ask-cancel` / `cancel_question` withdraws one (struck through, no longer waiting). `ask-bump` / `bump_question` asks it again at the bottom and marks the old copy "Re-asked below".
+- **Answer chips.** An answer shows "↩ q109 · …" and jumps to the question. `read` and the event's `first_line` name the question and a short prompt, for example `q109 (Build secret share links…): Yes, build it`. Older answers get the chip from the question id already stored.
+
+### Changed
+- The service worker cache is `fb-inbox-0.9.0`.
+
 ## 0.8.2
 
 ### Added

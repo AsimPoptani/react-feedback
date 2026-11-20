@@ -39,6 +39,9 @@ import type { AreasConfig } from './inbox/areas.js';
 import * as reminders from './reminders';
 import { presenceLines } from './inbox/presence.js';
 import { packageVersion } from './version';
+import { formatOfName, listArtifacts, publishArtifact, suggestShare } from './artifacts';
+import { createShare, readShares, revokeShare, sharePill, statsFor, type Expiry } from './shares';
+import { loadProjects, projectById } from './projects';
 
 export const defaultDir = () => process.env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
 const USAGE = `Usage:
@@ -71,7 +74,15 @@ const USAGE = `Usage:
   react-feedback unredact <id> <message-id>
   react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "text"
   react-feedback remind <id> list | remove <rid> | off-default | on-default   (FEEDBACK_DEFAULT_REMINDER=off turns the built-in one off everywhere)
-  react-feedback mcp   (an MCP server on stdio; FEEDBACK_AGENT_NAME names the agent)`;
+  react-feedback ask-cancel <id> <qid> [--reason "why"]   (withdraw an unanswered question)
+  react-feedback ask-bump <id> <qid>   (re-ask it at the bottom of the thread)
+  react-feedback artifact publish <id> <file.html|file.md> --title "Title" [--id <artifact>]
+  react-feedback artifact list [<id>]
+  react-feedback artifact suggest-share <artifact>
+  react-feedback artifact share <artifact> [--expires 1d|7d|30d] [--latest]   (default expiry 7d; no expiry is inbox-only)
+  react-feedback artifact unshare <share-id>   (only a link this agent created)
+  react-feedback mcp   (an MCP server on stdio; FEEDBACK_AGENT_NAME names the agent)
+  --project <id> or FEEDBACK_PROJECT selects a project (FEEDBACK_PROJECTS); the default is the first`;
 
 function split(args: string[]): { words: string[]; images: string[]; flags: string[]; options: string[]; avatar: string | null; window: string | null; to: string | null; todos: string[]; checks: string[]; owner: string | null; named: Record<string, string> } {
   const words: string[] = [], images: string[] = [], flags: string[] = [], options: string[] = [], todos: string[] = [], checks: string[] = [];
@@ -87,7 +98,7 @@ function split(args: string[]): { words: string[]; images: string[]; flags: stri
       if (arg === '--option') options.push(value); else if (arg === '--window') window = value; else if (arg === '--to') to = value; else if (arg === '--todo') todos.push(value); else if (arg === '--check') checks.push(value); else if (arg === '--for') owner = value; else avatar = value;
       collecting = false; continue;
     }
-    if (arg === '--name' || arg === '--label' || arg === '--help-url' || arg === '--reason' || arg === '--every' || arg === '--after-replies' || arg === '--idle' || arg === '--say') {
+    if (arg === '--name' || arg === '--label' || arg === '--help-url' || arg === '--reason' || arg === '--every' || arg === '--after-replies' || arg === '--idle' || arg === '--say' || arg === '--title' || arg === '--id' || arg === '--expires') {
       const value = args[++i];
       if (value === undefined) throw new store.Invalid(`${arg} needs a value`);
       named[arg.slice(2)] = value; collecting = false; continue;
@@ -165,6 +176,30 @@ async function todos(dir: string, flags: string[]): Promise<string> {
 // What `read` prints for one message: who, when, the quoted message if it quotes one, then the text, then any checklist items it added or ticked.
 // A side question prints indented under "Side question", with its answers beneath it.
 const firstLine = (m: store.Message) => m.redacted ? '🔒 Redacted' : (m.text.split('\n').find(l => l.trim()) ?? (m.images.length ? '[image]' : '')).slice(0, 120);
+function answerReadLine(messages: store.Message[], m: store.Message): string {
+  const answer = m.answer;
+  if (!answer) return '';
+  const asked = messages.find(item => item.question?.id === answer.question_id)?.question;
+  const labels = answer.option_ids.map(id => asked?.options.find(option => option.id === id)?.label ?? id);
+  if (answer.other_text) labels.push(answer.other_text);
+  return store.answerLine(answer.question_id, asked?.prompt ?? '', labels);
+}
+// --project is taken off the arguments before a command sees them. FEEDBACK_PROJECT does the same when the caller did not pass a directory of its own.
+function takeProject(args: string[]): { args: string[]; project?: string } {
+  const out: string[] = [];
+  let project: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--project') {
+      const value = args[++i];
+      if (value === undefined) throw new store.Invalid('--project needs a value');
+      project = value; continue;
+    }
+    if (arg.startsWith('--project=')) { project = arg.slice('--project='.length); continue; }
+    out.push(arg);
+  }
+  return { args: out, project };
+}
 export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null }
 export function transcript(messages: store.Message[], names: Record<store.Author, string> = { user: 'user', agent: 'agent' }, extra: TranscriptExtra = {}): string {
   const byId = new Map(messages.map(m => [m.id, m]));
@@ -172,8 +207,9 @@ export function transcript(messages: store.Message[], names: Record<store.Author
   const one = (m: store.Message, pad: string, label = ''): string => {
     const quoted = m.reply_to && !m.aside ? byId.get(m.reply_to) : undefined;
     const quote = m.reply_to && !m.aside ? (quoted ? `  (replying to ${quoted.id}, ${names[quoted.author]}: "${firstLine(quoted)}")` : `  (replying to ${m.reply_to}: original unavailable)`) : '';
+    const lead = m.answer && !m.redacted && !m.divider ? answerReadLine(messages, m) : '';
     const body = m.divider ? `--- ${m.text} ---` : m.redacted ? `  🔒 Redacted (sensitive) by ${m.redacted.by === 'user' ? names.user : names.agent}, ${m.redacted.at.slice(0, 16)}${m.redacted.reason ? `: ${m.redacted.reason}` : ''}`
-      : (m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n');
+      : `${lead ? `  ${lead}\n` : ''}${(m.text || (m.images.length ? '[image]' : '')).split('\n').map(l => `  ${l}`).join('\n')}`;
     const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}${m.secret.check === 'rejected' ? ', but the provider rejected it' : ''}` : 'not saved yet'}]`] : [];
     const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
     const text = `${m.id}  ${m.author === 'user' ? 'user ' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[body, ...secret, ...attached].join('\n')}`;
@@ -202,11 +238,52 @@ async function list(dir: string, waiting: boolean, agent: string | undefined, no
   if (!rows.length) return waiting ? 'Nothing is waiting for the agent.' : 'No threads.';
   return rows.map(t => `${t.id}  ${t.waiting.padEnd(5)}  ${t.last_author === 'user' ? 'user ' : 'agent'}  ${t.last_message_at.slice(0, 16)}  ${t.title}${t.waiting_aside ? '  [side question waiting]' : ''}`).join('\n');
 }
+async function artifactCommand(dir: string, words: string[], named: Record<string, string>, flags: string[], agent: string | undefined): Promise<string> {
+  const sub = words[0];
+  const by = agent ?? 'Agent';
+  if (sub === 'list') {
+    const rows = await listArtifacts(dir, words[1]);
+    if (!rows.length) return words[1] ? 'No artifacts on that thread.' : 'No artifacts.';
+    const shares = await readShares(dir);
+    return rows.map(artifact => {
+      const stats = statsFor(shares, artifact.id);
+      return `${artifact.id}  v${artifact.latest}  ${artifact.thread}  ${artifact.title}${artifact.suggest ? '  [share?]' : ''}${stats.links ? `  ${sharePill(stats.links, stats.views)}` : ''}`;
+    }).join('\n');
+  }
+  if (sub === 'publish' && words.length === 3) {
+    if (!named.title) throw new store.Invalid('artifact publish needs --title');
+    let content: string;
+    try { content = await readFile(words[2]!, 'utf8'); } catch { throw new store.Invalid(`Cannot read ${words[2]}`); }
+    const meta = await publishArtifact(dir, { thread: words[1]!, title: named.title, content, format: formatOfName(words[2]!), ...(named.id ? { id: named.id } : {}) });
+    return `Published ${meta.id} v${meta.latest} on ${meta.thread}: ${meta.title}`;
+  }
+  if (sub === 'suggest-share' && words.length === 2) {
+    const meta = await suggestShare(dir, words[1]!);
+    return `Suggested sharing ${meta.id} "${meta.title}"`;
+  }
+  if (sub === 'share' && words.length === 2) {
+    const created = await createShare(dir, { artifact: words[1]!, expires: (named.expires ?? '7d') as Expiry, latest: flags.includes('--latest'), by, agent: true });
+    const until = created.share.expires_at ? created.share.expires_at.slice(0, 10) : 'never';
+    return `Shared ${words[1]} (${created.share.id}, expires ${until})\n${created.path}`;
+  }
+  if (sub === 'unshare' && words.length === 2) {
+    const result = await revokeShare(dir, words[1]!, { agent: by });
+    return result.revoked ? `Revoked ${words[1]}` : `${words[1]} was already revoked`;
+  }
+  throw new store.Invalid(USAGE);
+}
 // `notice` receives hints that are advice, not results: they go to stderr, so a wrapper that reads the command's output is not affected.
 export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfig, env: Record<string, string | undefined> = process.env, notice: (line: string) => void = line => { process.stderr.write(`${line}\n`); }): Promise<string> {
-  const [command, ...rest] = argv;
+  const taken = takeProject(argv);
+  const [command, ...rest] = taken.args;
   if (command === '--help' || command === '-h' || command === 'help') return USAGE;
   if (command === '--version') return packageVersion();
+  if (taken.project) dir = projectById(loadProjects(env), taken.project).dir;
+  else if (dir === defaultDir() && (env.FEEDBACK_PROJECT?.trim() || env.FEEDBACK_PROJECTS?.trim())) {
+    const projects = loadProjects(env);
+    const id = env.FEEDBACK_PROJECT?.trim();
+    dir = id ? projectById(projects, id).dir : projects[0]!.dir;
+  }
   const { words, images, flags, options, avatar, window, to, todos: addTodos, checks, owner, named } = split(rest);
   let me: string | undefined;
   try { me = store.checkAgentName(env.FEEDBACK_AGENT_NAME); } catch { /* an unusable name: the unnamed agent */ }
@@ -268,6 +345,15 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     for (const line of (await presenceText(dir, me)).split('\n').filter(Boolean)) notice(line);
     return `Marked ${words[0]} read${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through })}` : ''}`;
   }
+  if (command === 'ask-cancel' && words.length === 2) {
+    const result = await store.cancelQuestion(dir, words[0]!, words[1]!, named.reason);
+    return result.withdrawn ? `Withdrew ${words[1]} on ${words[0]}` : `${words[1]} on ${words[0]} was already withdrawn`;
+  }
+  if (command === 'ask-bump' && words.length === 2) {
+    const result = await store.bumpQuestion(dir, words[0]!, words[1]!);
+    return `Re-asked ${words[1]} on ${words[0]} as ${result.question_id} (${result.id})`;
+  }
+  if (command === 'artifact') return artifactCommand(dir, words, named, flags, me);
   if (command === 'ask' && words.length === 2) {
     const message = await store.appendMessage(dir, words[0]!, { author: 'agent', text: words[1], question: question(words[1]!, options, flags), flag: flagOf(flags), reply_to: to ?? undefined });
     return `Asked on ${words[0]} (${message.id}, question ${message.question!.id})`;

@@ -102,6 +102,8 @@ Without overrides the widget follows `prefers-color-scheme` and uses a dark defa
 | `FEEDBACK_INBOX_WIDGET` | on | set to `0`, `off`, `false` or `no` to keep the capture widget off the inbox page itself |
 | `FEEDBACK_SECRET_TARGET` | none | a path on the same site, with `{name}` in it (for example `/api/keys/{name}`), that the inbox's key box sends a pasted key to (see [Secure key box](#secure-key-box)). Must be relative; an absolute or protocol-relative URL stops the server at startup. Unset: no key box |
 | `FEEDBACK_VAULT_DIR` | none | where redacted messages go (see [Redacting sensitive messages](#redacting-sensitive-messages)). Must be **outside** `FEEDBACK_DIR`. Unset: redaction is off |
+| `FEEDBACK_PROJECTS` | none | a JSON list of `{id, name, dir}` when one server hosts several projects (see [Projects](#projects)). Unset: one project, `FEEDBACK_DIR`, and `?project=` is ignored |
+| `FEEDBACK_PROJECT` | the first project | which project the CLI and `react-feedback mcp` use. `--project <id>` overrides it |
 
 Open `http://127.0.0.1:8099/__feedback/inbox/`.
 
@@ -158,6 +160,8 @@ feedback-data/
     (redacted messages leave no text or images here: see the vault)
   _events.jsonl     one line per user message or new thread: watch it to know when to look
   _profile/         names, avatars and pins.json
+  _artifacts/       published pages: <id>/meta.json and <id>/v<n>/{body.html, source.md|source.html, meta.json}
+  _shares.json      share links, with the sha256 of each token (the token itself is not stored)
 ```
 
 Console diagnostics in a capture are bounded (30 entries of 300 characters; 20 failed fetches with query strings removed). No request headers, request bodies or response bodies are captured. Add the folder to your `.gitignore`.
@@ -271,7 +275,16 @@ react-feedback unredact <id> <message-id>                       # put it back fr
 react-feedback remind <id> add --every 2h|--after-replies 3|--idle 1h --say "text"   # a nudge in the agent's event feed
 react-feedback remind <id> list | remove <rid> | off-default | on-default
 react-feedback mcp                                              # an MCP server on stdio (see Connect your agents)
+react-feedback ask-cancel <id> <qid> [--reason "why"]           # withdraw an unanswered question
+react-feedback ask-bump <id> <qid>                              # ask it again at the bottom of the thread
+react-feedback artifact publish <id> <file.html|file.md> --title "Title" [--id <artifact>]
+react-feedback artifact list [<id>]
+react-feedback artifact suggest-share <artifact>                # a Share? button; this does not create a link
+react-feedback artifact share <artifact> [--expires 1d|7d|30d] [--latest]
+react-feedback artifact unshare <share-id>                      # only a link this agent created
 ```
+
+`--project <id>` (or `FEEDBACK_PROJECT`) picks a project when `FEEDBACK_PROJECTS` is set. The default is the first project. An agent share expires in 7 days unless `--expires` says 1d or 30d. A link with no expiry is created from the inbox, not the CLI.
 
 ## Thread reminders
 
@@ -293,7 +306,7 @@ In the inbox: **Reminders** in the thread's ⋯ menu on a phone (a header button
 
 `react-feedback mcp` runs an [MCP](https://modelcontextprotocol.io) server on stdio, built on the official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32.2), so any MCP client can use the inbox. The tools call the same store the CLI uses (the same checks, limits and per-thread lock files, so a CLI and an MCP agent writing at once cannot corrupt a thread), never a shell.
 
-Tools: `list_threads` (`waiting`, `area`, `q`), `read_thread` (marks it read for that agent), `reply` (`to`, `fyi`, `needs_you`, `done`, `todo[]`, `check[]`, `aside`, and an optional local `image` path), `ask`, `new_thread` (`read_only`), `todo_add`, `todo_check`, `tracker`, `merge`, `move`, `ack`, `remind_add`, `remind_list`, `remind_remove` and `events_since` (poll the event feed with a cursor; no cursor means "from now", cursor `0` replays it; each event's `first_line` comes back as a `text` data field). There is deliberately **no** `redact`, `unredact` or `ask_secret` over MCP: those stay with the trusted CLI.
+Tools: `list_threads` (`waiting`, `area`, `q`), `read_thread` (marks it read for that agent), `reply` (`to`, `fyi`, `needs_you`, `done`, `todo[]`, `check[]`, `aside`, and an optional local `image` path), `ask`, `new_thread` (`read_only`), `todo_add`, `todo_check`, `tracker`, `merge`, `move`, `ack`, `remind_add`, `remind_list`, `remind_remove`, `events_since` (poll the event feed with a cursor; no cursor means "from now", cursor `0` replays it; each event's `first_line` comes back as a `text` data field), `publish_artifact`, `list_artifacts`, `suggest_share` (asks the person; it does not create a link), `share_artifact` (`expires` of `1d`, `7d` or `30d`, default 7 days; `latest` follows new versions), `revoke_share` (a link this agent created), `cancel_question` and `bump_question`. There is deliberately **no** `redact`, `unredact` or `ask_secret` over MCP: those stay with the trusted CLI. Pass `--project <id>` or set `FEEDBACK_PROJECT` when `FEEDBACK_PROJECTS` is set.
 
 **Names.** Each server instance posts as `FEEDBACK_AGENT_NAME` (for example `Codex` or `Claude Desktop`) and keeps its own read state. The inbox shows the name, with an avatar colour made from it. Messages from an unnamed agent (the CLI, or no `FEEDBACK_AGENT_NAME`) are unchanged and use the agent profile. Names that could pass for you or the system (`you`, `user`, `system`, your own inbox name, compared without case, width or invisible characters) are refused, and zero-width and bidi characters are removed.
 
@@ -322,6 +335,47 @@ Claude Desktop (`claude_desktop_config.json`):
 ```
 
 Any other stdio client: run `bun /path/to/react-feedback/bin/react-feedback.ts mcp` with `FEEDBACK_DIR`, `FEEDBACK_AGENT_NAME` and (to allow images) `FEEDBACK_IMAGE_DIR` in its environment (installed as a dependency, the same file is `node_modules/react-feedback/bin/react-feedback.ts`). It needs Bun on the path.
+
+## Artifacts
+
+An agent publishes a page on a thread: HTML as written, or Markdown rendered by the same safe renderer the inbox uses for messages (nothing is parsed as HTML). Each publish is a version, `v1`, `v2`, …, and older versions stay. The inbox shows a card on the thread and lists every page under **Artifacts**, next to Tracker. Open one at `#/artifact/<id>` (and `#/artifact/<id>/v<n>` for an older version).
+
+The page is not part of the inbox origin. It is served from `/__feedback/a/<id>/v<n>` with `Content-Security-Policy: sandbox allow-scripts allow-popups`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, and the viewer embeds that URL in `<iframe sandbox="allow-scripts allow-popups">`. A script in the page cannot read the inbox's `localStorage`, cookies or API.
+
+## Share links
+
+**Share** on the viewer asks for an expiry (1 day, 7 days, 30 days, or none) and creates `/__feedback/s/<token>`. The token is 32 random bytes; the server stores only its sha256. The link serves the version from when it was created, or whatever is latest if that box was ticked, with the same sandbox and `X-Robots-Tag: noindex`. It has no inbox chrome and no API. A revoked link, an expired link and an unknown token all answer with the same 404. Each view increments a counter and a last-viewed time. The address and the user agent are not stored.
+
+The card and the viewer show **Shared · 2 links · viewed 5×**. Manage lists who created each link, when, the expiry, the views and the last view, and Revoke. The Artifacts page lists every active link, with Revoke.
+
+An agent can create a link too (`artifact share`, `share_artifact`). Its expiry defaults to 7 days and cannot be longer than 30; "no expiry" is only from the inbox. The link records who created it (`you`, or the agent's name). Creating one posts a line on the thread so it is visible at once, and the pill updates. Before the link is created, the page is scanned for things that look like secrets (API keys, private keys, tokens, passwords). A hit refuses the agent's link. The person can still share from the inbox after a warning. An agent can revoke only a link it created; the person can revoke any of them. `suggest_share` only shows **Share?** on the card.
+
+If the site in front of the server asks people to log in, let `/__feedback/s/*` through and only that path. The inbox, the API and `/__feedback/a/` stay behind the login. The link is unguessable; the rest of the server is not. In Caddy, one way to do that is to match the share path on its own and proxy it to the feedback server:
+
+```caddyfile
+@shared path /__feedback/s/*
+handle @shared {
+	reverse_proxy 127.0.0.1:8099
+}
+```
+
+## Projects
+
+One server can host several projects. `FEEDBACK_PROJECTS` is a JSON list:
+
+```json
+[{"id": "app", "name": "App", "dir": "/data/app"}, {"id": "site", "name": "Site", "dir": "/data/site"}]
+```
+
+Each project has its own threads, artifacts, shares, events and agents. Requests take `?project=<id>`. Leaving it off means the first project, so a single-project URL keeps working. When `FEEDBACK_PROJECTS` is unset there is one project (`FEEDBACK_DIR`, exactly as before) and `?project=` is ignored.
+
+The project name is at the top of the sidebar (the top of the list on a phone). With two or more, it opens a menu of every project and its unread count. The last choice is remembered in this browser. One project hides the menu. The CLI and the MCP server take `--project <id>` or `FEEDBACK_PROJECT`; the default is the first project.
+
+## Pinned questions
+
+A question that still needs an answer is a bar above the composer: **Waiting for your answer**, the newest prompt, and **2 more** when several are open. Tap it to answer there. `ask-cancel <id> <qid>` (MCP `cancel_question`) withdraws it: the prompt is struck through, it cannot be answered, and it no longer counts as waiting. `ask-bump <id> <qid>` (MCP `bump_question`) asks the same question again at the bottom and marks the old one "Re-asked below".
+
+An answer in the thread shows a chip, **↩ q109 · Build secret share links…**, which scrolls to that question. The same line is what `read` prints and what `_events.jsonl` stores as `first_line` (`q109 (Build secret share links…): Yes, build it`), so two answers are easy to tell apart. Answers already stored get the chip from their `question_id`; nothing is rewritten.
 
 ## Quote replies
 
@@ -404,13 +458,13 @@ At 760 px and narrower the thread view is one slim header (← title, the checkl
 
 ## HTTP API
 
-All under `/__feedback/`. `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id`, `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only).
+All under `/__feedback/`. With `FEEDBACK_PROJECTS` set, add `?project=<id>` (omit it for the first project). `GET healthz`; `GET|POST api/items` (the widget's capture endpoint); `GET api/items/:id/:file`; `GET|POST api/threads`, `GET api/threads/:id` (includes `artifacts`), `POST api/threads/:id/messages|status|read|answer|merge` (a message body may carry `reply_to`, the id of an earlier message in the same thread; an unknown id is a 400); `GET|POST|PATCH|DELETE api/threads/:id/checklist`; `GET|POST api/profile`; `GET|POST api/pins`; `GET api/areas`; `GET api/presence`; `GET api/metrics?window=24h|7d|all`; `GET api/tracker`; `GET|POST api/threads/:id/reminders`, `POST api/threads/:id/reminders/default`, `DELETE api/threads/:id/reminders/:rid`; `GET api/projects` (`[{id, name, unread}]`, never a directory); `GET api/artifacts` and `GET api/artifacts/:id`; `POST api/artifacts/:id/share` (`{expires: "1d"|"7d"|"30d"|"none", latest?, confirm?}`); `GET api/shares`; `POST api/shares/:id/revoke`. A message body may also carry `aside: true`, `todo` and `for`, and `client_id` and `written_at` (an offline queue's id and writing time). Also: `GET api/config` (`version`, `secret_target`, `redact`); `POST api/threads/:id/messages/:mid/redact` (the user's own messages, when a vault is set); `POST api/threads/:id/messages/:mid/secret` (`{ status: "saved", hint? }` only). `GET /__feedback/a/:id/v:n` is the sandboxed page. `GET /__feedback/s/:token` is a share link.
 
 A capture is `POST api/items` with a JSON body of at most 25 MiB: `{ note, mode: "region"|"element"|"section"|"page", target?, image, annotated?, context_image?, context }`. Notes are 1 to 10 000 characters; `image` must be a PNG data URL.
 
 ## Security notes
 
-This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox. The key box and the vault do not change that: they keep a key out of the thread, and a redacted message out of the served data, but they do not authenticate anyone. Anyone who can reach the server can still ask it to redact the user's messages.
+This is meant for **local or development use**. The server has **no authentication**, anyone who can reach it can read every capture (screenshots can contain whatever is on the page) and write threads. Do not expose it to the internet as it is. Bind it to `127.0.0.1`, or put authentication in front of it (a reverse proxy with basic auth or SSO, or a private network or tunnel with access control). A share link is the one path to let through that login: `/__feedback/s/*` and only that path (see [Share links](#share-links)). Do not run it in production builds of your app: gate the widget behind a flag. Uploaded images are checked by signature and size, file names are fixed or generated, and all stored text is escaped in the inbox. The key box and the vault do not change that: they keep a key out of the thread, and a redacted message out of the served data, but they do not authenticate anyone. Anyone who can reach the server can still ask it to redact the user's messages. An artifact page is sandboxed (no same origin), so its scripts cannot read the inbox.
 
 ## Development
 
@@ -423,6 +477,7 @@ bun e2e/rf6.mjs     # optional browser test: phone layout, key box, redaction, o
 bun e2e/rf7.mjs     # optional browser test: thread reminders and agent names (same needs)
 bun e2e/rf8.mjs     # optional browser test: reminders only in the sheet, last seen in the header (same needs)
 bun e2e/rf9.mjs     # optional browser test: version footer and the update banner (same needs)
+bun e2e/v09.mjs     # optional browser test: artifacts, share links, the sandbox, projects and pinned questions (same needs)
 bun run build       # rebuilds dist/: index.js, index.d.ts, feedback.css, embed.js
 ```
 

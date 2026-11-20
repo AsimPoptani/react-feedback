@@ -8,6 +8,9 @@ import * as reminders from './reminders';
 import { redactMessage, recordSecretSaved, validateVault } from './sensitive';
 import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
+import * as artifacts from './artifacts';
+import * as shares from './shares';
+import { loadProjects, projectById, type Project } from './projects';
 
 const PREFIX = '/__feedback';
 const FILE = /^(image\.png|annotated\.png|context\.png|feedback\.md)$/;
@@ -209,9 +212,12 @@ async function threadDetail(dir: string, id: string) {
   const context = (item.context ?? {}) as ObjectData;
   const path = join(dir, id);
   const has = (name: string) => lstat(join(path, name)).then(s => s.isFile(), () => false);
+  const allShares = await shares.readShares(dir);
+  const published = (await artifacts.listArtifacts(dir, id)).map(meta => ({ id: meta.id, thread: meta.thread, title: meta.title, latest: meta.latest, updated_at: meta.updated_at,
+    versions: meta.versions.map(version => version.n), ...(meta.suggest ? { suggest: true } : {}), ...shares.statsFor(allShares, meta.id) }));
   return { ...summary, url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: item.target ?? null,
     note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages,
-    reminders_fired: (await reminders.readStored(path)).fired };
+    reminders_fired: (await reminders.readStored(path)).fired, artifacts: published };
 }
 async function profileRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
   const base = `${PREFIX}/api/profile`;
@@ -260,7 +266,58 @@ async function pinsRoute(req: Request, dir: string, path: string, read: (req: Re
   const data = await read(req);
   return json(await store.setPin(dir, { kind: data.kind, id: data.id, pinned: data.pinned }));
 }
-export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number }
+export interface HandlerOptions { secretTarget?: string | null; vaultDir?: string | null; now?: () => number; projects?: Project[] }
+const SANDBOX = { 'Content-Security-Policy': 'sandbox allow-scripts allow-popups', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' };
+const SHARE_MISS = { ...SANDBOX, 'Content-Type': 'text/plain; charset=utf-8', 'X-Robots-Tag': 'noindex' };
+// Revoked, expired and unknown tokens are this one response: same status, same body, same headers.
+const shareMiss = () => new Response('Not found\n', { status: 404, headers: SHARE_MISS });
+const shareHit = (html: string) => new Response(html, { headers: { ...SANDBOX, 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex' } });
+function dataDirOf(req: Request, fallback: string, projects?: Project[]): string {
+  if (!projects) return fallback; // single-project mode: ?project= is ignored and every URL is the one it has always been
+  const id = new URL(req.url).searchParams.get('project');
+  if (!id) return projects[0]?.dir ?? fallback;
+  return projectById(projects, id).dir;
+}
+async function projectList(projects: Project[], fallback: string): Promise<{ id: string; name: string; unread: number }[]> {
+  const list = projects.length ? projects : [{ id: 'default', name: 'Feedback', dir: fallback }];
+  const out: { id: string; name: string; unread: number }[] = [];
+  for (const project of list) {
+    let unread = 0;
+    try { unread = (await store.listThreads(project.dir)).filter(thread => thread.unread_for_user).length; } catch { unread = 0; }
+    out.push({ id: project.id, name: project.name, unread });
+  }
+  return out;
+}
+async function artifactRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, now: number): Promise<Response | null> {
+  if (path === `${PREFIX}/api/artifacts` && req.method === 'GET') {
+    const thread = new URL(req.url).searchParams.get('thread') ?? undefined;
+    const [list, all] = [await artifacts.listArtifacts(dir, thread || undefined), await shares.readShares(dir)];
+    return json(list.map(meta => ({ ...meta, ...shares.statsFor(all, meta.id, now) })));
+  }
+  if (path === `${PREFIX}/api/shares` && req.method === 'GET') {
+    const [all, metas] = [await shares.readShares(dir), await artifacts.listArtifacts(dir)];
+    const titles = new Map(metas.map(meta => [meta.id, meta.title]));
+    return json(all.filter(share => shares.isActive(share, now)).map(share => ({ ...shares.publicShare(share, now), title: titles.get(share.artifact) ?? '' })));
+  }
+  const one = path.match(/^\/__feedback\/api\/artifacts\/(a[0-9a-f]{12})$/);
+  if (one && req.method === 'GET') {
+    const meta = await artifacts.readArtifact(dir, one[1]!);
+    if (!meta) return json({ kind: 'not_found' }, 404);
+    const all = await shares.readShares(dir);
+    return json({ ...meta, ...shares.statsFor(all, meta.id, now), shares: all.filter(share => share.artifact === meta.id && shares.isActive(share, now)).map(share => shares.publicShare(share, now)) });
+  }
+  const sharePost = path.match(/^\/__feedback\/api\/artifacts\/(a[0-9a-f]{12})\/share$/);
+  if (sharePost && req.method === 'POST') {
+    const data = await read(req);
+    const expires = data.expires;
+    if (expires !== '1d' && expires !== '7d' && expires !== '30d' && expires !== 'none') throw new Invalid('Expiry is 1 day, 7 days, 30 days or none');
+    const created = await shares.createShare(dir, { artifact: sharePost[1]!, expires, latest: data.latest === true, by: 'you', agent: false, confirm: data.confirm === true, now });
+    return json({ id: created.share.id, url: created.path, expires_at: created.share.expires_at, version: created.share.version, created_by: 'you' }, 201);
+  }
+  const revoke = path.match(/^\/__feedback\/api\/shares\/(s[0-9a-f]{8})\/revoke$/);
+  if (revoke && req.method === 'POST') { await read(req); return json(await shares.revokeShare(dir, revoke[1]!, { user: true }, now)); }
+  return null;
+}
 async function threadRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>, areas: AreasConfig, options: HandlerOptions): Promise<Response | null> {
   const base = `${PREFIX}/api/threads`;
   const vaultDir = options.vaultDir !== undefined ? options.vaultDir : loadVaultDir();
@@ -325,15 +382,40 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
   return async (req: Request): Promise<Response> => {
     try {
       const path = new URL(req.url).pathname;
+      const now = options.now?.() ?? Date.now();
+      // A share link is not the inbox. It looks in every project, and a miss is the same 404 however it failed. Nothing about the request is logged.
+      const shared = path.match(/^\/__feedback\/s\/([^/]+)$/);
+      if (shared && req.method === 'GET') {
+        let token = shared[1]!;
+        try { token = decodeURIComponent(token); } catch { return shareMiss(); }
+        const folders = options.projects?.length ? options.projects.map(project => project.dir) : [dir];
+        for (const folder of folders) {
+          const html = await shares.openShare(folder, token, now);
+          if (html !== null) return shareHit(html);
+        }
+        return shareMiss();
+      }
+      if (path === `${PREFIX}/api/projects` && req.method === 'GET') {
+        await store.touchPresence(options.projects?.[0]?.dir ?? dir, 'user', now);
+        return json({ projects: await projectList(options.projects ?? [], dir) });
+      }
+      const dataDir = dataDirOf(req, dir, options.projects);
+      const page = path.match(/^\/__feedback\/a\/(a[0-9a-f]{12})\/v(\d+)$/);
+      if (page && req.method === 'GET') {
+        try { return new Response(await artifacts.artifactHtml(dataDir, page[1]!, Number(page[2])), { headers: { ...SANDBOX, 'Content-Type': 'text/html; charset=utf-8' } }); }
+        catch (error) { if (error instanceof Invalid && error.status === 404) return new Response('Not found\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' } }); throw error; }
+      }
       // The user is here when the inbox page loads, polls or sends: the widget's own captures (api/items) and the health check do not count.
-      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas)(\/|$)/.test(path)) await store.touchPresence(dir, 'user', options.now?.());
+      if (path === `${PREFIX}/inbox/` || /^\/__feedback\/api\/(threads|profile|pins|tracker|config|presence|metrics|areas|artifacts|shares)(\/|$)/.test(path)) await store.touchPresence(dataDir, 'user', now);
       if (req.method === 'GET' && path === `${PREFIX}/healthz`) return json({ status: 'ok' });
-      if (path === `${PREFIX}/api/items` && req.method === 'POST') return await create(dir, await body(req));
-      if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dir);
+      if (path === `${PREFIX}/api/items` && req.method === 'POST') return await create(dataDir, await body(req));
+      if (path === `${PREFIX}/api/items` && req.method === 'GET') return await list(dataDir);
       const match = path.match(/^\/__feedback\/api\/items\/([^/]+)\/([^/]+)$/);
-      if (match) return await itemRoute(req, dir, match[1]!, match[2]!);
-      const threads = await threadRoute(req, dir, path, body, areas, options);
+      if (match) return await itemRoute(req, dataDir, match[1]!, match[2]!);
+      const threads = await threadRoute(req, dataDir, path, body, areas, options);
       if (threads) return threads;
+      const published = await artifactRoute(req, dataDir, path, body, now);
+      if (published) return published;
       const embed = await embedRoute(req, path);
       if (embed) return embed;
       const inbox = await inboxRoute(req, path);
@@ -351,9 +433,10 @@ export const handle = createHandler(process.env.FEEDBACK_DIR ?? resolve(process.
 export function serverOptions(env: Record<string, string | undefined> = process.env) {
   const areas = loadAreas(env);
   const secretTarget = loadSecretTarget(env), vaultDir = loadVaultDir(env);
-  const feedbackDir = env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
-  validateVault(feedbackDir, vaultDir);
-  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir });
+  const configured = env.FEEDBACK_PROJECTS?.trim() ? loadProjects(env) : null;
+  const feedbackDir = configured?.[0]?.dir ?? env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
+  for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
+  const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}) });
   return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: LIMIT, fetch };
 }
 if (import.meta.main) Bun.serve(serverOptions());

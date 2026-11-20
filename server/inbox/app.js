@@ -11,6 +11,7 @@ import { presenceLines } from './presence.js';
 import { DISMISS_KEY, offeredVersion, updateBannerText } from './version.js';
 export { inline, markdown };
 const API = new URL('../api/', location.href).pathname;
+const PROJECT_KEY = 'fb-inbox-project';
 const POLL_MS = 10000;
 const MAX_IMAGES = 5;
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -31,7 +32,8 @@ const CL_KEY = 'fb-inbox-checklist';
 const state = { trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
   view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
-  profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds() };
+  profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, folds: loadFolds(),
+  projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function loadFolds() { try { const v = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
 function loadClPref() { try { const v = JSON.parse(localStorage.getItem(CL_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -39,9 +41,19 @@ function saveClPref() { try { localStorage.setItem(CL_KEY, JSON.stringify(state.
 function saveFolds() { try { localStorage.setItem(FOLD_KEY, JSON.stringify(state.folds)); } catch { /* storage may be blocked */ } }
 
 // A request that got no answer at all is a NetworkError (`network: true`): the inbox goes offline-aware instead of showing a failure.
+function projectQuery() {
+  if (!state.project || !state.defaultProject || state.project === state.defaultProject) return '';
+  return `project=${encodeURIComponent(state.project)}`;
+}
+function withProject(path) {
+  if (path === 'projects' || path.startsWith('projects?')) return path;
+  const q = projectQuery();
+  if (!q) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}${q}`;
+}
 async function api(path, options) {
   let response;
-  try { response = await fetch(API + path, options); }
+  try { response = await fetch(API + withProject(path), options); }
   catch { setOffline(true); const e = new Error("You're offline, or the server can't be reached."); e.network = true; throw e; }
   setOffline(!!response.headers?.get?.('X-Fb-Offline')); // the service worker marks a saved copy it served in place of the network
   if (!response.ok) {
@@ -52,7 +64,7 @@ async function api(path, options) {
   return response.json();
 }
 const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-const fileUrl = (id, name) => `${API}items/${id}/${name}`;
+const fileUrl = (id, name) => `${API}items/${id}/${name}${projectQuery() ? `?${projectQuery()}` : ''}`;
 const noop = () => {};
 const isOffline = () => state.offline || navigator.onLine === false;
 function setOffline(value) { if (state.offline === value) return; state.offline = value; drawOffline(); if (state.detail) drawMessages(state.detail); if (!value) outbox.flush(); } // back from offline: send what waited, even with no online event (a server restart)
@@ -405,10 +417,12 @@ function toggleOption(q, optId) {
   paintCard(q);
 }
 function paintCard(q) {
-  const card = document.querySelector(`[data-question="${q.id}"]`); if (!card) return;
+  const cards = document.querySelectorAll(`[data-question="${q.id}"]`); if (!cards.length) return;
   const s = selFor(q);
-  for (const b of card.querySelectorAll('.qopt')) b.setAttribute('aria-pressed', String(s.ids.includes(b.dataset.opt)));
-  const submit = card.querySelector('.qsubmit'); if (submit) submit.disabled = !s.ids.length && !s.other.trim();
+  for (const card of cards) {
+    for (const b of card.querySelectorAll('.qopt')) b.setAttribute('aria-pressed', String(s.ids.includes(b.dataset.opt)));
+    const submit = card.querySelector('.qsubmit'); if (submit) submit.disabled = !s.ids.length && !s.other.trim();
+  }
 }
 async function submitAnswer(q) {
   const d = state.detail, s = selFor(q);
@@ -422,7 +436,10 @@ async function submitAnswer(q) {
   finally { state.busy = false; }
 }
 function questionCard(d, m) {
-  const q = m.question, ans = answerFor(d, q), s = selFor(q);
+  const q = m.question;
+  if (q.withdrawn) return el('div', { class: 'qcard withdrawn', 'data-question': q.id, role: 'group', 'aria-label': 'Withdrawn question' }, el('p', { class: 'prompt struck', text: q.prompt }), el('p', { class: 'locked', text: q.withdrawn.reason ? `Withdrawn · ${q.withdrawn.reason}` : 'Withdrawn' }));
+  if (q.reasked) return el('div', { class: 'qcard reasked', 'data-question': q.id, role: 'group', 'aria-label': 'Re-asked question' }, el('p', { class: 'prompt struck', text: q.prompt }), el('p', { class: 'locked', text: 'Re-asked below' }));
+  const ans = answerFor(d, q), s = selFor(q);
   const card = el('div', { class: 'qcard', 'data-question': q.id, role: 'group', 'aria-label': 'Question' }, el('p', { class: 'prompt', text: q.prompt }));
   const chosen = ans ? ans.answer.option_ids : [];
   const opts = el('div', { class: 'qopts' }, ...q.options.map((o, i) => {
@@ -467,8 +484,15 @@ const FOLD_FYI = document.body.hasAttribute('data-fold-fyi');
 const quiet = (d, m) => FOLD_FYI && !d.read_only && m.author === 'agent' && (m.flag === 'fyi' || m.flag === 'done') && !m.question && !m.divider;
 const expandKey = (d, m) => `${d.id}:${m.id}`;
 function toggleExpanded(d, m) { const k = expandKey(d, m); if (state.expanded.has(k)) state.expanded.delete(k); else state.expanded.add(k); state.shown = ''; drawMessages(d); }
+function jumpToQuestion(qid) {
+  const card = document.querySelector(`#scroll [data-question="${qid}"]`);
+  if (!card) return;
+  card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+}
 function messageNode(d, m) {
   if (m.divider && m.moved_to) return el('div', { class: 'divider', role: 'separator', 'data-mid': m.id }, el('span', {}, 'Moved to ', el('a', { href: `#/${m.moved_to}`, text: (/^Moved to \[(.*)\]\(#\//.exec(m.text) || [])[1] || 'another thread' })));
+  if (m.divider && m.kind === 'share_notice') return el('div', { class: 'divider share-notice', role: 'status' }, el('span', { text: m.text.replace(/ · Revoke$/, '') }), ...(m.share_id ? [el('button', { type: 'button', onclick: () => { void revokeShare(m.share_id); } }, 'Revoke')] : []));
   if (m.divider) return el('div', { class: 'divider', role: 'separator' }, el('span', { text: m.text }));
   const who = m.agent_name ? { ...state.profile.agent, name: m.agent_name } : state.profile[m.author];
   const farewell = d.merged_into && m === d.messages[d.messages.length - 1]; // the link to the merged thread stays visible
@@ -489,6 +513,10 @@ function messageNode(d, m) {
   const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '-1', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
   if (m.redacted) { node.classList.add('redacted'); node.append(el('p', { class: 'locked', ...(m.redacted.reason ? { title: m.redacted.reason } : {}), text: lockedText(m) })); return node; }
+  if (m.answer) {
+    const asked = (d.messages || []).find(item => item.question?.id === m.answer.question_id)?.question;
+    node.append(el('button', { type: 'button', class: 'qchip', onclick: () => jumpToQuestion(m.answer.question_id) }, `↩ ${m.answer.question_id} · ${clip(asked?.prompt || 'Question', 42)}`));
+  }
   if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
   if (m.kind === 'secret_request' && m.secret) node.append(secretNode(d, m));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
@@ -641,7 +669,7 @@ function queuedNode(d, e) {
 function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '')),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.kind || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
@@ -954,14 +982,19 @@ async function doMerge(target) {
 }
 function drawThread() {
   const d = state.detail;
-  $('app').classList.toggle('has-thread', !!d || state.metricsOn || state.trackerOn);
-  $('placeholder').style.display = d || state.metricsOn || state.trackerOn ? 'none' : '';
+  const page = state.metricsOn || state.trackerOn || state.artifactOn || state.artifactsOn;
+  $('app').classList.toggle('has-thread', !!d || page);
+  $('placeholder').style.display = d || page ? 'none' : '';
   $('tracker').style.display = state.trackerOn ? 'flex' : 'none';
   $('tracker-link').setAttribute('aria-current', state.trackerOn ? 'page' : 'false');
   $('open').style.display = d ? 'flex' : 'none';
   $('metrics').style.display = state.metricsOn ? 'flex' : 'none';
   $('metrics-link').setAttribute('aria-current', state.metricsOn ? 'page' : 'false');
-  if (!d) return;
+  const art = $('artifact'), arts = $('artifacts'), artLink = $('artifacts-link');
+  if (art) art.style.display = state.artifactOn ? 'flex' : 'none';
+  if (arts) arts.style.display = state.artifactsOn ? 'flex' : 'none';
+  if (artLink) artLink.setAttribute('aria-current', state.artifactOn || state.artifactsOn ? 'page' : 'false');
+  if (!d) { drawWaiting(null); return; }
   drawReadOnly(d);
   $('title').textContent = d.title;
   document.title = `${d.title} · Feedback inbox`;
@@ -969,14 +1002,15 @@ function drawThread() {
   if (state.captureFor !== d.id) { drawCapture(d); state.captureFor = d.id; }
   $('merge-open').hidden = !!d.merged_into || d.read_only === true;
   drawPinThread(); drawChecklist(d);
-  drawMessages(d); drawReplyBar();
+  drawMessages(d); drawArtifactCards(d); drawWaiting(d); drawReplyBar();
 }
 async function loadThread(id, { quiet = false } = {}) {
   try {
     const d = await api(`threads/${id}`);
     if (id !== state.openId) return;
     state.detail = d; drawThread(); if (state.focusItem) focusItemNow();
-    if (d.last_author === 'agent' && (!d.user_read_at || d.user_read_at < d.last_message_at)) { // ticks need the read marker even for FYIs
+    const shareUnread = (d.messages || []).some(m => m.kind === 'share_notice' && (!d.user_read_at || m.created_at > d.user_read_at));
+    if ((d.last_author === 'agent' && (!d.user_read_at || d.user_read_at < d.last_message_at)) || shareUnread) { // ticks need the read marker even for FYIs; a share notice counts as unread too
       // Stamp what we actually showed, so a message that arrived since is not marked read unseen.
       await post(`threads/${id}/read`, { seen: d.last_message_at });
       if (id === state.openId && state.detail === d) { d.user_read_at = d.last_message_at; d.unread_for_user = false; drawThread(); }
@@ -988,11 +1022,15 @@ async function loadThread(id, { quiet = false } = {}) {
   }
 }
 function route() {
-  const [, raw = null, item = null] = /^#\/([\w-]+)(?:\/(c\d+))?$/.exec(location.hash) || [];
+  const artMatch = /^#\/artifact\/(a[0-9a-f]{12})(?:\/v(\d+))?$/.exec(location.hash);
+  const artsPage = location.hash === '#/artifacts';
+  const [, raw = null, item = null] = artMatch || artsPage ? [] : (/^#\/([\w-]+)(?:\/(c\d+))?$/.exec(location.hash) || []);
   const metrics = raw === 'metrics', tracker = raw === 'tracker', id = metrics || tracker ? null : raw;
+  const artifactId = artMatch ? artMatch[1] : null;
+  const artifactVer = artMatch && artMatch[2] ? Number(artMatch[2]) : null;
   state.focusItem = id && item ? item : null;
-  if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn) { if (state.focusItem && state.detail) focusItemNow(); return; }
-  state.metricsOn = metrics; state.trackerOn = tracker;
+  if (id === state.openId && metrics === state.metricsOn && tracker === state.trackerOn && artsPage === state.artifactsOn && artifactId === state.artifactId && artifactVer === state.artifactVer) { if (state.focusItem && state.detail) focusItemNow(); return; }
+  state.metricsOn = metrics; state.trackerOn = tracker; state.artifactsOn = artsPage; state.artifactOn = !!artMatch; state.artifactId = artifactId; state.artifactVer = artifactVer;
   state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); closeMenu(false);
   $('text').value = ''; growText(); drawPreviews($('previews'), state.images, noop); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
@@ -1000,6 +1038,8 @@ function route() {
   if (id) loadThread(id);
   if (metrics) loadMetrics();
   if (tracker) loadTracker();
+  if (artMatch) loadArtifact();
+  if (artsPage) loadArtifactsPage();
 }
 
 // ---- Tracker: every checklist item across the threads, grouped For you, For the agent and Done recently.
@@ -1442,16 +1482,193 @@ async function refreshPresence() {
   try { state.presence = await api('presence'); } catch { /* keep the last one */ }
   drawPresence();
 }
+function clip(text, n) {
+  const flat = String(text || '').trim().replace(/\s+/g, ' ');
+  return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
+}
+function liveQuestions(d) {
+  if (!d || d.read_only) return [];
+  const answered = new Set((d.messages || []).flatMap(m => (m.answer ? [m.answer.question_id] : [])));
+  return (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !answered.has(m.question.id));
+}
+function drawWaiting(d) {
+  const bar = $('waiting-bar'); if (!bar) return;
+  const open = liveQuestions(d);
+  if (!open.length) { bar.hidden = true; bar.replaceChildren(); state.waitingOpen = false; return; }
+  const newest = open[open.length - 1];
+  const more = open.length - 1;
+  bar.hidden = false;
+  const head = el('button', { type: 'button', class: 'waiting-head', 'aria-expanded': String(!!state.waitingOpen), onclick: () => { state.waitingOpen = !state.waitingOpen; drawWaiting(d); } },
+    el('strong', { text: 'Waiting for your answer' }), el('span', { text: clip(newest.question.prompt, 80) }), ...(more ? [el('span', { class: 'hint', text: `${more} more` })] : []));
+  bar.replaceChildren(head);
+  if (state.waitingOpen) bar.append(questionCard(d, newest));
+}
+function pillText(a) {
+  const links = a.links || 0; if (!links) return '';
+  return `Shared · ${links} ${links === 1 ? 'link' : 'links'} · viewed ${a.views || 0}×`;
+}
+function artifactSrc(id, version) {
+  const q = projectQuery();
+  return `/__feedback/a/${id}/v${version}${q ? `?${q}` : ''}`;
+}
+function artifactCard(a) {
+  const kids = [el('strong', { text: a.title }), el('span', { class: 'hint', text: `v${a.latest}` }), el('a', { href: `#/artifact/${a.id}`, text: 'Open' })];
+  if (a.links) kids.push(el('button', { type: 'button', class: 'pill', onclick: () => { void openManage(a.id); } }, pillText(a)));
+  if (a.suggest) kids.push(el('button', { type: 'button', class: 'primary', onclick: () => openShare(a.id) }, 'Share?'));
+  return el('article', { class: 'art-card', 'data-artifact': a.id }, ...kids);
+}
+function drawArtifactCards(d) {
+  const host = $('artifact-cards'); if (!host) return;
+  const rows = d?.artifacts || [];
+  host.replaceChildren(...rows.map(artifactCard));
+}
+function drawProjects() {
+  const box = $('project-switch'); if (!box) return;
+  const many = state.projects.length > 1;
+  box.hidden = !many;
+  if (!many) return;
+  const current = state.projects.find(p => p.id === state.project) || state.projects[0];
+  $('project-name').textContent = current?.name || 'Project';
+  $('project-menu').replaceChildren(...state.projects.map(p => el('button', { type: 'button', role: 'menuitem', 'aria-current': p.id === state.project ? 'true' : 'false', onclick: () => chooseProject(p.id) },
+    el('span', { text: p.name }), el('span', { class: 'count', text: p.unread ? String(p.unread) : '' }))));
+}
+function chooseProject(id) {
+  $('project-menu').hidden = true;
+  $('project-button')?.setAttribute('aria-expanded', 'false');
+  if (id === state.project) return;
+  state.project = id;
+  try { localStorage.setItem(PROJECT_KEY, id); } catch { /* storage may be blocked */ }
+  state.threads = []; state.detail = null; state.openId = 'switching';
+  if (location.hash !== '#/') location.hash = '#/';
+  refreshList().then(() => { state.openId = 'switching'; route(); });
+}
+async function refreshProjects() {
+  let data = null;
+  try { data = await api('projects'); } catch { data = null; }
+  if (!data || !Array.isArray(data.projects)) { drawProjects(); return; }
+  const list = data.projects;
+  state.projects = list;
+  state.defaultProject = list[0]?.id || '';
+  let saved = '';
+  try { saved = localStorage.getItem(PROJECT_KEY) || ''; } catch { saved = ''; }
+  if (!state.project || !list.some(p => p.id === state.project)) state.project = list.some(p => p.id === saved) ? saved : state.defaultProject;
+  drawProjects();
+}
+function shareLink(path) { return `${location.origin}${path}`; }
+function openShare(id) {
+  state.shareFor = id; state.sharePending = null;
+  showError($('share-error'), '');
+  $('share-url').hidden = true; $('share-url').textContent = '';
+  $('share-copy').hidden = true; $('share-create').hidden = false;
+  const picked = document.querySelector('input[name="share-exp"][value="7d"]'); if (picked) picked.checked = true;
+  if ($('share-latest')) $('share-latest').checked = false;
+  $('share-dialog').showModal();
+}
+function showShareLink(path) {
+  const url = shareLink(path);
+  $('share-url').hidden = false; $('share-url').textContent = url;
+  $('share-copy').hidden = false; $('share-create').hidden = true;
+  $('share-copy').onclick = async () => { try { await navigator.clipboard.writeText(url); $('share-copy').textContent = 'Copied'; } catch { $('share-copy').textContent = 'Copy failed'; } };
+}
+async function createUserShare(confirm) {
+  const id = state.shareFor; if (!id) return;
+  const expires = document.querySelector('input[name="share-exp"]:checked')?.value || '7d';
+  const latest = !!$('share-latest')?.checked;
+  try {
+    const created = await post(`artifacts/${id}/share`, { expires, latest, ...(confirm ? { confirm: true } : {}) });
+    showShareLink(created.url);
+    if (state.openId) await loadThread(state.openId, { quiet: true });
+    if (state.artifactOn) await loadArtifact();
+    if (state.artifactsOn) await loadArtifactsPage();
+  } catch (error) {
+    if (!confirm && /looks like it contains/.test(error.message)) {
+      $('share-warn-text').textContent = error.message;
+      $('share-dialog').close();
+      $('share-warn').showModal();
+      return;
+    }
+    showError($('share-error'), error.message);
+    if (!$('share-dialog').open) $('share-dialog').showModal();
+  }
+}
+function linkRow(link, title) {
+  return el('div', { class: 'share-row' },
+    ...(title ? [el('a', { href: `#/artifact/${link.artifact}`, text: title })] : []),
+    el('p', { text: `${link.created_by} · ${when(link.created_at)} · ${link.expires_at ? `expires ${link.expires_at.slice(0, 10)}` : 'no expiry'} · ${link.version === 'latest' ? 'latest' : `v${link.version}`} · viewed ${link.views}×${link.last_viewed_at ? ` · last ${when(link.last_viewed_at)}` : ''}` }),
+    el('button', { type: 'button', onclick: () => { void revokeShare(link.id); } }, 'Revoke'));
+}
+function drawManage(links) {
+  $('manage-list').replaceChildren(...(links.length ? links.map(link => linkRow(link)) : [el('p', { text: 'No active links.' })]));
+}
+async function openManage(id) {
+  state.manageFor = id;
+  const meta = await api(`artifacts/${id}`);
+  drawManage(meta.shares || []);
+  $('manage-dialog').showModal();
+}
+async function revokeShare(id) {
+  await post(`shares/${id}/revoke`, {});
+  if (state.openId) await loadThread(state.openId, { quiet: true });
+  if (state.artifactOn) await loadArtifact();
+  if (state.artifactsOn) await loadArtifactsPage();
+  if ($('manage-dialog')?.open && state.manageFor) { const meta = await api(`artifacts/${state.manageFor}`); drawManage(meta.shares || []); }
+}
+function drawArtifact(meta, version) {
+  $('artifact-title').textContent = meta.title;
+  document.title = `${meta.title} · Artifact`;
+  const src = artifactSrc(meta.id, version);
+  const frame = $('artifact-frame');
+  if (frame.getAttribute('src') !== src) frame.setAttribute('src', src);
+  $('artifact-versions').replaceChildren(...(meta.versions || []).map(item => {
+    const n = typeof item === 'number' ? item : item.n;
+    return el('a', { href: `#/artifact/${meta.id}/v${n}`, 'aria-current': n === version ? 'page' : 'false', text: `v${n}` });
+  }));
+  const pill = $('artifact-pill');
+  if (meta.links) { pill.textContent = pillText(meta); pill.onclick = () => { void openManage(meta.id); }; pill.hidden = false; }
+  else pill.hidden = true;
+  $('artifact-share').onclick = () => openShare(meta.id);
+}
+async function loadArtifact() {
+  const id = state.artifactId; if (!id) return;
+  try {
+    const meta = await api(`artifacts/${id}`);
+    if (state.artifactId !== id) return;
+    state.artifact = meta;
+    drawArtifact(meta, state.artifactVer || meta.latest);
+  } catch (error) { if ($('artifact-title')) $('artifact-title').textContent = error.message; }
+}
+async function loadArtifactsPage() {
+  try {
+    const [list, shared] = await Promise.all([api('artifacts'), api('shares')]);
+    if (!state.artifactsOn) return;
+    $('artifacts-list').replaceChildren(...(list.length ? list.map(artifactCard) : [el('p', { class: 'hint', text: 'No artifacts yet.' })]));
+    $('shared-list').replaceChildren(...(shared.length ? shared.map(link => linkRow(link, link.title || link.artifact)) : [el('p', { class: 'hint', text: 'No active links.' })]));
+  } catch (error) { $('artifacts-list')?.replaceChildren(el('p', { class: 'error', text: error.message })); }
+}
+$('project-button')?.addEventListener('click', () => {
+  const menu = $('project-menu'); if (!menu) return;
+  menu.hidden = !menu.hidden;
+  $('project-button').setAttribute('aria-expanded', String(!menu.hidden));
+});
+$('artifact-back')?.addEventListener('click', () => { location.hash = '#/'; });
+$('artifacts-back')?.addEventListener('click', () => { location.hash = '#/'; });
+$('share-form')?.addEventListener('submit', e => { e.preventDefault(); void createUserShare(false); });
+$('share-cancel')?.addEventListener('click', () => $('share-dialog').close());
+$('share-warn-cancel')?.addEventListener('click', () => $('share-warn').close());
+$('share-warn-go')?.addEventListener('click', () => { $('share-warn').close(); $('share-dialog').showModal(); void createUserShare(true); });
+$('manage-close')?.addEventListener('click', () => $('manage-dialog').close());
 async function poll() {
   if (document.visibilityState !== 'visible') return;
-  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig(), refreshPresence()]);
+  await Promise.all([refreshList(), refreshProfile(), refreshPins(), refreshConfig(), refreshPresence(), refreshProjects()]);
   if (state.openId) await loadThread(state.openId, { quiet: true });
   if (state.metricsOn) await loadMetrics();
   if (state.trackerOn) await loadTracker();
+  if (state.artifactOn) await loadArtifact();
+  if (state.artifactsOn) await loadArtifactsPage();
 }
 setInterval(poll, POLL_MS);
 document.addEventListener('visibilitychange', poll);
 drawMe();
 refreshPins();
 fitViewport(); drawOffline(); outbox.start();
-Promise.all([refreshProfile(), refreshAreas(), refreshConfig()]).then(refreshList).then(route).then(refreshPresence);
+Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(route).then(refreshPresence);

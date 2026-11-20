@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="rf-version" content="0.8.2">
+<meta name="rf-version" content="0.9.0">
 <title>Feedback inbox</title>
 <style>
 :root {
@@ -466,6 +466,29 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
 .send-arrow { display: none; }
 @media (min-width: 760px) { .composer #send .send-arrow { display: none; } }
 #threads, #groups, .scroll, .cl-body, .merge-list, .metrics-body, .composer textarea, .cl-panel { overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
+.project-switch { position: relative; padding: 10px 14px 0; }
+.project-switch[hidden] { display: none; }
+.project-switch > button { width: 100%; text-align: left; display: flex; justify-content: space-between; gap: 8px; }
+.project-menu { position: absolute; z-index: 6; left: 14px; right: 14px; top: calc(100% + 4px); background: var(--white); border: 2px solid var(--ink); border-radius: 12px; padding: 6px; display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow: auto; }
+.project-menu[hidden] { display: none; }
+.project-menu button { display: flex; justify-content: space-between; gap: 8px; text-align: left; }
+.project-menu button[aria-current="true"] { background: var(--teal-tint); }
+.waiting { flex: none; margin: 0 12px 8px; padding: 8px; border: 2px solid var(--ochre); border-radius: 12px; background: var(--ochre-tint); min-width: 0; }
+.waiting[hidden] { display: none; }
+.waiting-head { width: 100%; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; text-align: left; background: transparent; }
+.waiting .qcard { margin-top: 8px; background: var(--white); border-radius: 10px; padding: 8px; }
+.prompt.struck { text-decoration: line-through; }
+.qchip { display: inline-flex; margin: 0 0 6px; font-size: 13px; max-width: 100%; }
+.art-card, .share-row { border: 2px solid var(--rule); border-radius: 12px; padding: 10px; margin: 8px 0; background: var(--white); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.art-card strong, .share-row a, .share-row p { min-width: 0; overflow-wrap: anywhere; }
+.pill { background: var(--teal-tint); border-color: var(--teal); }
+#artifact, #artifacts { flex-direction: column; min-height: 0; flex: 1; min-width: 0; }
+#artifact-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: #fff; }
+.ver-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.ver-links a { min-height: 40px; display: inline-flex; align-items: center; padding: 4px 10px; border: 1px solid var(--rule); border-radius: 10px; color: inherit; text-decoration: none; font-weight: 700; }
+.ver-links a[aria-current="page"] { background: var(--teal-tint); border-color: var(--teal); }
+#share-form fieldset { border: 1px solid var(--rule); border-radius: 10px; display: flex; flex-wrap: wrap; gap: 8px 14px; }
+#share-url { overflow-wrap: anywhere; font-family: var(--f-mono); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -477,6 +500,10 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
 <div class="offline" id="offline-banner" role="status" aria-live="polite" hidden></div>
 <div class="app" id="app">
   <nav class="list" aria-label="Threads">
+    <div class="project-switch" id="project-switch" hidden>
+      <button type="button" id="project-button" aria-haspopup="menu" aria-expanded="false" aria-controls="project-menu"><span id="project-name">Feedback</span></button>
+      <div class="project-menu" id="project-menu" role="menu" hidden></div>
+    </div>
     <header>
       <div class="brand"><h1>Feedback inbox</h1></div>
       <span style="display:flex;gap:6px;align-items:center"><button type="button" class="icon-btn" id="help" aria-label="Keyboard shortcuts"><kbd data-keys="?" style="margin:0">?</kbd></button><button type="button" class="primary" id="new-thread">New thread<kbd data-keys="N">N</kbd></button></span>
@@ -493,7 +520,7 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
     </div>
     <div id="groups"></div>
     <p class="empty" id="list-empty" hidden>No threads here.</p>
-    <div class="me-panel"><div class="foot-links"><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.8.2</span></div><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
+    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><span class="ver" id="app-version">react-feedback v0.9.0</span></div><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
   </nav>
   <main class="thread" id="thread" aria-label="Thread">
     <p class="placeholder" id="placeholder">Select a thread, or start a new one.</p>
@@ -520,6 +547,27 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
         <div id="tr-groups"></div>
       </div>
     </div>
+    <div id="artifact" class="metrics" hidden style="display:none">
+      <div class="thread-head">
+        <button type="button" class="back" id="artifact-back">&larr; Threads</button>
+        <h2 id="artifact-title"></h2>
+        <button type="button" class="pill" id="artifact-pill" hidden>Shared</button>
+        <button type="button" class="primary" id="artifact-share">Share</button>
+      </div>
+      <div class="ver-links" id="artifact-versions"></div>
+      <iframe id="artifact-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" title="Artifact"></iframe>
+    </div>
+    <div id="artifacts" class="metrics" hidden style="display:none">
+      <div class="thread-head">
+        <button type="button" class="back" id="artifacts-back">&larr; Threads</button>
+        <h2>Artifacts</h2>
+      </div>
+      <div class="metrics-body" id="artifacts-body">
+        <div id="artifacts-list"></div>
+        <h3>Shared links</h3>
+        <div id="shared-list"></div>
+      </div>
+    </div>
     <div id="open" hidden style="display:none;flex-direction:column;min-height:0;flex:1">
       <div class="thread-head">
         <button type="button" class="back" id="back" aria-label="Back to threads"><span aria-hidden="true">&larr;</span><span class="back-text"> Threads</span></button>
@@ -537,8 +585,10 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
         <div class="thread-main" id="thread-main">
           <div class="scroll" id="scroll">
             <section class="capture" id="capture" aria-label="Original capture" hidden></section>
+            <div id="artifact-cards"></div>
             <div class="msgs" id="msgs" aria-live="polite"></div>
           </div>
+          <div class="waiting" id="waiting-bar" hidden></div>
           <form class="composer" id="composer">
             <div class="replybar" id="replybar" hidden>
               <span class="replybar-text" id="replybar-text"></span>
@@ -584,6 +634,33 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
 </div>
 <div class="cl-backdrop" id="cl-backdrop" hidden></div>
 <div class="popmenu" id="popmenu" role="menu" hidden></div>
+<dialog id="share-dialog" aria-labelledby="share-h">
+  <form id="share-form">
+    <h2 id="share-h">Share this artifact</h2>
+    <fieldset>
+      <legend>Link expires</legend>
+      <label><input type="radio" name="share-exp" value="1d"> 1 day</label>
+      <label><input type="radio" name="share-exp" value="7d" checked> 7 days</label>
+      <label><input type="radio" name="share-exp" value="30d"> 30 days</label>
+      <label><input type="radio" name="share-exp" value="none"> No expiry</label>
+    </fieldset>
+    <label><input type="checkbox" id="share-latest"> Always the latest version</label>
+    <p class="error" id="share-error" role="alert" hidden></p>
+    <p id="share-url" hidden></p>
+    <div class="bar"><button type="button" id="share-cancel">Close</button><button type="submit" class="primary" id="share-create">Create link</button><button type="button" id="share-copy" hidden>Copy</button></div>
+  </form>
+</dialog>
+<dialog id="share-warn" aria-labelledby="share-warn-h">
+  <h2 id="share-warn-h">This page looks sensitive</h2>
+  <p id="share-warn-text"></p>
+  <p>You can share it from here if you mean to.</p>
+  <div class="bar"><button type="button" id="share-warn-cancel">Don't share</button><button type="button" class="primary" id="share-warn-go">Share anyway</button></div>
+</dialog>
+<dialog id="manage-dialog" aria-labelledby="manage-h">
+  <h2 id="manage-h">Shared links</h2>
+  <div id="manage-list"></div>
+  <div class="bar"><span class="grow"></span><button type="button" id="manage-close">Close</button></div>
+</dialog>
 <dialog id="redact-dialog" aria-labelledby="redact-h">
   <h2 id="redact-h">Redact this message?</h2>
   <p>Its text and pictures move to a private vault on the server and are removed from this thread. You will see "Redacted (sensitive)" instead. You cannot bring it back from here.</p>

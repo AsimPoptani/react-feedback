@@ -10,6 +10,22 @@ import { readStored, serialise } from './reminders';
 import { Invalid, ID, MAX_HINT, type Author, type Message, type Redaction } from './store';
 
 const REDACTED = '[redacted]';
+
+// Secret-like text. Used before an agent share, and by the inbox to warn before a person shares. The match itself is never returned.
+const SECRET_SHAPES: { name: string; re: RegExp }[] = [
+  { name: 'an API key', re: /\bsk-(?:live|test|or-v1|ant|proj)-[A-Za-z0-9_-]{8,}\b/ },
+  { name: 'an API key', re: /\bsk-[A-Za-z0-9_-]{20,}\b/ },
+  { name: 'a private key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  { name: 'an access key', re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: 'a token', re: /\b(?:ghp|gho|github_pat)_[A-Za-z0-9_]{16,}\b/ },
+  { name: 'a token', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/ },
+  { name: 'a password or token', re: /(?:\bapi[_-]?key\b|\bsecret\b|\bpassword\b|\bpasswd\b|\btoken\b)\s*[:=]\s*['"]?[A-Za-z0-9/+_.=-]{8,}/i },
+];
+// The kind of secret, or null. Callers refuse an agent share, or warn a person, without echoing the text.
+export function scanForSecrets(text: string): string | null {
+  for (const shape of SECRET_SHAPES) if (shape.re.test(text)) return shape.name;
+  return null;
+}
 const KEY = /^(\d{8}-\d{6}-[0-9a-f]{4})\/(m\d+)$/;
 
 // The real path of something that may not exist yet: its nearest existing parent, resolved, plus the rest.
@@ -53,7 +69,7 @@ async function readVault(vault: string, key: string): Promise<{ message: Message
 }
 
 // The user's `_events.jsonl` lines hold a message's first line. Blank it in place and keep every line's byte length, so anything following the file by offset stays in step.
-async function scrubEvents(dir: string, thread: string, firstLines: Set<string>, answerPrefix?: string): Promise<void> {
+async function scrubEvents(dir: string, thread: string, firstLines: Set<string>, answerPrefix?: string | string[]): Promise<void> {
   const file = join(dir, '_events.jsonl');
   let raw: Buffer;
   try { raw = await readFile(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -63,7 +79,8 @@ async function scrubEvents(dir: string, thread: string, firstLines: Set<string>,
     const length = Buffer.byteLength(line);
     try {
       const e = JSON.parse(line) as Record<string, unknown>;
-      if (e.id === thread && typeof e.first_line === 'string' && (firstLines.has(e.first_line) || (answerPrefix !== undefined && e.kind === 'answer' && e.first_line.startsWith(answerPrefix))) && e.first_line !== REDACTED) {
+      const prefixes = answerPrefix === undefined ? [] : (Array.isArray(answerPrefix) ? answerPrefix : [answerPrefix]);
+      if (e.id === thread && typeof e.first_line === 'string' && (firstLines.has(e.first_line) || (e.kind === 'answer' && prefixes.some(prefix => (e.first_line as string).startsWith(prefix)))) && e.first_line !== REDACTED) {
         let blank = e.first_line.length < REDACTED.length ? '*'.repeat(e.first_line.length) : REDACTED;
         let next = JSON.stringify({ ...e, first_line: blank });
         while (Buffer.byteLength(next) < length) { blank += ' '; next = JSON.stringify({ ...e, first_line: blank }); }
@@ -157,9 +174,11 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
     if (m.answer) { // an answer's event line is "q1: <labels>, <other text>"
       const asked = stored.find(x => x.question?.id === m.answer!.question_id)?.question;
       const labels = (m.answer.option_ids ?? []).flatMap(o => asked?.options.find(x => x.id === o)?.label ?? []);
-      lines.add(firstLine(`${m.answer.question_id}: ${[...labels, ...(m.answer.other_text ? [m.answer.other_text] : [])].join(', ')}`));
+      const parts = [...labels, ...(m.answer.other_text ? [m.answer.other_text] : [])];
+      lines.add(firstLine(`${m.answer.question_id}: ${parts.join(', ')}`)); // lines written before the prompt was included
+      lines.add(firstLine(store.answerLine(m.answer.question_id, asked?.prompt ?? '', parts)));
     }
-    await scrubEvents(dir, id, lines, m.answer ? `${m.answer.question_id}: ` : undefined);
+    await scrubEvents(dir, id, lines, m.answer ? [`${m.answer.question_id}: `, `${m.answer.question_id} (`] : undefined);
     await scrubReminders(dir, path, id, m.text);
     return { done: true, original: m, oldTitle };
   });
