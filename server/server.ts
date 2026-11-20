@@ -18,6 +18,7 @@ import { shellPage, withCapture } from './shell';
 import { ByteBudget, Limiter, clientKey, type ServerLike } from './limits';
 import { pairRoutes, type ExtraRoute } from './pair-routes';
 import { pairingFor } from './pair';
+import { hostAllowed, hostRefusal } from './hosts';
 
 const PREFIX = '/__feedback';
 const FILE = /^(image\.png|annotated\.png|context\.png|feedback\.md)$/;
@@ -706,7 +707,10 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
   files.validateLimits(env);
   const fetch = createHandler(feedbackDir, areas, { secretTarget, vaultDir, ...(configured ? { projects: configured } : {}), files: { env }, extra: pairRoutes(pairingFor(feedbackDir), { host: env.FEEDBACK_HOST ?? null, allowedHosts: env.FEEDBACK_ALLOWED_HOSTS ?? '' }) });
-  return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch };
+  // Only the names we expect (see hosts.ts) reach the handler: a rebinding page cannot talk to the inbox under its own name. The remote listener has its own
+  // Host check (remote.ts) and marks the requests it lets through.
+  const guarded = async (req: Request, server?: ServerLike) => (hostAllowed(req, env) ? fetch(req, server) : hostRefusal());
+  return { hostname: env.FEEDBACK_HOST ?? '127.0.0.1', port: Number(env.PORT ?? 8099), maxRequestBodySize: CHUNK_REQUEST, fetch: guarded };
 }
 // The data folders this server serves (one, or one per configured project).
 export function dataDirs(env: Record<string, string | undefined> = process.env): string[] {

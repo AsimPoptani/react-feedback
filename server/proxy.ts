@@ -1,6 +1,7 @@
 // Puts the capture widget on any local dev server without touching its code: a proxy that injects embed.js into its HTML,
 // sends /__feedback to the feedback server, and passes everything else through (WebSockets too, so Vite's hot reload keeps working).
 import type { Server, ServerWebSocket } from 'bun';
+import { hostAllowed, hostRefusal } from './hosts';
 
 interface Pipe { url: string; protocols: string[]; up?: WebSocket; queue: (string | ArrayBuffer | Uint8Array)[] }
 const PREFIX = '/__feedback';
@@ -20,15 +21,20 @@ export function bindHost(host: string | undefined, unsafePublic = false): string
   return wanted;
 }
 
-export function proxyOptions(target: string, port: number, feedback: string, position?: string, host = '127.0.0.1') {
+export function proxyOptions(target: string, port: number, feedback: string, position?: string, host = '127.0.0.1', env: Record<string, string | undefined> = process.env) {
   const app = new URL(target), inbox = new URL(feedback);
   if (!/^https?:$/.test(app.protocol)) throw new Error('The target must be an http(s) URL, for example http://localhost:5391');
   return {
     port, hostname: host,
     async fetch(req: Request, server: Server<Pipe>): Promise<Response | undefined> {
       const url = new URL(req.url);
+      if (!hostAllowed(req, env)) return hostRefusal(); // DNS rebinding: a page under another name must not reach the app or the inbox
       const base = url.pathname === PREFIX || url.pathname.startsWith(`${PREFIX}/`) ? inbox : app;
-      const dest = new URL(url.pathname + url.search, base);
+      // Built from the origin and a path, never parsed against it: a path such as "//other-host/x" is a path, not another host.
+      const dest = new URL(base.origin);
+      dest.pathname = url.pathname;
+      dest.search = url.search;
+      if (dest.origin !== base.origin) return new Response('Bad request', { status: 400 });
       if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
         const protocols = (req.headers.get('sec-websocket-protocol') ?? '').split(',').map(p => p.trim()).filter(Boolean);
         dest.protocol = dest.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -42,6 +48,7 @@ export function proxyOptions(target: string, port: number, feedback: string, pos
       const res = await fetch(dest, { method: req.method, headers, body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req.body, redirect: 'manual', decompress: false } as RequestInit);
       const out = new Headers(res.headers);
       for (const h of HOP) out.delete(h);
+      if (res.url && new URL(res.url).origin !== base.origin) out.delete('set-cookie'); // never another origin's cookies
       if (base === app && (res.headers.get('content-type') ?? '').includes('text/html')) return new Response(injectWidget(await res.text(), position), { status: res.status, statusText: res.statusText, headers: out });
       return new Response(res.body, { status: res.status, statusText: res.statusText, headers: out });
     },

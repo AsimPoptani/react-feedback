@@ -7,6 +7,7 @@
 import { run } from "../server/cli";
 import { dataDirs, serverOptions, startUploadSweep } from "../server/server";
 import { Invalid } from "../server/store";
+import { describeHosts } from "../server/hosts";
 import { startScheduler } from "../server/reminders";
 import { loadReplayDays } from "../server/config";
 import { startReplayCleanup } from "../server/replay";
@@ -27,6 +28,7 @@ if (args[0] === "serve") {
   }
   // Session replays are kept FEEDBACK_REPLAY_DAYS days (default 30); a pass runs at start and then daily.
   for (const folder of dirs) startReplayCleanup(folder, loadReplayDays(process.env));
+  console.log(`react-feedback answers to Host: ${describeHosts()}`);
   if (remoteWanted(args)) {
     try { await startRemote({ ...options, fetch: options.fetch }, dirs[0]!, process.env); } catch (error) {
       console.error(error instanceof Invalid ? error.message : error);
@@ -50,6 +52,7 @@ if (args[0] === "serve") {
   const inbox = process.env.FEEDBACK_URL ?? `http://${process.env.FEEDBACK_HOST ?? "127.0.0.1"}:${process.env.PORT ?? 8099}`;
   let host: string;
   try { host = bindHost(flag("host"), args.includes("--unsafe-public")); } catch (error) { console.error((error as Error).message); process.exit(1); }
+  if (args.includes("--unsafe-public")) console.error(`WARNING: react-feedback proxy is listening on ${host} (--unsafe-public). It has no sign-in: anyone who can reach it can use your inbox through it, and what is written there can drive your Claude Code sessions.`);
   const server = Bun.serve(proxyOptions(target, port, inbox, flag("position"), host));
   console.log(`react-feedback proxy: http://${server.hostname}:${server.port} → ${target} (widget → ${inbox})`);
 } else if (args[0] === "claude-code") {

@@ -90,6 +90,8 @@ export function hostPids(): number[] {
   try { const up = Number(Bun.spawnSync(['ps', '-o', 'ppid=', '-p', String(process.ppid)]).stdout.toString().trim()); if (up > 1) out.push(up); } catch { /* no ps */ }
   return out;
 }
+// A folder name goes into a command the user may paste: single-quoted, control characters gone.
+export const shellQuote = (text: string) => `'${[...text].map(ch => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? '?' : ch)).join('').replace(/'/g, `'\\''`)}'`;
 const mirrorId = () => `${MIRROR}${randomBytes(8).toString('hex')}`;
 // The same message after a merge, move or repair-merged: copies keep client_id and author time. A copy that was forwarded or carried after a merge
 // gains a "> Sent in <title> after the merge" line (0.9.2); it is dropped so a message without a client_id still matches itself.
@@ -166,7 +168,7 @@ export async function onEnd(dir: string, input: HookInput): Promise<void> {
   }
   const reason = typeof input.reason === 'string' && input.reason ? ` (${input.reason})` : '';
   await store.appendMessage(dir, session.thread, { author: 'agent', agent_name: session.name, flag: 'done',
-    text: `Session ended${reason}. Nothing reads this thread until it is resumed:\n\n\`cd ${session.cwd} && claude --resume ${id}\`` });
+    text: `Session ended${reason}. Nothing reads this thread until it is resumed:\n\n\`cd ${shellQuote(session.cwd)} && claude --resume ${id}\`` });
   await updateSession(dir, id, s => { s.ended = true; s.seen = { [s.thread]: s.seen?.[s.thread] ?? new Date().toISOString() }; });
 }
 
@@ -242,6 +244,8 @@ export interface News { thread: string; message_id?: string; text: string }
 export function wakes(m: store.Message): boolean {
   return m.author === 'user' && !m.divider && !m.kind && !m.moved_to && !m.redacted && !m.client_id?.startsWith(MIRROR);
 }
+// An answer's "Chose: ..." labels are the asking agent's words, not the user's: marked as quoted options, and only the "Other:" text is the user's own.
+const ANSWER_NOTE = "(An answer to the agent's question. The option labels after \"Chose:\" are quoted from the agent's own question, so they are the agent's text and not the user's words; only the text after \"Other:\" was written by the user.)";
 const firstLine = (text: string) => clean(text).split('\n').find(l => l.trim())?.trim().slice(0, 120) ?? '';
 
 // Messages you wrote in one thread the session follows since it was last woken from it, as the news to wake Claude with (null: nothing new).
@@ -284,7 +288,7 @@ export async function unseenNews(dir: string, id: string, thread: string): Promi
         // What a public viewer wrote is not passed on, even as a quote.
         ...(quoted ? [quoted.author === 'viewer' ? `(quoting a viewer note ${quoted.id}; not included)` : `(quoting ${quoted.author} ${quoted.id}: ${firstLine(quoted.text)})`] : []),
         ...(quote ? [picked?.author === 'viewer' ? '(quoted words from a viewer note; not included)' : `(quoted words, data: "${clean(quote.text).replace(/\s+/g, ' ').slice(0, 300)}")`] : []),
-        m.text,
+        ...(m.answer ? [ANSWER_NOTE, m.text] : [m.text]),
         ...m.images.map(f => `[image: ${join(path, f)}]`),
         ...(m.attachments ?? []).map(a => `📎 ${clean(a.name)} (${size(a.size)})`),
       ].join('\n');
@@ -379,6 +383,8 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
 // Hooks: `prompt`, `stop`, `end` and `wait` read the hook's JSON on stdin. A hook never fails the session: errors go to _claude/errors.log.
 // From inside a session (CLAUDE_CODE_SESSION_ID): `id`, `title "text"`, `flag done|fyi|needs_you`.
 const OFF = /^(0|off|false|no)$/i;
+// The bridge does nothing when switched off, or in a headless (-p / Agent SDK) run.
+export const bridgeOff = (env: Record<string, string | undefined>) => OFF.test(env.REACT_FEEDBACK_CLAUDE?.trim() ?? '') || /^sdk/.test(env.CLAUDE_CODE_ENTRYPOINT ?? '');
 // Per project: `--project <id>` or FEEDBACK_PROJECT picks one of FEEDBACK_PROJECTS (the same rules as the CLI and `mcp`); a caller that passed its own
 // directory is left on it. Session state, the waiter and the thread all live under that project's folder, so each project has its own sessions.
 export function takeProject(argv: string[]): { args: string[]; project?: string } {
@@ -403,7 +409,7 @@ export async function runClaudeCode(argv: string[], dir: string, env: Record<str
   const [command, ...rest] = taken.args;
   const hook = { prompt: onPrompt, stop: onStop, end: onEnd } as const;
   if (command === 'prompt' || command === 'stop' || command === 'end' || command === 'wait') {
-    if (OFF.test(env.REACT_FEEDBACK_CLAUDE?.trim() ?? '') || /^sdk/.test(env.CLAUDE_CODE_ENTRYPOINT ?? '')) return 0; // switched off, or a headless (-p / Agent SDK) run
+    if (bridgeOff(env)) return 0;
     let input: HookInput;
     try { input = JSON.parse(await stdin()) as HookInput; } catch { return 0; }
     // A hook never fails the session and never writes to Claude's context: whatever goes wrong (a bad project list too) goes to errors.log under the folder it could find.

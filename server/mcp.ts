@@ -20,7 +20,7 @@ import { loadProjects, projectById } from './projects';
 import { moveThreadToProject } from './move-project';
 import { defaultDir } from './cli';
 import { CHANNEL_CAPABILITIES, CHANNEL_INSTRUCTIONS, startChannel } from './claude-channel';
-import { loadProjects as loadOriginMap } from './claude-code';
+import { bridgeOff, loadProjects as loadOriginMap } from './claude-code';
 import { forViewer } from './inbox/presence.js';
 import { attachmentPath, cancelUpload, checkAttachmentIds, MAX_ATTACHMENTS, readTextIfSmall, stageHandle, type Ready } from './files';
 import type { AreasConfig } from './inbox/areas.js';
@@ -286,7 +286,7 @@ export async function runMcp(dir: string, env: Record<string, string | undefined
     const project = id ? projectById(projects, id) : projects[0]!;
     dir = project.dir; projectId = project.id;
   }
-  const channel = args.includes('--channel');
+  const channel = args.includes('--channel') && !bridgeOff(env); // switched off or headless: no channel at all
   const server = createMcpServer({ dir, agentName: env.FEEDBACK_AGENT_NAME, env, channel });
   await server.connect(new StdioServerTransport());
   // --channel: also push what you write in the session's threads into the running Claude Code session (see claude-channel.ts).

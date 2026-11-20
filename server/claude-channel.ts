@@ -27,8 +27,7 @@ export function channelParams(news: News, project: string): { content: string; m
 }
 
 // Which session is this channel's? The one named by CLAUDE_CODE_SESSION_ID when the process has it; else the live session whose hook ran under the same
-// Claude Code process (`host`, recorded by the hooks); else the only live session in this folder. Never a guess among several: a message for one
-// session must not reach another.
+// Claude Code process (`host`, recorded by the hooks) and the same folder. Otherwise none, and the channel stays idle.
 export async function findSession(dir: string, env: Record<string, string | undefined>, cwd: string, host: number): Promise<string | null> {
   const named = env.CLAUDE_CODE_SESSION_ID?.trim();
   if (named) return (await readSession(dir, named)) ? named : null;
@@ -41,10 +40,10 @@ export async function findSession(dir: string, env: Record<string, string | unde
     if (!session || session.ended) continue;
     try { live.push({ id: name, cwd: session.cwd, host: session.host ?? [], at: (await stat(join(dir, '_claude', name, 'session.json'))).mtimeMs }); } catch { /* gone */ }
   }
-  const mine = live.filter(s => s.host.includes(host)).sort((a, b) => b.at - a.at)[0];
-  if (mine) return mine.id;
-  const here = live.filter(s => resolve(s.cwd) === resolve(cwd));
-  return here.length === 1 ? here[0]!.id : null;
+  // Only a session whose hook ran under this very Claude Code process, in this folder. No match means no channel: a message for one session must never
+  // reach another, so there is no "the only session here" guess.
+  const mine = live.filter(s => s.host.includes(host) && resolve(s.cwd) === resolve(cwd)).sort((a, b) => b.at - a.at)[0];
+  return mine ? mine.id : null;
 }
 
 export interface ChannelOptions {
@@ -58,10 +57,14 @@ export function startChannel(server: McpServer, options: ChannelOptions): { stop
   const host = options.host ?? process.ppid;
   const main = new AbortController();
   const log = async (message: string) => { await mkdir(join(dir, '_claude'), { recursive: true }).catch(() => {}); await appendFile(join(dir, '_claude', 'errors.log'), `${new Date().toISOString()} channel: ${message}\n`).catch(() => {}); };
+  let idleNoted = false;
   const done = (async () => {
     while (!main.signal.aborted) {
       const id = await findSession(dir, env, cwd, host).catch(() => null);
-      if (!id) { await sleep(poll); continue; }
+      if (!id) {
+        if (!idleNoted) { idleNoted = true; await log('idle: no session of this Claude Code process in this folder yet (the hooks record it at the first prompt; run them with exec, or set CLAUDE_CODE_SESSION_ID)'); }
+        await sleep(poll); continue;
+      }
       const session = await readSession(dir, id);
       if (!session) { await sleep(poll); continue; }
       // One run follows one session; a session of the same Claude Code process with another id (after /clear) takes over.
