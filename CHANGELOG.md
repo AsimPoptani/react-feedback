@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1
+
+### Fixed
+- The pinned "Waiting for your answer" bar no longer wipes an answer being typed in its Other box. The inbox polls every 10 seconds, and each poll rebuilt the bar. It now rebuilds only when the open questions change, and typed text carries over a rebuild for the same thread.
+
 ## 0.9.0
 
 ### Added

@@ -1495,11 +1495,17 @@ function liveQuestions(d) {
 function drawWaiting(d) {
   const bar = $('waiting-bar'); if (!bar) return;
   const open = liveQuestions(d);
-  if (!open.length) { bar.hidden = true; bar.replaceChildren(); state.waitingOpen = false; return; }
+  if (!open.length) { bar.hidden = true; bar.replaceChildren(); bar.dataset.key = ''; state.waitingOpen = false; return; }
   const newest = open[open.length - 1];
   const q = newest.question;
   const more = open.length - 1;
   const inline = open.length === 1 && q.options.length <= 4 && !q.multi;
+  // A poll redraws the thread every few seconds; the bar is rebuilt only when what it shows changes,
+  // so an answer being typed in it is never wiped. Typed text carries over a rebuild for the same thread.
+  const key = `${d.id}|${open.map(m => m.question.id).join(',')}|${inline ? 'inline' : state.waitingOpen ? 'open' : 'closed'}`;
+  if (bar.dataset.key === key && bar.childElementCount) return;
+  const typed = (bar.dataset.key || '').split('|')[0] === d.id ? bar.querySelector('.qother')?.value || '' : '';
+  bar.dataset.key = key;
   bar.hidden = false;
   const summary = el('span', { text: clip(q.prompt, 80) });
   if (inline) {
@@ -1508,6 +1514,7 @@ function drawWaiting(d) {
     const kids = [head, opts];
     if (q.allow_other) {
       const other = el('input', { type: 'text', class: 'qother', placeholder: 'Other (write your own answer)', maxlength: '1000', 'aria-label': 'Other answer' });
+      if (typed) other.value = typed;
       other.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); const s = selFor(q); s.ids = []; s.other = other.value; void submitAnswer(q); } });
       kids.push(other);
     }
@@ -1517,7 +1524,11 @@ function drawWaiting(d) {
   const head = el('button', { type: 'button', class: 'waiting-head', 'aria-expanded': String(!!state.waitingOpen), onclick: () => { state.waitingOpen = !state.waitingOpen; drawWaiting(d); } },
     el('strong', { text: 'Waiting for your answer' }), summary, ...(more ? [el('span', { class: 'hint', text: `${more} more` })] : []));
   bar.replaceChildren(head);
-  if (state.waitingOpen) bar.append(questionCard(d, newest));
+  if (state.waitingOpen) {
+    bar.append(questionCard(d, newest));
+    const other = bar.querySelector('.qother');
+    if (typed && other && !other.value) other.value = typed;
+  }
 }
 function pillText(a) {
   const links = a.links || 0; if (!links) return '';
