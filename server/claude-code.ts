@@ -173,6 +173,38 @@ async function claimable(dir: string, thread: string, session: Session, projects
     return ownsCapture(projects, session.cwd, context.url);
   } catch { return false; }
 }
+// 0.9.2 writes a post aimed at a merged-away thread on the target, so a followed thread that was merged has its target followed too, from the
+// merge on: merge copies keep their older times, and what was unread on the source still wakes the session there. Merge chains are followed.
+// A target this session could claim anyway (a capture of its project nobody took) is followed from the start, as a claim would.
+// Not a target that is another session's own thread or a capture another session claimed; any other target is claimed, so one session answers it.
+async function followMerges(dir: string, id: string, projects: Projects, conversations: boolean): Promise<boolean> {
+  const session = await readSession(dir, id);
+  if (!session) return false;
+  const add: Record<string, string> = {};
+  const todo = Object.keys(session.seen ?? {});
+  for (let i = 0; i < todo.length; i++) {
+    let note: { into?: unknown; at?: unknown; state?: unknown } | null;
+    try { note = JSON.parse((await store.optional(join(await store.itemDir(dir, todo[i]!), 'merged.json'))) ?? 'null'); } catch { continue; }
+    if (note?.state !== 'done' || typeof note.into !== 'string' || typeof note.at !== 'string') continue;
+    const into = note.into;
+    if (session.seen[into] !== undefined || add[into] !== undefined) continue;
+    const whole = await claimable(dir, into, session, projects, conversations); // before adoptable writes the claim
+    if (!(await adoptable(dir, into, id))) continue;
+    add[into] = whole ? '' : note.at;
+    todo.push(into);
+  }
+  if (!Object.keys(add).length) return false;
+  await updateSession(dir, id, s => { for (const [t, at] of Object.entries(add)) s.seen[t] ??= at; });
+  return true;
+}
+async function adoptable(dir: string, thread: string, id: string): Promise<boolean> {
+  try {
+    const context = ((await store.readItem(await store.itemDir(dir, thread))).context as { session?: unknown } | undefined) ?? {};
+    if (context.session !== undefined) return context.session === id;
+  } catch { return false; }
+  await mkdir(join(claudeDir(dir), 'claims'), { recursive: true });
+  try { await writeFile(claimFile(dir, thread), id, { flag: 'wx' }); return true; } catch { return (await store.optional(claimFile(dir, thread)))?.trim() === id; }
+}
 
 // ---- The waiter
 function alive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
@@ -263,7 +295,8 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
   const events = join(dir, '_events.jsonl');
   let offset = (await readFrom(events, Number.MAX_SAFE_INTEGER)).end; // from now: what came before is caught by the scan below
   const wake = async (thread: string) => { const text = await unseen(dir, id, thread); if (!text) return false; await rm(pidFile(dir, id), { force: true }); out(text); return true; };
-  // Anything that arrived while no waiter ran: news in followed threads, then open captures for this project nobody has taken.
+  // Anything that arrived while no waiter ran: news in followed threads (and the targets they were merged into), then open captures for this project nobody has taken.
+  if (await followMerges(dir, id, projects, conversations)) session = (await readSession(dir, id)) ?? session;
   for (const t of Object.keys(session.seen ?? {})) if (await wake(t)) return 2;
   if (Object.keys(projects).length || conversations) {
     const open = (await store.listThreads(dir)).filter(t => t.status === 'open' && t.waiting === 'agent' && (t.mode === 'thread' ? conversations : ownsCapture(projects, session!.cwd, t.url)));
@@ -280,6 +313,8 @@ export async function wait(dir: string, input: HookInput, options: WaitOptions =
       try { e = JSON.parse(line); } catch { continue; }
       if (e.author !== 'user' || typeof e.id !== 'string') continue;
       session = (await readSession(dir, id)) ?? session;
+      // News in a thread this session does not follow may be a forwarded post: a followed thread was merged into it while the waiter ran.
+      if (session.seen?.[e.id] === undefined && await followMerges(dir, id, projects, conversations)) session = (await readSession(dir, id)) ?? session;
       // A key saved in the key box adds no message, only this event ("<name> saved"; never the value).
       if (e.kind === 'secret' && session.seen?.[e.id] !== undefined) {
         await rm(pidFile(dir, id), { force: true });

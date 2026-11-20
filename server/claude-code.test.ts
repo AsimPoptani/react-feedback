@@ -260,6 +260,91 @@ test('0.9.2: a stranded answer repaired before the session saw it wakes it once,
   expect(await unseen(dir, 'sess-1', a)).toBeNull();
 });
 
+// The session follows only its own thread; it is merged into a thread nobody follows. 0.9.2 writes a post aimed at it on that target.
+async function mergedAway(): Promise<{ own: string; other: string }> {
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  await onStop(dir, { ...S, last_assistant_message: 'Which colour?' });
+  const { id: other } = await store.createThread(dir, { title: 'other', text: 'older talk in the other thread', origin: 'user' });
+  return { own: await thread(), other };
+}
+
+test('0.9.2: the session thread merged into an unfollowed thread before the wait: a forwarded post wakes it once, and the reply goes there', async () => {
+  const { own, other } = await mergedAway();
+  await store.mergeThreads(dir, own, other, 'agent');
+  expect((await store.appendMessage(dir, own, { author: 'user', text: 'blue please' })).forwarded_to).toBe(other);
+  let woke = '';
+  expect(await wait(dir, S, { poll: 20, projects: {}, out: t => { woke = t; } })).toBe(2);
+  expect(woke).toContain('blue please');
+  expect(woke).toContain(`thread ${other}`);
+  expect(woke).not.toContain('older talk'); // the target's own history from before the merge does not wake it
+  expect(await unseen(dir, 'sess-1', other)).toBeNull();
+  expect(await unseen(dir, 'sess-1', own)).toBeNull();
+  await onStop(dir, { ...S, last_assistant_message: 'Blue it is.' });
+  const path = await store.itemDir(dir, other);
+  expect((await store.readMessages(path, await store.readItem(path))).at(-1)!.text).toBe('Blue it is.');
+});
+
+for (const [by, aimed] of [['agent', 'own'], ['user', 'other']] as const) {
+  test(`0.9.2: a merge (by ${by}) while the waiter runs: a post aimed at the ${aimed} thread wakes the session once`, async () => {
+    const { own, other } = await mergedAway();
+    let woke = '';
+    const waiting = wait(dir, S, { poll: 20, projects: {}, out: t => { woke = t; } });
+    await Bun.sleep(60);
+    await store.mergeThreads(dir, own, other, by);
+    await Bun.sleep(60);
+    await store.appendMessage(dir, aimed === 'own' ? own : other, { author: 'user', text: 'carry on here' });
+    expect(await waiting).toBe(2);
+    expect(woke).toContain('carry on here');
+    expect(woke).not.toContain('older talk');
+    expect(await unseen(dir, 'sess-1', other)).toBeNull();
+    expect(await unseen(dir, 'sess-1', own)).toBeNull();
+  });
+}
+
+test('0.9.2: a claimed capture merged into one nobody took: this session takes the target whole, the next one in the folder does not', async () => {
+  const a = await capture('http://localhost:5185/a', 'first capture');
+  await onPrompt(dir, { ...S, prompt: 'first' });
+  let woke = '';
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: t => { woke = t; } })).toBe(2);
+  expect(woke).toContain('first capture'); // claimed a
+  const b = await capture('http://localhost:5185/b', 'second capture');
+  await store.mergeThreads(dir, a, b, 'agent'); // before any waiter saw b
+  await store.appendMessage(dir, a, { author: 'user', text: 'both are the same bug' });
+  expect(await wait(dir, S, { poll: 20, projects: PROJECTS, out: t => { woke = t; } })).toBe(2);
+  expect(woke).toContain(`thread ${b}`);
+  expect(woke).toContain('second capture');
+  expect(woke).toContain('both are the same bug');
+  expect(woke.split('\n')).not.toContain('first capture'); // the copy of a's note was already woken with (the title is only in the "Sent in" line)
+  expect(await unseen(dir, 'sess-1', b)).toBeNull();
+  expect(await unseen(dir, 'sess-1', a)).toBeNull();
+  const H = { session_id: 'sess-2', cwd: S.cwd };
+  await onPrompt(dir, { ...H, prompt: 'second session' });
+  let off = '';
+  const quiet = wait(dir, H, { poll: 20, projects: PROJECTS, out: t => { off = t; } });
+  await Bun.sleep(80);
+  await store.appendMessage(dir, b, { author: 'user', text: 'still there?' });
+  await Bun.sleep(80);
+  expect(off).toBe('');
+  await onEnd(dir, H);
+  expect(await quiet).toBe(0);
+});
+
+test('0.9.2: a thread merged into another session\'s thread is not taken from that session', async () => {
+  const { own } = await mergedAway();
+  const H = { session_id: 'sess-2', cwd: '/Users/me/Repo/hub' };
+  await onPrompt(dir, { ...H, prompt: 'the other session' });
+  const theirs = (await readSession(dir, 'sess-2'))!.thread;
+  await store.mergeThreads(dir, own, theirs, 'agent');
+  await store.appendMessage(dir, own, { author: 'user', text: 'for whoever owns it' });
+  let off = '';
+  const quiet = wait(dir, S, { poll: 20, projects: {}, out: t => { off = t; } });
+  await Bun.sleep(80);
+  expect(off).toBe('');
+  await onEnd(dir, S);
+  expect(await quiet).toBe(0);
+  expect(await unseen(dir, 'sess-2', theirs)).toContain('for whoever owns it');
+});
+
 test('saving a key in the key box wakes the session that asked for it', async () => {
   await onPrompt(dir, { ...S, prompt: 'first' });
   let woke = '';
