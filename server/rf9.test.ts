@@ -19,7 +19,7 @@ test('config includes the package version', async () => {
   const body = await (await handle(new Request('http://local/__feedback/api/config'))).json();
   expect(body.version).toBe(packageVersion());
   expect(typeof body.version).toBe('string');
-  expect(body.version).toBe('0.10.2');
+  expect(body.version).toBe('0.11.0');
 });
 
 test('the inbox page is stamped with the package version', async () => {

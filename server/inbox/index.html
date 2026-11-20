@@ -132,6 +132,19 @@ h1 { font: 800 20px var(--f-display); margin: 0; }
 .msg .quote.agent strong { color: var(--berry); }
 .msg .quote .snip { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msg .quote.missing { font-style: italic; cursor: default; }
+.msg .quote .snip.sel { white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.msg .quote.missing .snip.sel { display: inline; font-style: normal; }
+.msg .quote.missing em { font-size: 12px; }
+.qpop { position: fixed; z-index: 80; display: flex; align-items: center; gap: 6px; max-width: min(420px, calc(100vw - 16px)); padding: 6px; background: var(--white); border: 1px solid var(--rule); border-radius: 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, .22); }
+.qpop[hidden] { display: none; }
+.qpop input { flex: 1 1 8rem; min-width: 0; min-height: 36px; margin: 0; font-size: 16px; }
+.qpop button { min-height: 36px; padding: 0 12px; }
+.qpop .qpop-x { width: 36px; padding: 0; border-width: 1px; border-radius: 50%; font-size: 20px; line-height: 1; }
+.qpop.dock { left: 8px; right: 8px; top: auto !important; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); max-width: none; }
+.src-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
+.src-chip { min-height: 28px; padding: 0 10px; border-width: 1px; border-radius: 999px; font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src-chip code { font-size: 12px; background: none; }
+.qcard.expired .qsum { font-style: italic; }
 .msg:focus-visible { outline-offset: 3px; }
 .msg.swiping { transition: none; }
 .msg.swipe-back { transition: transform .15s ease-out; }
@@ -764,6 +777,11 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
 </div>
 <div class="cl-backdrop" id="cl-backdrop" hidden></div>
 <div class="popmenu" id="popmenu" role="menu" hidden></div>
+<div class="qpop" id="qpop" role="dialog" aria-label="Quote the selected text" hidden>
+  <input type="text" id="qpop-note" maxlength="500" placeholder="Add a note (optional)" aria-label="Note to go with the quote">
+  <button type="button" class="primary" id="qpop-go">Quote</button>
+  <button type="button" class="qpop-x" id="qpop-x" aria-label="Dismiss">&times;</button>
+</div>
 <dialog id="share-dialog" aria-labelledby="share-h">
   <form id="share-form">
     <h2 id="share-h">Share this artifact</h2>

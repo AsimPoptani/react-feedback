@@ -1,6 +1,6 @@
 // Feedback inbox. No build, no deps. All text goes through textContent; nothing is injected as HTML.
 import { DEFAULT_AREAS, areaLabel, areaOf, sortAreas, subHeading } from './areas.js';
-import { isReplySwipe, resolveQuote, snippetOf } from './quote.js';
+import { activeQuote, isReplySwipe, QUOTE_MAX, resolveQuote, shortSource, shownText, snippetOf, sourceLabel, withQuote } from './quote.js';
 import { donutLabel, donutNode } from './donut.js';
 import { asideGroups, isAside, parseBtw } from './aside.js';
 import { ageOf, filterRows, stateOf } from './tracker.js';
@@ -36,7 +36,7 @@ const FOLD_KEY = 'fb-inbox-folds';
 const CL_KEY = 'fb-inbox-checklist';
 const SIDE_KEY = 'fb-inbox-sidebar';
 const state = { carryDraft: null, trackerOn: false, tdata: null, tdrawn: '', tfilter: { thread: '', state: '', q: '' }, tDoneOpen: true, focusItem: null, metricsOn: false, mwindow: '7d', mdata: null, mdrawn: '', threads: [], filter: 'all', pins: { threads: [], areas: [] }, areaConfig: DEFAULT_AREAS, expanded: new Set(), clPref: loadClPref(), sheet: false, clOwner: 'agent', clEdit: null, clShown: '', msgStop: null,
-  view: null, q: '', replyTo: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], files: [], newFiles: [], busy: false,
+  view: null, q: '', replyTo: null, quote: null, asideOpen: new Map(), openId: null, detail: null, shown: '', images: [], newImages: [], files: [], newFiles: [], busy: false,
   config: null, serverVersion: '', dismissedUpdate: null, offline: false, secrets: new Map(), replacing: new Set(), echo: new Map(), atBottom: true, redactFor: null,
   profile: { user: { name: 'You' }, agent: { name: 'Agent' } }, order: [], gallery: [], galleryAt: 0, qsel: {}, qopen: new Set(), keptShown: new Set(), folds: loadFolds(),
   artTab: 'page', heat: false, replays: [], mysessions: null, recordInbox: false, recorder: null, projects: [], project: '', defaultProject: '', artifactOn: false, artifactsOn: false, artifactId: null, artifactVer: null, artifact: null, waitingOpen: false, shareFor: null, manageFor: null };
@@ -100,7 +100,7 @@ const kbd = keys => el('kbd', { 'data-keys': keys, text: keyLabel(keys) });
 const SHORTCUTS = [
   ['mod+Enter', 'Send the message (or start the thread)'], ['mod+I', 'Attach an image'], ['mod+V', 'Paste an image'], ['mod+K', 'Search threads'],
   ['J / ↓', 'Next thread'], ['K / ↑', 'Previous thread'], ['E', 'Mark the open thread done, or reopen it'], ['N', 'New thread'], ['P', 'Pin or unpin the open thread'],
-  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['[', 'Collapse or expand the sidebar'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'], ['B', 'Ask a side question (or start a message with /btw)'],
+  ['C', 'Add a checklist item for the agent'], ['Y', 'Add a checklist item for you'], ['L', 'Show or hide the checklist'], ['[', 'Collapse or expand the sidebar'], ['↑ / ↓', 'Move between messages when one is focused'], ['R', 'Reply to the focused message; Esc in the composer cancels the quote'], ['Q', 'With text selected in a message, quote it (add a note, then Enter)'], ['B', 'Ask a side question (or start a message with /btw)'],
   ['1–9, Enter', 'Pick an option on the latest open question, then answer'], ['← / →', 'Flip images in the viewer'], ['?', 'This cheat sheet'], ['Esc', 'Close the viewer or a dialog']];
 
 // ---- Profile and avatars
@@ -117,7 +117,7 @@ async function postQueued(e) {
       attachments.push(f.id);
     }
     const r = await fetch(`${API}threads/${e.thread}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: e.text, images: e.images, ...(attachments.length ? { attachments } : {}), ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : {}), client_id: e.cid, written_at: e.written_at }) });
+      body: JSON.stringify({ text: e.text, images: e.images, ...(attachments.length ? { attachments } : {}), ...(e.aside ? { aside: true } : e.reply_to ? { reply_to: e.reply_to } : e.quote ? { quote: e.quote } : {}), client_id: e.cid, written_at: e.written_at }) });
     if (r.status === 404 && attachments.length) { for (const f of e.files) { delete f.id; delete f.uploadId; } outbox.touch(e, true); return { status: 503 }; } // the server dropped a file we had sent (a day old): send it again
     if (r.ok || r.status < 500) setOffline(false);
     let body = {}; try { body = await r.json(); } catch { /* no body */ }
@@ -529,6 +529,17 @@ function describeTarget(d) {
   if (d.viewport) parts.push(`Viewport: ${d.viewport.width}×${d.viewport.height}`);
   return parts.join(' · ');
 }
+// Where the captured element was written, when the page knew: a small "src/…/Thing.tsx:42" chip (click copies file:line:column). Absent in production builds.
+function sourceChip(target) {
+  const s = target && typeof target === 'object' ? target.source : null;
+  if (!s || typeof s.file !== 'string' || !s.file) return null;
+  const full = sourceLabel(s);
+  const note = [s.component ? `in ${s.component}` : '', s.ancestor ? 'the nearest ancestor with source info' : '', s.runtime ? 'runtime position, not source-mapped' : ''].filter(Boolean).join(' · ');
+  const chip = el('button', { type: 'button', class: 'src-chip', title: `${full}${note ? ` · ${note}` : ''} · click to copy`, 'aria-label': `Source: ${full}${note ? `, ${note}` : ''}. Copy it.`, onclick: () => { try { void navigator.clipboard?.writeText(full); showToast('Copied the source location'); } catch { /* no clipboard */ } } },
+    el('code', { text: shortSource(s) }));
+  const names = Array.isArray(target.components) ? target.components.filter(n => typeof n === 'string').slice(0, 4) : [];
+  return el('p', { class: 'info src-row' }, el('span', { class: 'hint', text: 'Source ' }), chip, ...(s.runtime ? [el('span', { class: 'hint', text: ' runtime, not source-mapped' })] : []), ...(names.length ? [el('span', { class: 'hint', text: ` · ${names.join(' < ')}` })] : []));
+}
 function drawCapture(d) {
   const box = $('capture');
   if (!d.files.image) { box.hidden = true; box.replaceChildren(); return; }
@@ -537,6 +548,8 @@ function drawCapture(d) {
   if (d.files.annotated) extras.append(el('figure', {}, imageFig('annotated.png', fileUrl(d.id, 'annotated.png'), 'Annotated capture'), el('figcaption', { text: 'Annotated' })));
   if (d.files.context) extras.append(el('figure', {}, imageFig('context.png', fileUrl(d.id, 'context.png'), 'Context: the viewport with the target outlined'), el('figcaption', { text: 'Context' })));
   const kids = [imageButtonBlock('image.png', fileUrl(d.id, 'image.png'), `Captured ${d.mode}`), el('p', { class: 'info', text: describeTarget(d) })];
+  const source = sourceChip(d.target);
+  if (source) kids.push(source);
   if (extras.children.length) {
     const toggle = el('button', { type: 'button', 'aria-expanded': 'false', 'aria-controls': 'extras', text: 'Show context' });
     toggle.addEventListener('click', () => { const open = extras.hidden; extras.hidden = !open; toggle.setAttribute('aria-expanded', String(open)); toggle.textContent = open ? 'Hide context' : 'Show context'; });
@@ -553,7 +566,7 @@ function answerFor(d, q) { return d.messages.find(m => m.answer && m.answer.ques
 const qk = qid => `${state.openId}:${qid}`;
 function activeQuestion() {
   const d = state.detail; if (!d || d.merged_into || d.read_only) return null;
-  const open = d.messages.filter(m => m.question && !m.question.withdrawn && !m.question.reasked && !answerFor(d, m.question)).map(m => m.question);
+  const open = d.messages.filter(m => m.question && !m.question.withdrawn && !m.question.reasked && !m.question.expired && !answerFor(d, m.question)).map(m => m.question);
   return open[open.length - 1] || null;
 }
 const flatPrompt = text => String(text || '').replace(/\s+/g, ' ').trim();
@@ -586,7 +599,7 @@ function revealKept(d) {
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
   for (const m of d.messages || []) {
     const q = m.question;
-    if (!q || (!q.withdrawn && !q.reasked)) continue;
+    if (!q || (!q.withdrawn && !q.reasked && !q.expired)) continue;
     const s = state.qsel[qk(q.id)];
     if (!s || (!s.ids.length && !s.other.trim())) continue;
     const key = `${d.id}:${q.id}`;
@@ -625,7 +638,7 @@ async function useOnCopy(d, m, copy) {
 }
 function rescueFor(d, m, copy) {
   const q = m.question, s = state.qsel[qk(q.id)];
-  if (!s || (!s.ids.length && !s.other.trim()) || (!q.withdrawn && !q.reasked)) return null;
+  if (!s || (!s.ids.length && !s.other.trim()) || (!q.withdrawn && !q.reasked && !q.expired)) return null;
   const box = el('div', { class: 'qrescue' });
   const labels = s.ids.map(id => q.options.find(o => o.id === id)?.label).filter(Boolean);
   if (labels.length) box.append(el('span', { class: 'hint', text: labels.join(', ') }));
@@ -649,8 +662,10 @@ function closedQuestion(d, m) {
   const show = el('button', { type: 'button', class: 'show', text: open ? 'hide' : 'show', onclick: () => { if (open) state.qopen.delete(q.id); else state.qopen.add(q.id); drawMessages(d); } });
   const line = el('div', { class: 'qclosed' });
   if (q.reasked) line.append(el('button', { type: 'button', class: 'qlink', text: 'Re-asked below', onclick: () => { if (copy) jumpToQuestion(copy.question.id); } }), el('span', { class: 'qsum', text: ` · ${flat}` }), show);
-  else line.append(el('span', { class: 'qsum', text: `Withdrawn · ${flat}${q.withdrawn?.reason ? ` · ${q.withdrawn.reason}` : ''}` }), show);
-  const card = el('div', { class: `qcard ${q.withdrawn ? 'withdrawn' : 'reasked'}`, 'data-question': q.id, role: 'group', 'aria-label': q.withdrawn ? 'Withdrawn question' : 'Re-asked question' }, line);
+  else if (q.withdrawn) line.append(el('span', { class: 'qsum', text: `Withdrawn · ${flat}${q.withdrawn?.reason ? ` · ${q.withdrawn.reason}` : ''}` }), show);
+  else line.append(el('span', { class: 'qsum', ...(q.expires_at ? { title: `Expired ${when(q.expires_at)}` } : {}), text: `Expired · ${flat}` }), show);
+  const kind = q.withdrawn ? 'withdrawn' : q.reasked ? 'reasked' : 'expired';
+  const card = el('div', { class: `qcard ${kind}`, 'data-question': q.id, role: 'group', 'aria-label': kind === 'withdrawn' ? 'Withdrawn question' : kind === 'reasked' ? 'Re-asked question' : 'Expired question' }, line);
   if (open) {
     card.append(el('p', { class: 'prompt struck', text: q.prompt }));
     const opts = el('div', { class: 'qopts' });
@@ -690,7 +705,7 @@ async function submitAnswer(q) {
     if (sent?.forwarded_to) { showToast('Sent in the merged thread'); location.hash = `#/${sent.forwarded_to}`; return; }
     await Promise.all([loadThread(d.id), refreshList()]);
   } catch (error) {
-    if (error.status === 409 && /withdrawn|re-asked/.test(error.message || '')) { showError($('error'), ''); await loadThread(d.id, { quiet: true }); }
+    if (error.status === 409 && /withdrawn|re-asked|expired/.test(error.message || '')) { showError($('error'), ''); await loadThread(d.id, { quiet: true }); }
     else {
       showError($('error'), error.message);
       await loadThread(d.id, { quiet: true });
@@ -709,7 +724,7 @@ async function submitAnswer(q) {
 }
 function questionCard(d, m) {
   const q = m.question;
-  if (q.withdrawn || q.reasked) return closedQuestion(d, m);
+  if (q.withdrawn || q.reasked || q.expired) return closedQuestion(d, m);
   const ans = answerFor(d, q), s = selFor(q);
   const card = el('div', { class: 'qcard', 'data-question': q.id, role: 'group', 'aria-label': 'Question' }, el('p', { class: 'prompt', text: q.prompt }));
   const chosen = ans ? ans.answer.option_ids : [];
@@ -784,13 +799,14 @@ function messageNode(d, m) {
   if (m.author === 'user' && !m.redacted && state.config?.redact) head.append(el('button', { type: 'button', class: 'msg-more', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `More actions for your message of ${when(m.created_at)}`, onclick: e => openMenu(e.currentTarget, [{ label: 'Redact…', onclick: () => askRedact(d, m) }]) }, '⋯'));
   const node = el('article', { class: `msg ${m.author}${m.flag === 'needs_you' ? ' needs' : ''}`, 'data-mid': m.id, tabindex: '-1', 'aria-label': `${who.name}, ${when(m.created_at)}` }, head);
   const quoted = quoteNode(d, m); if (quoted) node.append(quoted);
+  const picked = m.quote?.message_id ? selectionQuoteNode(d, m.quote) : null; if (picked) node.append(picked);
   if (m.redacted) { node.classList.add('redacted'); node.append(el('p', { class: 'locked', ...(m.redacted.reason ? { title: m.redacted.reason } : {}), text: lockedText(m) })); return node; }
   if (m.answer) {
     const asked = (d.messages || []).find(item => item.question?.id === m.answer.question_id)?.question;
     node.append(el('button', { type: 'button', class: 'qchip', onclick: () => jumpToQuestion(m.answer.question_id) }, `↩ ${m.answer.question_id} · ${clip(asked?.prompt || 'Question', 42)}`));
   }
   if (m.kind === 'viewer_feedback' && m.quote) node.append(el('blockquote', { class: 'viewer-quote' }, el('span', { class: 'hint', text: 'Pointing at' }), ...(m.quote.text ? [el('span', { text: ` \u201c${m.quote.text}\u201d` })] : []), ...(m.quote.path ? [el('code', { text: m.quote.path })] : [])));
-  if (m.question) node.append(questionCard(d, m)); else if (m.text) node.append(markdown(m.text));
+  if (m.question) node.append(questionCard(d, m)); else if (shownText(m)) node.append(markdown(shownText(m)));
   if (m.kind === 'secret_request' && m.secret) node.append(secretNode(d, m));
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
   appendFiles(node, d, m, who);
@@ -933,7 +949,8 @@ function queuedNode(d, e) {
   const node = el('article', { class: `msg user queued${failed ? ' failed' : ''}`, 'data-queued': e.cid, 'aria-label': `${state.profile.user.name}, ${when(e.written_at)}, ${failed ? 'not sent' : 'waiting to send'}` }, head);
   if (e.aside) node.append(el('p', { class: 'hint', style: 'margin:0 0 2px', text: 'Side question' }));
   const quoted = e.reply_to ? quoteNode(d, { reply_to: e.reply_to }) : null; if (quoted) node.append(quoted);
-  if (e.text) node.append(markdown(e.text));
+  const picked = e.quote ? selectionQuoteNode(d, e.quote) : null; if (picked) node.append(picked);
+  if (shownText(e)) node.append(markdown(shownText(e)));
   if (e.images.length) node.append(el('div', { class: 'imgs' }, ...e.images.map((src, i) => el('span', {}, el('img', { src, alt: `Picture ${i + 1}, waiting to send` })))));
   if (e.files?.length) node.append(el('div', { class: 'files' }, ...e.files.map(f => el('div', { class: 'file-card' }, el('span', { class: 'fname', title: f.name, text: f.name }), el('span', { class: 'fmeta', text: `${humanSize(f.size)} · ${f.id ? 'uploaded' : 'waiting to upload'}` })))));
   if (sent) { node.classList.remove('queued'); return node; }
@@ -946,7 +963,7 @@ function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const qopen = [...state.qopen].sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.kind || '')),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.question?.expired ? 'x' : '') + (m.quote?.message_id ? 'k' : '') + (m.kind || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);
@@ -971,6 +988,64 @@ function quoteNode(d, m) {
   return el('button', { type: 'button', class: `quote ${q.original.author}`, 'aria-label': `In reply to ${name}: ${q.snippet || 'message'}. Go to the original.`, onclick: () => jumpTo(q.original.id) },
     el('strong', { text: name }), el('span', { class: 'snip', text: q.snippet }));
 }
+// A quote of selected text: a linked block (the author, then the words) that jumps to the message it came from. The message's own text has the same words as a `> ` block; that block is not drawn twice.
+function selectionQuoteNode(d, quote) {
+  const original = (d.messages || []).find(m => m.id === quote.message_id && !m.divider);
+  const words = el('span', { class: 'snip sel', text: quote.text });
+  if (!original) return el('span', { class: 'quote missing', role: 'note' }, el('span', { class: 'snip sel', text: quote.text }), el('em', { text: ' · original message unavailable' }));
+  const name = personOf(original.author).name;
+  return el('button', { type: 'button', class: `quote ${original.author}`, 'aria-label': `Quoting ${name}: ${quote.text.slice(0, 120)}. Go to the original.`, onclick: () => jumpTo(original.id) }, el('strong', { text: name }), words);
+}
+// ---- Quote a bit of a message. Select text inside one message (a mouse, the keyboard, or a long press on a phone) and a small popover offers Quote, with an optional note.
+// Quote puts the words in the composer as a `> ` block, then the note; the sent message carries `quote: { message_id, text }`, drawn as a quote that jumps to the source.
+const qpop = { text: '', mid: '', hold: false, timer: 0 };
+const nodeElement = node => (node && node.nodeType === 1 ? node : node?.parentElement) || null;
+function readSelection() {
+  const d = state.detail, sel = window.getSelection?.();
+  if (!d || d.read_only || d.merged_into || !sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  const from = nodeElement(range.startContainer)?.closest?.('.msg[data-mid]'), to = nodeElement(range.endContainer)?.closest?.('.msg[data-mid]');
+  if (!from || from !== to || !$('msgs').contains(from)) return null;
+  const m = d.messages.find(x => x.id === from.dataset.mid);
+  if (!m || m.divider || m.aside || m.redacted || m.moved_to || m.kind === 'secret_request') return null;
+  if (nodeElement(range.startContainer)?.closest?.('input, textarea, .secret')) return null;
+  const text = sel.toString().replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  return text ? { mid: m.id, text: text.slice(0, QUOTE_MAX), rect: range.getBoundingClientRect() } : null;
+}
+function hideQuotePop() { const pop = $('qpop'); if (pop) pop.hidden = true; qpop.text = ''; qpop.mid = ''; qpop.hold = false; }
+function showQuotePop(found) {
+  const pop = $('qpop'); if (!pop) return;
+  const fresh = pop.hidden || qpop.text !== found.text;
+  qpop.text = found.text; qpop.mid = found.mid;
+  if (fresh) { $('qpop-note').value = ''; }
+  pop.hidden = false;
+  const docked = window.matchMedia?.('(max-width: 760px), (pointer: coarse)').matches; // a phone: a bar at the foot of the screen, clear of the system's own selection menu
+  pop.classList.toggle('dock', !!docked);
+  if (docked) { pop.style.left = ''; pop.style.top = ''; return; }
+  const box = pop.getBoundingClientRect(), r = found.rect;
+  const below = r.bottom + 8 + box.height <= window.innerHeight;
+  pop.style.top = `${Math.max(8, below ? r.bottom + 8 : r.top - box.height - 8)}px`;
+  pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - box.width - 8))}px`;
+}
+function checkSelection() {
+  const pop = $('qpop'); if (!pop) return;
+  if (!pop.hidden && (qpop.hold || pop.contains(document.activeElement))) return; // the person is using the popover: the selection collapsing is theirs
+  const found = readSelection();
+  if (found) showQuotePop(found); else hideQuotePop();
+}
+function scheduleSelection() { clearTimeout(qpop.timer); qpop.timer = setTimeout(checkSelection, 180); }
+function takeQuote() {
+  const d = state.detail; if (!d || d.read_only || !qpop.text) return;
+  const box = $('text'), note = $('qpop-note').value;
+  box.value = withQuote(box.value, qpop.text, note);
+  state.quote = { message_id: qpop.mid, text: qpop.text };
+  state.replyTo = null; drawReplyBar();
+  window.getSelection?.()?.removeAllRanges();
+  hideQuotePop();
+  growText(); box.focus(); box.setSelectionRange(box.value.length, box.value.length);
+}
+// A quote counts only while its block is still at the top of what is being sent.
+const quoteToSend = text => activeQuote(state.quote, text);
 // Roving tabindex: one message is the tab stop (the last focused, else the newest); arrow keys move between them.
 const msgNodes = () => [...$('msgs').querySelectorAll(':scope > .msg[data-mid]')];
 function applyStop() {
@@ -1196,7 +1271,7 @@ function drawMerged(d) {
 // What the person had typed (composer, or an Other box) when a thread turned merged. It is restored on the target, so a merge never loses typing.
 function keepDraft(d) {
   const text = $('text')?.value || '';
-  const open = (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked);
+  const open = (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !m.question.expired);
   const bar = $('waiting-bar')?.querySelector('.qother')?.value || '';
   const stored = open.map(m => ({ q: m.question, other: state.qsel[qk(m.question.id)]?.other || '' })).filter(x => x.other.trim()).pop();
   const typed = bar.trim() ? { q: open[open.length - 1]?.question, other: bar } : stored;
@@ -1363,7 +1438,7 @@ function route() {
   harvestDrafts(); // keep what was typed in the thread being left, under its own id
   for (const stale of document.querySelectorAll('.qother')) stale.remove(); // a redraw for the next thread must not read the old thread's boxes as its own
   const waitingBar = $('waiting-bar'); if (waitingBar) { waitingBar.dataset.key = ''; delete waitingBar.dataset.question; }
-  state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; dropAll(state.files); state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); closeMenu(false);
+  state.quote = null; hideQuotePop(); state.openId = id; state.detail = null; state.sheet = false; state.msgStop = null; $('cl-add').value = ''; state.shown = ''; state.clShown = ''; state.clEdit = null; state.captureFor = null; state.images = []; dropAll(state.files); state.gallery = []; state.replyTo = null; $('replybar').hidden = true; state.secrets.clear(); state.replacing.clear(); state.qopen = new Set(); state.keptShown = new Set(); closeMenu(false);
   $('text').value = id ? takeDraft(id) : ''; $('text').readOnly = false; growText(); drawPreviews($('previews'), state.images, noop); drawChips($('fchips'), state.files, redrawComposer); showError($('error'), '');
   $('placeholder').textContent = 'Select a thread, or start a new one.';
   drawThread(); drawList(); drawPinThread();
@@ -1552,15 +1627,15 @@ async function send(event, forceAside = false) {
   if (aside && !text.trim() && !state.images.length && !state.files.length) { showError($('error'), 'Write your side question after /btw.'); $('text').focus(); return; }
   if (!text.trim() && !state.images.length && !state.files.length) return;
   if (state.detail?.read_only) { showError($('error'), 'This thread is read-only, so nothing can be sent or queued.'); return; }
-  const cid = newCid(), written_at = new Date().toISOString(), reply_to = !aside && state.replyTo ? state.replyTo : undefined, images = [...state.images], files = [...state.files];
+  const cid = newCid(), written_at = new Date().toISOString(), reply_to = !aside && state.replyTo ? state.replyTo : undefined, quote = !aside && !reply_to ? quoteToSend(text) ?? undefined : undefined, images = [...state.images], files = [...state.files];
   state.busy = true; $('send').disabled = true; $('btw').disabled = true; showError($('error'), '');
-  const cleared = () => { if (id === state.openId) { if (!aside) state.replyTo = null; $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); state.files.length = 0; drawChips($('fchips'), state.files, redrawComposer); growText(); } };
+  const cleared = () => { if (id === state.openId) { if (!aside) { state.replyTo = null; state.quote = null; } $('text').value = ''; state.images.length = 0; drawPreviews($('previews'), state.images, noop); state.files.length = 0; drawChips($('fchips'), state.files, redrawComposer); growText(); } };
   const queue = async () => { // the composer is emptied first, so anything typed while it is stored is not wiped
-    const before = $('text').value, replying = state.replyTo; cleared();
+    const before = $('text').value, replying = state.replyTo, quoting = state.quote; cleared();
     // A file still on its way is stopped (its upload id is kept, so the queue carries on from there); a file already on the server is named by its id.
     for (const f of files) { f.controller?.abort(); }
     const held = files.map(f => ({ name: f.name, size: f.size, type: f.type, blob: f.file, ...(f.id ? { id: f.id } : {}), ...(f.uploadId && !f.id ? { uploadId: f.uploadId } : {}) }));
-    try { await outbox.add({ cid, thread: id, text, images, files: held, reply_to, aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.files.push(...files); state.replyTo = replying; redrawComposer(); throw error; }
+    try { await outbox.add({ cid, thread: id, text, images, files: held, reply_to, ...(quote ? { quote } : {}), aside, written_at }); } catch (error) { $('text').value = before; state.images.push(...images); state.files.push(...files); state.replyTo = replying; state.quote = quoting; redrawComposer(); throw error; }
     drawReplyBar();
   };
   try {
@@ -1578,7 +1653,7 @@ async function send(event, forceAside = false) {
       }
     }
     try {
-      const sent = await post(`threads/${id}/messages`, { text, images, ...(files.length ? { attachments: files.map(f => f.id) } : {}), ...(aside ? { aside: true } : reply_to ? { reply_to } : {}), client_id: cid, written_at });
+      const sent = await post(`threads/${id}/messages`, { text, images, ...(files.length ? { attachments: files.map(f => f.id) } : {}), ...(aside ? { aside: true } : reply_to ? { reply_to } : quote ? { quote } : {}), client_id: cid, written_at });
       if (sent?.forwarded_to) {
         cleared();
         showToast('Sent in the merged thread');
@@ -1761,6 +1836,7 @@ function onKey(e) {
   else if (e.key === 'n') { e.preventDefault(); openNew(); }
   else if (e.key === 'p' && state.openId) { e.preventDefault(); togglePin('thread', state.openId); }
   else if (e.key === 'b' && state.detail && !state.detail.read_only) { e.preventDefault(); startAside(); }
+  else if (e.key === 'q' && !$('qpop')?.hidden) { e.preventDefault(); $('qpop-note').focus(); }
   else if (e.key === 'r' && state.detail && !state.detail.read_only && e.target.closest?.('.msg[data-mid]')) { e.preventDefault(); startReply(e.target.closest('.msg').dataset.mid); }
   else if ((e.key === 'c' || e.key === 'y') && state.detail) { e.preventDefault(); focusAdd(e.key === 'c' ? 'agent' : 'user'); }
 }
@@ -1769,6 +1845,13 @@ function onKey(e) {
 paintKeys();
 $('help-rows').replaceChildren(...SHORTCUTS.map(([k, what]) => el('tr', {}, el('td', {}, ...k.split(' / ').flatMap((part, i) => [...(i ? [' or '] : []), kbd(part)])), el('td', { text: what }))));
 $('composer').addEventListener('submit', send);
+document.addEventListener('selectionchange', scheduleSelection);
+document.addEventListener('keyup', e => { if (e.shiftKey || e.key === 'Shift') scheduleSelection(); });
+$('qpop')?.addEventListener('pointerdown', () => { qpop.hold = true; });
+for (const type of ['pointerup', 'pointercancel']) document.addEventListener(type, () => { if (qpop.hold) setTimeout(() => { qpop.hold = false; }, 600); });
+$('qpop-go')?.addEventListener('click', takeQuote);
+$('qpop-x')?.addEventListener('click', () => { window.getSelection?.()?.removeAllRanges(); hideQuotePop(); });
+$('qpop-note')?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); takeQuote(); } else if (e.key === 'Escape') { e.preventDefault(); hideQuotePop(); $('text').focus(); } });
 $('more').addEventListener('click', openMore);
 $('plus').addEventListener('click', openPlus);
 $('text').addEventListener('input', growText);
@@ -1894,7 +1977,7 @@ function clip(text, n) {
 function liveQuestions(d) {
   if (!d || d.read_only || d.merged_into) return [];
   const answered = new Set((d.messages || []).flatMap(m => (m.answer ? [m.answer.question_id] : [])));
-  return (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !answered.has(m.question.id));
+  return (d.messages || []).filter(m => m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !m.question.expired && !answered.has(m.question.id));
 }
 function drawWaiting(d) {
   const bar = $('waiting-bar'); if (!bar) return;

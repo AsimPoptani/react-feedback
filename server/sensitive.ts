@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import * as store from './store';
 import { copyVaultFiles, filesFromVault, filesToVault, removeVaultFiles } from './files';
 import { readStored, serialise } from './reminders';
-import { Invalid, ID, MAX_HINT, type Author, type Message, type Redaction } from './store';
+import { Invalid, ID, MAX_HINT, isMessageQuote, type Author, type Message, type Redaction } from './store';
 
 const REDACTED = '[redacted]';
 
@@ -197,6 +197,7 @@ async function redactLocked(dir: string, id: string, msgId: string, vault: strin
     if (m.question) blank.question = { ...m.question, prompt: REDACTED, options: m.question.options.map(o => ({ id: o.id, label: REDACTED })) };
     if (m.answer?.other_text) blank.answer = { ...m.answer, other_text: REDACTED };
     delete blank.secret; delete blank.kind; delete blank.attachments;
+    if (isMessageQuote(m.quote)) delete blank.quote; // the words the user selected are part of what is being hidden
     await store.writeAtomic(join(path, 'thread.jsonl'), stored.map(x => `${JSON.stringify(x === m ? blank : x)}\n`).join(''));
     for (const name of m.images) await rm(join(path, name), { force: true });
     let oldTitle: string | undefined;
@@ -318,6 +319,7 @@ export async function unredactMessage(dir: string, id: string, msgId: string, va
     if (saved.message.question && m.question) back.question = { ...saved.message.question, id: m.question.id };
     if (saved.message.answer && m.answer) back.answer = { ...saved.message.answer, question_id: m.answer.question_id };
     if (saved.message.secret) { back.kind = 'secret_request'; back.secret = saved.message.secret; }
+    if (isMessageQuote(saved.message.quote)) back.quote = saved.message.quote;
     await store.writeAtomic(join(path, 'thread.jsonl'), stored.map(x => `${JSON.stringify(x === m ? back : x)}\n`).join(''));
     if (saved.item_note !== undefined && item.note === REDACTED) {
       await store.writeAtomic(join(path, 'item.json'), JSON.stringify({ ...item, note: saved.item_note }, null, 2));

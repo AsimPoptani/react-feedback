@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.0
+
+### Added
+- **Source location from a click.** Capturing an element or a section now also records where it was written in the host app's React source: the nearest component with source info (file, line, column, component name; React's `_debugSource`, React 19's `_debugStack`, or the nearest ancestor that has one) as `target.source`, and up to 40 component names, innermost first, as `target.components` (it was 6). Positions taken from a debug stack are marked `runtime`: not source-mapped. Production builds usually carry none, and degrade to component names or nothing. The inbox capture view shows a small `src/…/Thing.tsx:42` chip (click to copy); `feedback.md`, the CLI `read` ("Captured element" block) and MCP `read_thread` (`capture`) include it. A capture with no source reads exactly as before. The path is stored with the capture only. The fiber walk is adapted from Local Browser Bridge (MIT): see THIRD_PARTY_NOTICES.md.
+- **Quote a bit of a message.** Select words inside any message in a thread (mouse, keyboard, or a long press on a phone) and a popover offers **Quote** with an optional note; it puts a `> ` block and the note in the composer. The sent message carries `quote: { message_id, text }`, drawn as a linked quote that jumps to its source. Stored, carried through merges and moves (the link is dropped, the words stay, when the original stays behind), hidden by redaction and restored by unredact, held in the offline outbox, shown by `read` and MCP. `Q` moves to the popover's note.
+- **Expiring questions.** `ask` and `ask-new` (CLI) and MCP `ask` take an expiry: `--expires 2h|1d|2w` from now or an absolute time. An expired unanswered question is **Expired** in the inbox: a collapsed line (with **show** and **Send as a message** for typed text, as for a withdrawn one), out of the pinned bar, **Waiting on you** and unread. Answering it is `409 This question expired`. Expiry is read-time only, with no timer; the first read after it writes one `expired` event.
+- **`ask-expire`** (CLI) and **`expire_questions`** (MCP): an agent marks its open questions expired (one, all on a thread, or all everywhere), for when its session ends.
+
+### Changed
+- MCP tool list: one more tool, `expire_questions`. `read_thread` messages carry `quote`, and a question's `expires_at` and `expired`.
+- The service worker cache is `fb-inbox-0.11.0`.
+
 ## 0.10.2
 
 ### Added

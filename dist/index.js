@@ -89,6 +89,124 @@ function getContext() {
 		failedFetches: [...capture.failedFetches]
 	};
 }
+var MAX_WALK = 200;
+var MAX_FRAMES = 12;
+var fiberOf = (element) => {
+	const key = Object.getOwnPropertyNames(element).find((name) => name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"));
+	return key ? element[key] : void 0;
+};
+var clean = (value, max) => {
+	let out = "";
+	for (const ch of value) {
+		const code = ch.charCodeAt(0);
+		if (code >= 32 && code !== 127 && !(code >= 128 && code <= 159)) out += ch;
+	}
+	return out.slice(0, max);
+};
+var displayName = (fiber) => {
+	const type = fiber.type || fiber.elementType;
+	if (typeof type === "string") return null;
+	if (!type) return null;
+	const inner = type.render || type.type;
+	const name = type.displayName || type.name || inner?.displayName || inner?.name;
+	return typeof name === "string" && name ? clean(name, 100) : null;
+};
+var fileName = (value) => {
+	try {
+		const url = new URL(value);
+		const path = decodeURIComponent(url.pathname);
+		return clean(url.protocol === "http:" || url.protocol === "https:" ? path.replace(/^\//, "") : path, 300);
+	} catch {
+		return clean(value.replace(/[?#].*$/, ""), 300);
+	}
+};
+var direct = (fiber) => {
+	const source = fiber._debugSource || fiber.alternate?._debugSource;
+	if (!source || typeof source.fileName !== "string" || !source.fileName) return null;
+	return {
+		file: fileName(source.fileName),
+		line: Number.isInteger(source.lineNumber) ? source.lineNumber : 0,
+		column: Number.isInteger(source.columnNumber) ? source.columnNumber : 0,
+		name: null,
+		runtime: false
+	};
+};
+var FRAME = /^(?:at (.*?) \((.+):(\d+):(\d+)\)|at (.+):(\d+):(\d+)|(.*?)@(.+):(\d+):(\d+))$/;
+var frames = (stack) => {
+	if (typeof stack !== "string") return [];
+	const out = [];
+	for (const line of stack.split("\n")) {
+		const match = FRAME.exec(line.trim());
+		if (!match) continue;
+		const file = fileName(match[2] || match[5] || match[9] || "");
+		if (!file || /(^|\/)node_modules\/|^node:|^<anonymous>/.test(file)) continue;
+		out.push({
+			name: clean(match[1] || match[8] || "", 100) || null,
+			file,
+			line: Number(match[3] || match[6] || match[10]),
+			column: Number(match[4] || match[7] || match[11])
+		});
+		if (out.length === MAX_FRAMES) break;
+	}
+	return out;
+};
+var fromStack = (fiber) => {
+	const frame = frames(fiber._debugStack?.stack)[0] ?? frames(fiber.alternate?._debugStack?.stack)[0];
+	return frame ? {
+		file: frame.file,
+		line: frame.line,
+		column: frame.column,
+		name: frame.name,
+		runtime: true
+	} : null;
+};
+var found = (fiber) => direct(fiber) ?? fromStack(fiber);
+var nearestName = (fiber) => {
+	for (let at = fiber, hops = 0; at && hops < MAX_WALK; at = at.return, hops++) {
+		const name = displayName(at);
+		if (name) return name;
+	}
+	return "";
+};
+function reactSource(element) {
+	const start = fiberOf(element);
+	if (!start) return { components: [] };
+	const components = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (let fiber = start; fiber && seen.size < MAX_WALK && components.length < 40; fiber = fiber.return) {
+		if (seen.has(fiber)) break;
+		seen.add(fiber);
+		const name = displayName(fiber);
+		if (name) components.push(name);
+	}
+	let hit = found(start), ancestor = false;
+	if (!hit) {
+		const walked = /* @__PURE__ */ new Set();
+		for (let parent = start.return; parent && walked.size < MAX_WALK; parent = parent.return) {
+			if (walked.has(parent)) break;
+			walked.add(parent);
+			hit = found(parent);
+			if (hit) {
+				ancestor = true;
+				if (!hit.name) hit.name = displayName(parent);
+				break;
+			}
+		}
+	}
+	if (!hit) return { components };
+	const component = hit.name || nearestName(start) || components[0] || "";
+	return {
+		components,
+		source: {
+			file: hit.file,
+			line: hit.line,
+			column: hit.column,
+			component,
+			...hit.runtime ? { runtime: true } : {},
+			...ancestor ? { ancestor: true } : {}
+		}
+	};
+}
 // src/widget/elements.ts
 var isWidget = (element) => !!element.closest("[data-feedback-root]");
 function unique(selector) {
@@ -183,6 +301,7 @@ function implicitRole(element) {
 	return roles[element.tagName] ?? "";
 }
 function targetFor(element) {
+	const react = reactSource(element);
 	return {
 		selector: selectorFor(element),
 		tag: element.tagName.toLowerCase(),
@@ -190,7 +309,8 @@ function targetFor(element) {
 		name: accessibleName(element),
 		text: (element.innerText ?? element.textContent ?? "").trim().slice(0, 200),
 		rect: rectFor(element),
-		components: componentChain(element)
+		components: react.components,
+		...react.source ? { source: react.source } : {}
 	};
 }
 var SECTION = "section, article, main, aside, nav, header, footer, dialog, form, [role=\"region\"], [role=\"dialog\"], [role=\"main\"], [role=\"complementary\"], [role=\"navigation\"]";

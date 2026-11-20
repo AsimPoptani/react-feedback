@@ -244,8 +244,8 @@ async function threadDetail(dir: string, id: string) {
   const allShares = await shares.readShares(dir);
   const published = (await artifacts.listArtifacts(dir, id)).map(meta => ({ id: meta.id, thread: meta.thread, title: meta.title, latest: meta.latest, updated_at: meta.updated_at,
     versions: meta.versions.map(version => version.n), ...(meta.suggest ? { suggest: true } : {}), ...shares.statsFor(allShares, meta.id) }));
-  return { ...summary, url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: item.target ?? null,
-    note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages,
+  return { ...summary, url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: store.cleanTarget(item.target ?? null),
+    note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages: store.withExpired(messages),
     reminders_fired: (await reminders.readStored(path)).fired, artifacts: published };
 }
 async function profileRoute(req: Request, dir: string, path: string, read: (req: Request) => Promise<ObjectData>): Promise<Response | null> {
@@ -518,7 +518,7 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
     const data = await read(req);
     // `aside: true` is a side question; `todo` (a list of texts, `for`: "user" by default or "agent") adds checklist items with the message. Only the agent ticks (`check`), so the user's API refuses it.
     const add = Array.isArray(data.todo) ? data.todo.map(text => ({ owner: data.for ?? 'user', text })) : data.todo;
-    const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, reply_to: data.reply_to, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
+    const created = await store.appendMessage(dir, id!, { author: 'user', text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, reply_to: data.reply_to, quote: data.quote, aside: data.aside, add_items: add, check_items: data.check, client_id: data.client_id, written_at: data.written_at });
     return json(created, store.wasDuplicate(created) ? 200 : 201); // 200: it had already arrived (a retry from the offline queue)
   }
   if (action === 'status') { const status = store.checkStatus((await read(req)).status); await store.setStatus(dir, id!, status); return json({ status }); }

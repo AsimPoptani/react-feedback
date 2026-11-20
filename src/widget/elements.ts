@@ -1,3 +1,4 @@
+import { reactSource } from './reactSource.js';
 import type { ElementTarget, Rect } from './types.js';
 export const isWidget = (element: Element) => !!element.closest('[data-feedback-root]');
 function unique(selector: string) { return document.querySelectorAll(selector).length === 1; }
@@ -54,11 +55,12 @@ function implicitRole(element: Element) {
   return roles[element.tagName] ?? '';
 }
 export function targetFor(element: Element): ElementTarget {
+  const react = reactSource(element);
   return { selector: selectorFor(element), tag: element.tagName.toLowerCase(),
     role: element.getAttribute('role') ?? implicitRole(element), name: accessibleName(element),
     // biome-ignore lint/performance/useDomNodeTextContent: feedback needs visible text, excluding CSS-hidden content.
     text: ((element as HTMLElement).innerText ?? element.textContent ?? '').trim().slice(0, 200),
-    rect: rectFor(element), components: componentChain(element) };
+    rect: rectFor(element), components: react.components, ...(react.source ? { source: react.source } : {}) };
 }
 
 const SECTION = 'section, article, main, aside, nav, header, footer, dialog, form, [role="region"], [role="dialog"], [role="main"], [role="complementary"], [role="navigation"]';

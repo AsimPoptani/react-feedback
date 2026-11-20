@@ -32,7 +32,10 @@ export class Invalid extends Error {
 }
 export interface QuestionOption { id: string; label: string; description?: string }
 export interface QuestionWithdrawal { at: string; reason?: string }
-export interface Question { id: string; prompt: string; options: QuestionOption[]; multi: boolean; allow_other: boolean; withdrawn?: QuestionWithdrawal; reasked?: true }
+// `expires_at` (an ISO time) is when an unanswered question lapses. Nothing runs at that time: a read compares it with the clock (see `isExpired`).
+export interface Question { id: string; prompt: string; options: QuestionOption[]; multi: boolean; allow_other: boolean; withdrawn?: QuestionWithdrawal; reasked?: true; expires_at?: string;
+  // Added by `withExpired` on what an API returns, never stored: the expiry passed and nobody answered.
+  expired?: true }
 export interface Answer { question_id: string; option_ids: string[]; other_text?: string }
 export const FLAGS = ['needs_you', 'done', 'fyi'] as const;
 export type Flag = (typeof FLAGS)[number];
@@ -50,7 +53,7 @@ export interface Message { id: string; author: MessageAuthor; text: string; imag
   // `redacted` replaces a sensitive message's text and images, which live in the vault; `key` says which vault file.
   kind?: 'secret_request' | 'share_notice' | 'project_move' | 'viewer_feedback'; secret?: SecretRequest; redacted?: Redaction; share_id?: string; artifact_id?: string;
   // `kind: 'viewer_feedback'` (author `viewer`): a note from someone with a share link. `label` names the link; `quote` is what they pointed at (a text snippet, a CSS path, a viewport-relative box).
-  label?: string; quote?: ViewerQuote;
+  label?: string; quote?: ViewerQuote | MessageQuote;
   // `client_id` is the id the inbox gave a message it may send more than once (an offline queue), so a retry never posts twice; `written_at` is when the user wrote it, if that was earlier than it was sent (`created_at` stays the time it arrived).
   client_id?: string; written_at?: string;
   // `agent_name`: which agent wrote an agent message, when it is not the default one (an MCP client's FEEDBACK_AGENT_NAME). Absent means the inbox's agent profile.
@@ -58,6 +61,10 @@ export interface Message { id: string; author: MessageAuthor; text: string; imag
   // Set only on the object handed back when a post to a merged-away thread was written on the target instead. It is not stored.
   forwarded_to?: string }
 export interface ViewerQuote { text: string; path: string; box: [number, number, number, number] | null }
+// A bit of text the user selected inside an earlier message of the same thread, sent with their reply. (On a viewer's note, `quote` is the ViewerQuote above.)
+export interface MessageQuote { message_id: string; text: string }
+export const MAX_QUOTE = 1000;
+export const isMessageQuote = (q: ViewerQuote | MessageQuote | undefined): q is MessageQuote => !!q && 'message_id' in q;
 export interface SecretRequest { name: string; label: string; help_url?: string; status?: 'saved'; hint?: string; saved_at?: string; check?: 'works' | 'rejected' }
 export interface Redaction { at: string; by: Author; reason?: string; key: string }
 export const CLIENT_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -142,12 +149,36 @@ export function newId(now = new Date()): string {
   const stamp = now.toISOString().slice(0, 19).replace(/[-:T]/g, '').replace(/^(\d{8})(\d{6})$/, '$1-$2');
   return `${stamp}-${randomBytes(2).toString('hex')}`;
 }
+// Where a captured element was written, from the widget's `target.source`. The file is the app's own path, stored here only. Absent in production builds.
+// It arrives from a browser, so it is cleaned before anyone prints it: control characters out, lengths capped, numbers whole.
+export interface CaptureSource { file: string; line: number; column: number; component: string; runtime?: true; ancestor?: true }
+export function captureSource(target: unknown): CaptureSource | undefined {
+  const s = isObject(target) ? target.source : undefined;
+  if (!isObject(s) || typeof s.file !== 'string') return undefined;
+  const file = stripControls(s.file).trim().slice(0, 300);
+  if (!file) return undefined;
+  const whole = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 1e9 ? v : 0);
+  return { file, line: whole(s.line), column: whole(s.column), component: typeof s.component === 'string' ? stripControls(s.component).trim().slice(0, 100) : '',
+    ...(s.runtime === true ? { runtime: true as const } : {}), ...(s.ancestor === true ? { ancestor: true as const } : {}) };
+}
+export const sourceLabel = (s: CaptureSource): string => `${s.file}${s.line ? `:${s.line}${s.column ? `:${s.column}` : ''}` : ''}`;
+export const describeSource = (s: CaptureSource): string => [s.component ? `in ${s.component}` : '', s.ancestor ? 'the nearest ancestor with source info' : '', s.runtime ? 'runtime position, not source-mapped' : ''].filter(Boolean).join(', ') || 'source position';
+// The target of a capture as the inbox gets it: unchanged, except that a `source` is cleaned (or dropped when it is not one).
+export function cleanTarget(target: unknown): unknown {
+  if (!isObject(target) || !('source' in target)) return target;
+  const rest = { ...target };
+  delete rest.source;
+  const source = captureSource(target);
+  return source ? { ...rest, source } : rest;
+}
 // feedback.md of a capture: the note first, then the mode, target and context. Rebuilt when a redaction blanks the note.
 export function captureSummary(item: ItemData): string {
   const context = item.context as ItemData;
   const target = item.target as ItemData | undefined;
   const lines = [String(item.note), '', `Mode: ${item.mode}`];
   if (target?.selector) lines.push(`Selector: \`${target.selector}\``, `Components: ${Array.isArray(target.components) ? target.components.join(' < ') : ''}`);
+  const source = captureSource(target);
+  if (source) lines.push(`Source: \`${sourceLabel(source)}\` (${describeSource(source)})`);
   if (target?.rect) lines.push(`Rect: ${JSON.stringify(target.rect)}`);
   if (item.mode === 'page' && target) lines.push(`Page size: ${target.width} × ${target.height}`);
   lines.push(`URL: ${context.url ?? ''}`, `Viewport: ${JSON.stringify(context.viewport)}`, '');
@@ -180,7 +211,27 @@ export const MAX_NAME = 40;
 const str = (v: unknown, max: number) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 
 // Questions are written by the agent only. Option ids are o1..on, assigned here.
-export interface QuestionInput { prompt: unknown; options: { label: string; description?: string }[]; multi?: boolean; allow_other?: boolean }
+export interface QuestionInput { prompt: unknown; options: { label: string; description?: string }[]; multi?: boolean; allow_other?: boolean; expires?: unknown }
+const EXPIRY_UNITS: Record<string, number> = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 };
+export const MAX_EXPIRY_MS = 365 * 86400e3;
+// "30m", "2h", "1d", "2w" from now, or an absolute time ("2026-12-01T09:00:00Z", or a date, which is midnight UTC). Always an ISO string; it must be 1 minute to a year ahead.
+export function parseExpiry(value: unknown, now = Date.now()): string {
+  const bad = new Invalid('An expiry is a length of time like 30m, 2h, 1d or 2w, or a date and time like 2026-12-01T09:00:00Z (1 minute to a year ahead)');
+  if (typeof value !== 'string') throw bad;
+  const text = value.trim();
+  const relative = /^(\d{1,4})([mhdw])$/.exec(text);
+  let at: number;
+  if (relative) at = now + Number(relative[1]) * EXPIRY_UNITS[relative[2]!]!;
+  else if (/^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?(Z|[+-]\d{2}:?\d{2})?$/i.test(text)) {
+    at = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(text) ? `${text}T00:00:00Z` : /(Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text.replace(' ', 'T') : `${text.replace(' ', 'T')}Z`);
+    if (Number.isNaN(at)) throw bad;
+  } else throw bad;
+  if (at < now + 60e3) throw new Invalid('That expiry is too soon: it must be at least a minute ahead');
+  if (at > now + MAX_EXPIRY_MS) throw new Invalid('That expiry is too far ahead: at most a year');
+  return new Date(at).toISOString();
+}
+// A question whose expiry has passed. It is judged when read, never by a timer; whether it was answered is for the caller.
+export const isExpired = (q: Question | undefined, now = Date.now()): boolean => !!q?.expires_at && Date.parse(q.expires_at) <= now;
 export function buildQuestion(id: string, input: QuestionInput): Question {
   if (!str(input.prompt, 1000)) throw new Invalid('A question needs a prompt of 1–1000 characters');
   if (!Array.isArray(input.options) || input.options.length < 1 || input.options.length > MAX_OPTIONS) throw new Invalid(`A question needs 1–${MAX_OPTIONS} options`);
@@ -188,7 +239,8 @@ export function buildQuestion(id: string, input: QuestionInput): Question {
     if (!o || !str(o.label, 100) || (o.description !== undefined && (typeof o.description !== 'string' || o.description.length > 300))) throw new Invalid('Option labels are 1–100 characters and descriptions up to 300');
     return { id: `o${i + 1}`, label: o.label.trim(), ...(o.description?.trim() ? { description: o.description.trim() } : {}) };
   });
-  return { id, prompt: (input.prompt as string).trim(), options, multi: input.multi === true, allow_other: input.allow_other !== false };
+  const expires_at = input.expires === undefined || input.expires === null || input.expires === '' ? undefined : parseExpiry(input.expires);
+  return { id, prompt: (input.prompt as string).trim(), options, multi: input.multi === true, allow_other: input.allow_other !== false, ...(expires_at ? { expires_at } : {}) };
 }
 function parseQuestion(q: unknown): Question | undefined {
   if (!isObject(q) || typeof q.id !== 'string' || typeof q.prompt !== 'string' || !Array.isArray(q.options)) return undefined;
@@ -196,10 +248,21 @@ function parseQuestion(q: unknown): Question | undefined {
     .map(o => ({ id: o.id, label: o.label, ...(typeof o.description === 'string' ? { description: o.description } : {}) }));
   const withdrawn = isObject(q.withdrawn) && typeof q.withdrawn.at === 'string'
     ? { at: q.withdrawn.at, ...(typeof q.withdrawn.reason === 'string' && q.withdrawn.reason ? { reason: q.withdrawn.reason.slice(0, 200) } : {}) } : undefined;
-  return { id: q.id, prompt: q.prompt, options, multi: q.multi === true, allow_other: q.allow_other !== false, ...(withdrawn ? { withdrawn } : {}), ...(q.reasked === true ? { reasked: true as const } : {}) };
+  const expires_at = typeof q.expires_at === 'string' && !Number.isNaN(Date.parse(q.expires_at)) ? q.expires_at : undefined;
+  return { id: q.id, prompt: q.prompt, options, multi: q.multi === true, allow_other: q.allow_other !== false, ...(withdrawn ? { withdrawn } : {}), ...(q.reasked === true ? { reasked: true as const } : {}), ...(expires_at ? { expires_at } : {}) };
 }
-// A question still waiting on the person: not withdrawn, not replaced by a re-ask.
-const questionLive = (q: Question | undefined): q is Question => !!q && !q.withdrawn && !q.reasked;
+// A question still waiting on the person: not withdrawn, not replaced by a re-ask, not expired.
+const questionLive = (q: Question | undefined): q is Question => !!q && !q.withdrawn && !q.reasked && !isExpired(q);
+// Ids of questions that expired unanswered (not withdrawn or re-asked either): what a reader shows as "Expired".
+export function expiredIds(messages: Message[], now = Date.now()): Set<string> {
+  const answered = new Set(messages.flatMap(m => (m.answer ? [m.answer.question_id] : [])));
+  return new Set(messages.flatMap(m => (m.author === 'agent' && m.question && !m.question.withdrawn && !m.question.reasked && !answered.has(m.question.id) && isExpired(m.question, now) ? [m.question.id] : [])));
+}
+// The messages as an API shows them: an expired question carries `expired: true` (derived, never stored).
+export function withExpired(messages: Message[], now = Date.now()): Message[] {
+  const gone = expiredIds(messages, now);
+  return gone.size ? messages.map(m => (m.question && gone.has(m.question.id) ? { ...m, question: { ...m.question, expired: true } } : m)) as Message[] : messages;
+}
 // The answer line in `read` and in `_events.jsonl`: the question id, a short prompt, and the choice.
 export function answerLine(qid: string, prompt: string, labels: string[]): string {
   const flat = prompt.trim().replace(/\s+/g, ' ');
@@ -221,6 +284,8 @@ export function checkAnswer(messages: Message[], raw: unknown): { answer: Answer
   if (!asked) throw new Invalid('No such question', 404);
   if (asked.withdrawn) throw new Invalid('That question was withdrawn', 409);
   if (asked.reasked) throw new Invalid('That question was re-asked', 409);
+  if (messages.some(m => m.answer?.question_id === asked.id)) throw new Invalid('That question is already answered', 409);
+  if (isExpired(asked)) throw new Invalid('This question expired', 409);
   if (!openQuestions(messages).some(q => q.id === asked.id)) throw new Invalid('That question is already answered', 409);
   const ids = raw.option_ids ?? [];
   if (!Array.isArray(ids) || ids.some(i => typeof i !== 'string') || new Set(ids).size !== ids.length) throw new Invalid('option_ids must be a list of distinct ids');
@@ -271,6 +336,11 @@ export function parseQuote(q: unknown): ViewerQuote | undefined {
   const box = Array.isArray(q.box) && q.box.length === 4 && q.box.every(n => typeof n === 'number' && Number.isFinite(n)) ? (q.box as number[]).map(n => Math.round(n * 1000) / 1000) as [number, number, number, number] : null;
   return text || path || box ? { text, path, box } : undefined;
 }
+function parseMessageQuote(q: unknown): MessageQuote | undefined {
+  if (!isObject(q) || typeof q.message_id !== 'string' || !q.message_id || typeof q.text !== 'string') return undefined;
+  const text = stripControls(q.text).trim().slice(0, MAX_QUOTE);
+  return text ? { message_id: q.message_id, text } : undefined;
+}
 function parseRedaction(r: unknown): Redaction | undefined {
   if (!isObject(r) || typeof r.at !== 'string' || (r.by !== 'user' && r.by !== 'agent') || typeof r.key !== 'string') return undefined;
   return { at: r.at, by: r.by, key: r.key, ...(typeof r.reason === 'string' && r.reason ? { reason: r.reason.slice(0, 200) } : {}) };
@@ -286,11 +356,13 @@ function parseMessages(raw: string | null): Message[] {
         && typeof m.created_at === 'string' && Array.isArray(m.images)) {
         const question = m.author === 'agent' ? parseQuestion(m.question) : undefined;
         const answer = m.author === 'user' ? parseAnswer(m.answer) : undefined;
-        const flag: Flag | undefined = m.author === 'viewer' ? 'needs_you' : m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
+        const stated: Flag | undefined = m.author === 'viewer' ? 'needs_you' : m.author !== 'agent' || m.divider === true ? undefined : (FLAGS as readonly string[]).includes(m.flag as string) ? m.flag as Flag : question ? 'needs_you' : 'fyi';
+        const flag = stated === 'needs_you' && m.author === 'agent' && isExpired(question) ? 'fyi' : stated; // an expired question no longer needs the person (read-time, like withdrawing one)
         out.push({ id: m.id, author: m.author, text: m.text, images: m.images.filter((f): f is string => typeof f === 'string' && MESSAGE_IMAGE.test(f)), created_at: m.created_at,
           ...(parseAttachments(m.attachments).length ? { attachments: parseAttachments(m.attachments) } : {}),
           ...(flag ? { flag } : {}), ...(m.divider === true ? { divider: true } : {}), ...(question ? { question } : {}), ...(answer ? { answer } : {}),
           ...(typeof m.reply_to === 'string' && m.reply_to ? { reply_to: m.reply_to } : {}), ...(m.aside === true ? { aside: true as const } : {}),
+          ...(m.author !== 'viewer' && parseMessageQuote(m.quote) ? { quote: parseMessageQuote(m.quote)! } : {}),
           ...(typeof m.moved_to === 'string' && ID.test(m.moved_to) ? { moved_to: m.moved_to } : {}), ...(typeof m.moved_from === 'string' && m.moved_from ? { moved_from: m.moved_from } : {}),
           ...(ids(m.added_items) ? { added_items: ids(m.added_items)! } : {}), ...(ids(m.ticked_items) ? { ticked_items: ids(m.ticked_items)! } : {}),
           ...(typeof m.client_id === 'string' && CLIENT_ID.test(m.client_id) ? { client_id: m.client_id } : {}), ...(typeof m.written_at === 'string' && !Number.isNaN(Date.parse(m.written_at)) ? { written_at: m.written_at } : {}),
@@ -375,7 +447,7 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder' | 'expired'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.set_by ? { set_by: event.set_by } : {}), ...(event.agent_name ? { agent_name: event.agent_name } : {}), ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -447,7 +519,7 @@ const lastAt = (messages: Message[], item: ItemData) => messages.reduce((hi, m) 
 export const READ_ONLY_NOTE = 'This thread is read-only: it only carries updates from the agent, so you cannot reply here.';
 // `aside`: a side question (user) or its answer (agent, with `reply_to` naming the aside). `add_items` and `check_items` ride on the message:
 // new checklist items (`owner` says who has to do them) and ids of items the agent ticks.
-export interface NewMessage { author: Author; text: unknown; images?: Image[]; attachments?: unknown; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown; agent_name?: unknown }
+export interface NewMessage { author: Author; text: unknown; images?: Image[]; attachments?: unknown; question?: QuestionInput; answer?: unknown; flag?: unknown; reply_to?: unknown; aside?: unknown; add_items?: unknown; check_items?: unknown; secret?: unknown; client_id?: unknown; written_at?: unknown; agent_name?: unknown; quote?: unknown }
 // A message that arrived again with the same client_id is the one already stored: it is returned, not written twice.
 const duplicates = new WeakSet<Message>();
 export const wasDuplicate = (m: Message) => duplicates.has(m);
@@ -498,6 +570,17 @@ export function checkReplyTo(messages: Message[], value: unknown): string | unde
   if (!target || target.divider === true) throw new Invalid('reply_to must be the id of a message in this thread');
   return value;
 }
+// A quote carries the text the user selected inside an earlier message of this thread. It names that message (never a side question, never a divider) and holds 1 to 1000 characters.
+export function checkQuote(messages: Message[], value: unknown): MessageQuote | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isObject(value) || typeof value.message_id !== 'string' || typeof value.text !== 'string') throw new Invalid('A quote needs the id of a message in this thread and the text selected from it');
+  const target = messages.find(m => m.id === value.message_id);
+  if (!target || target.divider === true || target.moved_to) throw new Invalid('A quote must name a message in this thread');
+  if (isAside(target)) throw new Invalid('A quote cannot name a side question');
+  const text = stripControls(value.text).trim();
+  if (!text || text.length > MAX_QUOTE) throw new Invalid(`A quote is 1–${MAX_QUOTE} characters of selected text`);
+  return { message_id: target.id, text };
+}
 // Only the agent flags messages. A question is `needs_you` unless said otherwise; anything else is `fyi`.
 function messageFlag(author: Author, flag: unknown, asking: boolean): Flag | undefined {
   if (author !== 'agent') { if (flag !== undefined) throw new Invalid('Only the agent can flag a message', 403); return undefined; }
@@ -526,6 +609,8 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
   if ((input.question || input.secret) && item.read_only === true) throw new Invalid('A read-only thread cannot hold a question or a key request: nobody could answer it', 409);
   const { aside, replyTo } = checkAside(stored, input);
   const quoted = checkReplyTo(stored, replyTo);
+  const quote = checkQuote(stored, input.quote);
+  if (quote && (aside || input.question || input.answer !== undefined || input.secret !== undefined)) throw new Invalid('Only a plain message can carry a quote');
   const n = stored.length + 1;
   const secret = input.secret === undefined ? undefined : checkSecretRequest(input.secret);
   let text = input.answer !== undefined || input.question ? '' : secret ? messageText(input.text ?? `Please add ${secret.label}. Paste it in the secure box below; it goes straight to the app and is never saved in this thread.`, false) : messageText(input.text, images.length > 0 || fileIds.length > 0);
@@ -552,7 +637,7 @@ async function compose(path: string, input: NewMessage, prep: Prepared): Promise
   let created: Message;
   try {
     taken = fileIds.length ? await claimUploads(dir, path, fileIds, input.author) : null;
-    created = { id: `m${n}`, author: input.author, text, images: imageNames, ...(taken ? { attachments: taken.attachments } : {}), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}),
+    created = { id: `m${n}`, author: input.author, text, images: imageNames, ...(taken ? { attachments: taken.attachments } : {}), created_at: new Date().toISOString(), ...(client_id ? { client_id } : {}), ...(written ? { written_at: written } : {}), ...(agentName && input.author === 'agent' ? { agent_name: agentName } : {}), ...(flag ? { flag } : {}), ...extra, ...(quoted ? { reply_to: quoted } : {}), ...(quote ? { quote } : {}),
       ...(aside ? { aside: true as const } : {}), ...(added.length ? { added_items: added.map(i => i.id) } : {}), ...(ticked.length ? { ticked_items: ticked } : {}) };
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
   } catch (error) { await taken?.undo(); for (const name of imageNames) await rm(join(path, name), { force: true }); throw error; }
@@ -575,6 +660,10 @@ function remapForward(input: NewMessage, map: MergeMap | null): NewMessage {
     const mapped = map?.messages[next.reply_to];
     if (!mapped) throw new Invalid('That message was not copied into the merged thread');
     next.reply_to = mapped;
+  }
+  if (isObject(next.quote) && typeof next.quote.message_id === 'string') {
+    const mapped = map?.messages[next.quote.message_id];
+    next.quote = mapped ? { ...next.quote, message_id: mapped } : undefined; // the words stay in the message's own text; only the link is dropped
   }
   if (next.answer !== undefined && next.answer !== null && isObject(next.answer) && typeof next.answer.question_id === 'string') {
     const mapped = map?.questions[next.answer.question_id];
@@ -731,6 +820,28 @@ export async function bumpQuestion(dir: string, id: string, qid: string): Promis
     const created: Message = { id: `m${n}`, author: 'agent', text: q.prompt, images: [], created_at: new Date().toISOString(), flag: 'needs_you', question };
     await appendFile(join(path, 'thread.jsonl'), `${JSON.stringify(created)}\n`);
     return { id: created.id, question_id: question.id };
+  });
+}
+// An agent marks its own unanswered questions expired now, for when its session ends: one question (`qid`), or every open one it asked (`mine`: a thread's questions asked by that agent, `agent` being its name or undefined for the default).
+// The stored `expires_at` becomes now, so it reads as expired from then on, like any lapsed question; the "Expired" event follows on the first read.
+export async function expireQuestions(dir: string, id: string, which: { qid: string } | { mine: { agent?: string } }): Promise<{ expired: string[] }> {
+  const path = await itemDir(dir, id);
+  return withLock(path, async () => {
+    const stored = await materialise(path, await readItem(path));
+    const answered = new Set(stored.flatMap(m => (m.answer ? [m.answer.question_id] : [])));
+    const live = (m: Message) => m.author === 'agent' && !!m.question && questionLive(m.question) && !answered.has(m.question.id);
+    let targets: Message[];
+    if ('qid' in which) {
+      const message = questionMessage(stored, which.qid);
+      if (!message?.question) throw new Invalid('No such question', 404);
+      if (answered.has(which.qid)) throw new Invalid('That question is already answered', 409);
+      if (message.question.withdrawn) throw new Invalid('That question was withdrawn', 409);
+      if (message.question.reasked) throw new Invalid('That question was re-asked; expire the newer one', 409);
+      targets = isExpired(message.question) ? [] : [message];
+    } else targets = stored.filter(m => live(m) && (m.agent_name ?? undefined) === (which.mine.agent ?? undefined));
+    const at = new Date().toISOString();
+    for (const m of targets) await mapThreadLine(path, m.question!.id, parsed => { (parsed.question as ItemData).expires_at = at; });
+    return { expired: targets.map(m => m.question!.id) };
   });
 }
 // A system line in the thread when an agent creates a share. A divider, so it does not change who the thread is waiting on. It does count as unread.
@@ -1074,6 +1185,7 @@ const asRecord = (map: Map<string, string>): Record<string, string> => Object.fr
 function applyCarry(m: Message, copy: Message, messages: Map<string, string>, questions: Map<string, string>, items: Map<string, string>): void {
   delete copy.reply_to; delete copy.added_items; delete copy.ticked_items;
   if (m.reply_to && messages.has(m.reply_to)) copy.reply_to = messages.get(m.reply_to)!;
+  if (isMessageQuote(m.quote)) { delete copy.quote; const to = messages.get(m.quote.message_id); if (to) copy.quote = { ...m.quote, message_id: to }; } // a quote of a message that stayed behind keeps its words in the text, not the link
   for (const key of ['added_items', 'ticked_items'] as const) {
     const mapped = (m[key] ?? []).flatMap(id => (items.has(id) ? [items.get(id)!] : []));
     if (mapped.length) copy[key] = mapped;
@@ -1708,10 +1820,25 @@ function waitingOn(status: Status, messages: Message[], items: ChecklistItem[], 
   if (items.some(i => i.owner === 'user' && !i.done && !i.claimed_by_user_at)) return 'you';
   return 'idle';
 }
+// The first read after a question expired writes one `expired` event (author `system`), and never another: an exclusive marker file per question decides who is first.
+// Nothing here runs on a timer, and a folder that cannot be written to just skips the event. A question the agent withdrew or re-asked, or that was answered, never expires.
+async function noteExpired(dir: string, path: string, id: string, messages: Message[]): Promise<void> {
+  const gone = expiredIds(messages);
+  if (!gone.size) return;
+  for (const m of messages) {
+    if (m.author !== 'agent' || !m.question || !gone.has(m.question.id)) continue;
+    try {
+      await mkdir(join(path, '_expired'), { recursive: true });
+      await writeFile(join(path, '_expired', m.question.id), '', { flag: 'wx' });
+    } catch { continue; }
+    try { await logEvent(dir, { id, kind: 'expired', text: `${m.question.id} expired: ${m.question.prompt}`, author: 'system', ...(m.agent_name ? { agent_name: m.agent_name } : {}) }); } catch { /* the event is a courtesy */ }
+  }
+}
 export async function summarise(dir: string, id: string): Promise<{ summary: Summary; messages: Message[]; item: ItemData; path: string }> {
   const path = await itemDir(dir, id);
   const item = await readItem(path);
   const messages = await readMessages(path, item);
+  await noteExpired(dir, path, id, messages);
   const main = mainMessages(messages).filter(m => !m.moved_to && m.kind !== 'share_notice' && m.kind !== 'project_move'); // asides, move stubs, share notices and project-move lines never decide who spoke last
   const last = [...main].reverse().find(m => !m.divider && m.author !== 'viewer'); // a system divider (a project move) and a viewer's note are not the user or the agent speaking
   const created_at = item.created_at as string;

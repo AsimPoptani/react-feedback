@@ -5,6 +5,14 @@ export interface Rect {
     height: number;
 }
 export type CaptureMode = 'region' | 'element' | 'section' | 'page';
+export interface ElementSource {
+    file: string;
+    line: number;
+    column: number;
+    component: string;
+    runtime?: true;
+    ancestor?: true;
+}
 export interface ElementTarget {
     selector: string;
     tag: string;
@@ -13,6 +21,7 @@ export interface ElementTarget {
     text: string;
     rect: Rect;
     components: string[];
+    source?: ElementSource;
 }
 export type Target = ElementTarget | {
     rect: Rect;
