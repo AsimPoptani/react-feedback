@@ -260,30 +260,37 @@ async function rewriteNote(file: string, edit: (note: Record<string, unknown>) =
     await writeAtomic(file, JSON.stringify(note));
   } catch { /* a torn note stays as it was */ }
 }
-async function ensureThread(from: Project, to: Project, fromId: string, plan: Plan): Promise<void> {
+// While the move is still copying and the source exists, the source is the truth: a target copy left by an earlier attempt may be stale, so it is removed and copied again.
+// Returns whether this call placed the folder.
+async function ensureThread(from: Project, to: Project, fromId: string, plan: Plan): Promise<boolean> {
   const toId = plan.ids.get(fromId)!;
   const line = movedLine(plan.journal.fromName);
   const final = join(to.dir, toId);
+  const sourceThere = await isDir(join(from.dir, fromId));
   if (await isDir(final)) {
-    if (await hasLine(to.dir, toId, line)) return;
-    throw new Invalid(`Thread id ${toId} is already used in the target project`, 409);
+    if (!(await hasLine(to.dir, toId, line))) throw new Invalid(`Thread id ${toId} is already used in the target project`, 409);
+    if (!sourceThere || plan.journal.state !== 'copying') return false;
+    await rm(final, { recursive: true, force: true });
   }
-  if (!(await isDir(join(from.dir, fromId)))) throw new Invalid('Not found', 404);
+  if (!sourceThere) throw new Invalid('Not found', 404);
   const staged = join(to.dir, '_incoming', toId);
   await rm(staged, { recursive: true, force: true });
   await cp(join(from.dir, fromId), staged, { recursive: true });
   await rm(join(staged, '.lock'), { force: true });
   await rewriteThread(staged, plan, fromId, line);
   await placeDir(staged, final);
+  return true;
 }
-async function ensureArtifact(from: Project, to: Project, fromId: string, toId: string, thread: string): Promise<void> {
+async function ensureArtifact(from: Project, to: Project, fromId: string, toId: string, thread: string, plan: Plan): Promise<boolean> {
   const final = join(to.dir, '_artifacts', toId);
+  const sourceThere = await isDir(join(from.dir, '_artifacts', fromId));
   if (await isDir(final)) {
     const meta = await readArtifact(to.dir, toId);
-    if (meta?.thread === thread) return;
-    throw new Invalid(`Artifact id ${toId} is already used in the target project`, 409);
+    if (meta?.thread !== thread) throw new Invalid(`Artifact id ${toId} is already used in the target project`, 409);
+    if (!sourceThere || plan.journal.state !== 'copying') return false;
+    await rm(final, { recursive: true, force: true });
   }
-  if (!(await isDir(join(from.dir, '_artifacts', fromId)))) return;
+  if (!sourceThere) return false;
   const staged = join(to.dir, '_artifacts', '.incoming', toId);
   await rm(staged, { recursive: true, force: true });
   await mkdir(dirname(staged), { recursive: true });
@@ -295,6 +302,7 @@ async function ensureArtifact(from: Project, to: Project, fromId: string, toId: 
     await writeAtomic(join(staged, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);
   }
   await placeDir(staged, final);
+  return true;
 }
 async function movePins(from: Project, to: Project, ids: Map<string, string>): Promise<void> {
   const pins = await readPins(from.dir);
@@ -334,22 +342,34 @@ async function leftoverShares(from: Project, plan: Plan): Promise<Share[]> {
 async function commit(from: Project, to: Project, thread: string, plan: Plan, vault: string | null): Promise<void> {
   await mkdir(to.dir, { recursive: true });
   const line = movedLine(plan.journal.fromName);
-  for (const [fromId, toId] of plan.ids) {
-    if (!(await isDir(join(from.dir, fromId))) && await hasLine(to.dir, toId, line)) continue;
-    await ensureThread(from, to, fromId, plan);
+  const placedThreads: string[] = [], placedArts: string[] = [];
+  let vaultCopied = false;
+  try {
+    for (const [fromId, toId] of plan.ids) {
+      if (!(await isDir(join(from.dir, fromId))) && await hasLine(to.dir, toId, line)) continue;
+      if (await ensureThread(from, to, fromId, plan)) placedThreads.push(toId);
+    }
+    for (const [fromId, toId] of plan.arts) {
+      const meta = await readArtifact(from.dir, fromId);
+      const threadId = meta ? (plan.ids.get(meta.thread) ?? meta.thread) : (plan.ids.get(thread) ?? thread);
+      if (!meta && await isDir(join(to.dir, '_artifacts', toId))) continue;
+      if (await ensureArtifact(from, to, fromId, toId, threadId, plan)) placedArts.push(toId);
+    }
+    if (vault && plan.journal.vault.length) { vaultCopied = true; await shiftVault(vault, plan.journal.vault, false); }
+    plan.journal.state = 'committed';
+    try { await saveJournal(from.dir, thread, plan.journal); } catch (error) { plan.journal.state = 'copying'; throw error; }
+  } catch (error) {
+    // Not committed: take back what this attempt placed, so the target shows no half-moved thread and the source stays the only copy.
+    if (plan.journal.state !== 'committed') {
+      for (const id of placedThreads) await rm(join(to.dir, id), { recursive: true, force: true }).catch(() => {});
+      for (const id of placedArts) await rm(join(to.dir, '_artifacts', id), { recursive: true, force: true }).catch(() => {});
+      if (vault && vaultCopied) for (const item of plan.journal.vault) await removeVaultEntry(vault, item.newKey).catch(() => {});
+    }
+    throw error;
   }
-  for (const [fromId, toId] of plan.arts) {
-    const meta = await readArtifact(from.dir, fromId);
-    const threadId = meta ? (plan.ids.get(meta.thread) ?? meta.thread) : (plan.ids.get(thread) ?? thread);
-    if (!meta && await isDir(join(to.dir, '_artifacts', toId))) continue;
-    await ensureArtifact(from, to, fromId, toId, threadId);
-  }
-  if (vault && plan.journal.vault.length) await shiftVault(vault, plan.journal.vault, false);
   const shares = plan.movingShares.length ? plan.movingShares : await leftoverShares(from, plan);
   if (shares.length) await transferShares(from.dir, to.dir, shares);
   await movePins(from, to, plan.ids);
-  plan.journal.state = 'committed';
-  await saveJournal(from.dir, thread, plan.journal);
   await removeSources(from, to, plan);
   if (vault && plan.journal.vault.length) await shiftVault(vault, plan.journal.vault, true);
   await writeEvents(from, to, thread, plan);
