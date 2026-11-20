@@ -1205,12 +1205,12 @@ function strandedAnswers(messages: Message[], mergeAt: string, intoId: string): 
   const cut = messages.findIndex(m => m.author === 'agent' && m.text.startsWith('Merged into [') && m.text.includes(`(#/${intoId})`));
   return (cut === -1 ? messages : messages.slice(cut + 1)).filter(m => !!m.answer && m.created_at > mergeAt);
 }
-function alreadyCarried(target: Message[], src: Message, questionId: string): boolean {
-  return target.some(m => m.author === src.author && m.created_at === src.created_at && m.answer?.question_id === questionId && m.text.includes('Sent in ') && m.text.includes('after the merge'));
+function alreadyCarried(target: Message[], src: Message): boolean {
+  return target.some(m => m.author === src.author && m.created_at === src.created_at && m.text.includes('Sent in ') && m.text.includes('after the merge'));
 }
-interface CarryPlan { from: string; src: Message; copyId: string; fromQ: string; toQ: string; title: string; span: RepairSpan; skipped?: string }
+interface CarryPlan { from: string; src: Message; copyId: string; fromQ: string; toQ: string; title: string; span: RepairSpan; skipped?: string; plain?: boolean }
 function describeCarry(plans: CarryPlan[]): string {
-  return plans.map(plan => plan.skipped ? `left ${plan.src.id}: ${plan.skipped}` : `carried ${plan.src.id} -> ${plan.copyId} (${plan.fromQ} -> ${plan.toQ})`).join('; ');
+  return plans.map(plan => plan.skipped ? `left ${plan.src.id}: ${plan.skipped}` : plan.plain ? `carried ${plan.src.id} -> ${plan.copyId} as a plain message (${plan.fromQ} -> ${plan.toQ} is already answered in the target)` : `carried ${plan.src.id} -> ${plan.copyId} (${plan.fromQ} -> ${plan.toQ})`).join('; ');
 }
 async function strandedCopy(from: string, into: string, plan: CarryPlan): Promise<Message> {
   const src = plan.src;
@@ -1218,7 +1218,8 @@ async function strandedCopy(from: string, into: string, plan: CarryPlan): Promis
   const loaded = (await Promise.all(wanted.map(async f => ({ f, bytes: await readOrNull(join(from, f)) })))).filter((x): x is { f: string; bytes: Buffer } => x.bytes !== null);
   const names = await saveImages(into, loaded.map(x => ({ bytes: x.bytes, ext: x.f.slice(x.f.lastIndexOf('.') + 1) as Extension })));
   const renamed = new Map(loaded.map((x, i) => [x.f, names[i]!]));
-  const copy: Message = { ...src, id: plan.copyId, images: src.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])), text: quoteSent(plan.title, src.text), answer: { ...src.answer!, question_id: plan.toQ } };
+  const copy: Message = { ...src, id: plan.copyId, images: src.images.flatMap(f => (renamed.has(f) ? [renamed.get(f)!] : [])), text: quoteSent(plan.title, src.text) };
+  if (plan.plain) delete copy.answer; else copy.answer = { ...src.answer!, question_id: plan.toQ };
   if (src.reply_to && plan.span.messages.has(src.reply_to)) copy.reply_to = plan.span.messages.get(src.reply_to)!;
   else delete copy.reply_to;
   return copy;
@@ -1314,11 +1315,10 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
           const mapped = span.questions.get(qid);
           if (!mapped) { plans.push({ from: span.from, src, copyId: '', fromQ: qid, toQ: '', title: row.title, span, skipped: `${qid} was asked after the merge` }); continue; }
           const known = row.note.carried?.[src.id];
-          if ((known && fresh.some(m => m.id === known)) || alreadyCarried(fresh, src, mapped)) continue;
+          if ((known && fresh.some(m => m.id === known)) || alreadyCarried(fresh, src)) continue;
           plans.push({ from: span.from, src, copyId: `m${++n}`, fromQ: qid, toQ: mapped, title: row.title, span });
         }
       }
-      const projected: Message[] = [...fresh, ...plans.filter(plan => !plan.skipped).map(plan => ({ id: plan.copyId, author: plan.src.author, text: quoteSent(plan.title, plan.src.text), images: [], created_at: plan.src.created_at, answer: { ...plan.src.answer!, question_id: plan.toQ } }))];
       const ref: { span: RepairSpan; edits: Map<string, RepairEdit> }[] = [];
       for (const span of group) {
         const source = pending.find(p => p.from === span.from)?.source;
@@ -1328,6 +1328,10 @@ export async function repairMerged(dir: string, opts: { dryRun?: boolean } = {})
       }
       const seeded = new Map<string, RepairEdit>();
       for (const { edits } of ref) for (const [id, change] of edits) seeded.set(id, change);
+      // An answer to a question the target already answers would be a second answer: it is carried as a plain message instead.
+      const taken = answeredAfter(fresh, seeded);
+      for (const plan of plans) { if (plan.skipped) continue; if (taken.has(plan.toQ)) plan.plain = true; else taken.add(plan.toQ); }
+      const projected: Message[] = [...fresh, ...plans.filter(plan => !plan.skipped).map(plan => ({ id: plan.copyId, author: plan.src.author, text: quoteSent(plan.title, plan.src.text), images: [], created_at: plan.src.created_at, ...(plan.plain ? {} : { answer: { ...plan.src.answer!, question_id: plan.toQ } }) }))];
       const answered = answeredAfter(projected, seeded);
       for (const { span, edits } of ref) {
         addUnwithdraw(span, edits, answered, pending.find(p => p.from === span.from)?.note.at ?? '');

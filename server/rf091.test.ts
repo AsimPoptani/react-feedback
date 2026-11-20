@@ -229,3 +229,41 @@ test('repair carries a stranded answer and un-withdraws only then; a later Settl
   expect(await readFile(threadFile(into))).toEqual(fixed);
   expect((await readThread(into)).messages.filter(m => m.answer)).toHaveLength(1);
 });
+
+test('a stranded answer to a question the target already answers is carried as a plain message', async () => {
+  const into = (await store.createThread(dir, { title: 'Main', text: 'tgt hello', origin: 'user' })).id;
+  const from = (await store.createThread(dir, { title: 'Side', text: 'src hello', origin: 'user' })).id;
+  await ask(from, 'Which project?');
+  await store.mergeThreads(dir, from, into, 'agent');
+  const note = JSON.parse(await readFile(join(dir, from, 'merged.json'), 'utf8'));
+  const target = await readThread(into);
+  const qid = target.messages.find(m => m.question?.prompt === 'Which project?')!.question!.id;
+  await store.appendMessage(dir, into, { author: 'user', text: '', answer: { question_id: qid, option_ids: ['o1'] } });
+  const source = await readThread(from);
+  const stranded = { id: `m${source.messages.length + 1}`, author: 'user', text: 'Chose: A', images: [], created_at: new Date(Date.parse(note.at) + 1000).toISOString(), answer: { question_id: 'q2', option_ids: ['o1'] } };
+  await appendFile(threadFile(from), `${JSON.stringify(stranded)}\n`);
+
+  expect(await run(['repair-merged', '--dry-run'], dir)).toContain('as a plain message');
+  await run(['repair-merged'], dir);
+  const after = await readThread(into);
+  const carried = after.messages.find(m => m.text.includes('Sent in Side after the merge'))!;
+  expect(carried.answer).toBeUndefined();
+  expect(carried.text).toContain('Chose: A');
+  expect(after.messages.filter(m => m.answer?.question_id === qid)).toHaveLength(1);
+  const fixed = await readFile(threadFile(into));
+  expect(await run(['repair-merged'], dir)).toContain('nothing to change');
+  expect(await readFile(threadFile(into))).toEqual(fixed);
+});
+
+test('forwarding an answer to a question the target already answers is refused with a 409', async () => {
+  const into = (await store.createThread(dir, { title: 'Main', text: 'tgt hello', origin: 'user' })).id;
+  const from = (await store.createThread(dir, { title: 'Side', text: 'src hello', origin: 'user' })).id;
+  await ask(from, 'Which project?');
+  await store.mergeThreads(dir, from, into, 'agent');
+  const qid = (await readThread(into)).messages.find(m => m.question?.prompt === 'Which project?')!.question!.id;
+  await store.appendMessage(dir, into, { author: 'user', text: '', answer: { question_id: qid, option_ids: ['o1'] } });
+  const err = (await store.appendMessage(dir, from, { author: 'user', text: '', answer: { question_id: 'q2', option_ids: ['o1'] } }).catch((e: unknown) => e)) as { message: string; status: number };
+  expect(err.message).toMatch(/already answered/);
+  expect(err.status).toBe(409);
+  expect((await readThread(into)).messages.filter(m => m.answer)).toHaveLength(1);
+});
