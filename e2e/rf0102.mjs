@@ -14,7 +14,7 @@ await mkdir(SHOTS, { recursive: true });
 const store = await import('../server/store.ts');
 const { serverOptions } = await import('../server/server.ts');
 const { chromium } = await import(process.env.PLAYWRIGHT ?? 'playwright');
-const longTitle = 'Securitisation content audit with a very long title that keeps going well past two lines so the clamp has to cut it off with an ellipsis';
+const longTitle = 'Checkout page copy review with a very long title that keeps going well past two lines so the clamp has to cut it off with an ellipsis';
 const { id } = await store.createThread(dirs[0], { title: longTitle, text: 'Hello', origin: 'user' });
 await store.appendMessage(dirs[0], id, { author: 'agent', text: 'Hi there', flag: 'fyi' });
 const items = [];
