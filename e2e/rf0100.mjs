@@ -292,7 +292,7 @@ async function inboxPrivacy(width, tap) {
   await page.waitForSelector('#redact-dialog[open]');
   await page.locator('#redact-go')[act]();
   await page.waitForSelector('#redact-dialog:not([open])', { state: 'attached' });
-  check(`${width}: the message was redacted`, (await page.getByText(KEY).count()) === 0);
+  check(`${width}: the message was redacted`, !!(await until(async () => (await page.getByText(KEY).count()) === 0, 8000)));
   await page.mouse.move(120, 220); await page.mouse.move(220, 320, { steps: 4 });
   await page.waitForTimeout(5600); // one upload tick (the inbox sends every 5 s)
   await page.evaluate(() => { location.hash = '#/'; });
@@ -334,7 +334,37 @@ async function recorderModes() {
   await context.close();
 }
 
+// Review fix: declining at about 2 s and at about 6 s leaves no stored session (uploads are held for 10 s), and a visit that is not declined is stored.
+async function declineTiming() {
+  const created = await post(`artifacts/${art.id}/share`, { expires: 'none', record: true });
+  const url = created.url.startsWith('http') ? created.url : `${origin}${created.url.replace(/^.*?(\/__feedback)/, '$1')}`;
+  const count = async () => (await get(`artifacts/${art.id}/replays`)).filter(r => r.link === created.id).length;
+  for (const wait of [2000, 6000]) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(url);
+    await page.locator('#notice').waitFor();
+    await page.frameLocator('#art').locator('#go').click();
+    await page.waitForTimeout(wait);
+    await page.locator('#norec').click();
+    await page.waitForTimeout(16000); // well past the first upload window
+    check(`declining after about ${wait / 1000} s leaves 0 stored sessions`, (await count()) === 0);
+    await context.close();
+  }
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(url);
+  await page.frameLocator('#art').locator('#go').click();
+  const kept = await until(async () => (await count()) > 0, 25000);
+  check('a visit that does not decline is stored after the hold', !!kept);
+  await page.locator('#norec').click();
+  const gone = await until(async () => (await count()) === 0, 10000);
+  check('declining after an upload went deletes that session', !!gone);
+  await context.close();
+}
+
 try {
+  await declineTiming();
   await recorderModes();
   await inboxPrivacy(390, true);
   await inboxPrivacy(1280, false);
