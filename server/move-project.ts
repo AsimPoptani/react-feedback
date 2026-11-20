@@ -10,7 +10,7 @@ import { ART_ID, listArtifacts, readArtifact } from './artifacts';
 import { projectById, type Project } from './projects';
 import { isActive, readShares, transferShares, type Share } from './shares';
 import { checkVault, copyVaultEntry, removeVaultEntry } from './sensitive';
-import { ID, Invalid, itemDir, logEvent, materialise, newId, optional, readItem, readPins, setPin, withLock, writeAtomic } from './store';
+import { ID, Invalid, itemDir, logEvent, materialise, newId, optional, readItem, readPins, setPin, summarise, withLock, writeAtomic } from './store';
 
 export interface MoveInput { projects: Project[]; from: string; to: string; thread: string; dryRun?: boolean; vault?: string | null }
 export interface MoveProjectResult {
@@ -402,6 +402,11 @@ export async function moveThreadToProject(input: MoveInput): Promise<MoveProject
       return planResult(from, to, input.thread, plan, false, input.dryRun === true);
     }
     throw new Invalid('Not found', 404);
+  }
+  const parent = await mergeParent(from.dir, input.thread);
+  if (parent) {
+    const title = await summarise(from.dir, parent).then(result => result.summary.title, () => parent);
+    throw new Invalid(`This thread was merged into ${title}; move that one instead`, 409);
   }
   if (input.dryRun) return planResult(from, to, input.thread, await buildPlan(from, to, input.thread, existing), false, true);
   const paths = (await movedSet(from.dir, input.thread)).map(id => join(from.dir, id));
