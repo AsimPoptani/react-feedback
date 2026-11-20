@@ -13,7 +13,7 @@
 - The pairing and device routes on the ordinary listener refuse any `Host` that is not `localhost`, an IP address, `FEEDBACK_HOST` or a `FEEDBACK_ALLOWED_HOSTS` name (DNS rebinding). A paired device cannot create codes or revoke other devices. The exchange counts only well-formed attempts from the right origin against its rate limit, caps its body at 1 KiB, and the remote listener returns a plain 500 on an error. A revoked phone gets `Clear-Site-Data`, and the service worker drops its saved data on a 401. The self-started tunnel keeps its output drained (it used to die on its next log line), ignores a user's cloudflared config, and its exit is logged.
 
 ### Changed
-- The service worker also keeps `pair.js` for offline starts. (The cache name is unchanged: the version is assigned at release.)
+- The service worker cache is `fb-inbox-0.13.0`, and `pair.js` is in its file list.
 
 ## 0.12.0
 
