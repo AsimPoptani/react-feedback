@@ -10,7 +10,7 @@ import { DEFAULT_AREAS, type AreasConfig } from './inbox/areas.js';
 import { Invalid, ID, MESSAGE_IMAGE, MIME, MAX_REQUEST, itemDir, optional } from './store';
 import * as artifacts from './artifacts';
 import * as shares from './shares';
-import { loadProjects, projectById, type Project } from './projects';
+import { checkIcons, loadProjects, projectById, readProjectIcon, type Project } from './projects';
 import { moveThreadToProject } from './move-project';
 import * as files from './files';
 import * as replay from './replay';
@@ -340,13 +340,13 @@ function dataDirOf(req: Request, fallback: string, projects?: Project[]): string
   if (!id) return projects[0]?.dir ?? fallback;
   return projectById(projects, id).dir;
 }
-async function projectList(projects: Project[], fallback: string): Promise<{ id: string; name: string; unread: number }[]> {
+async function projectList(projects: Project[], fallback: string): Promise<{ id: string; name: string; unread: number; has_icon?: true }[]> {
   const list = projects.length ? projects : [{ id: 'default', name: 'Feedback', dir: fallback }];
-  const out: { id: string; name: string; unread: number }[] = [];
+  const out: { id: string; name: string; unread: number; has_icon?: true }[] = [];
   for (const project of list) {
     let unread = 0;
     try { unread = (await store.listThreads(project.dir)).filter(thread => thread.unread_for_user).length; } catch { unread = 0; }
-    out.push({ id: project.id, name: project.name, unread });
+    out.push({ id: project.id, name: project.name, unread, ...(project.icon ? { has_icon: true as const } : {}) }); // absent means no picture: the existing list shape is unchanged for a project without one
   }
   return out;
 }
@@ -615,6 +615,16 @@ export function createHandler(directory: string, areas: AreasConfig = DEFAULT_AR
         await store.touchPresence(options.projects?.[0]?.dir ?? dir, 'user', now);
         return json({ projects: await projectList(options.projects ?? [], dir) });
       }
+      const iconRoute = path.match(/^\/__feedback\/api\/projects\/([^/]+)\/icon$/);
+      if (iconRoute && req.method === 'GET') {
+        // Only the file named for that project in FEEDBACK_PROJECTS is ever read; the path is never sent anywhere.
+        let id = iconRoute[1]!;
+        try { id = decodeURIComponent(id); } catch { /* an undecodable id matches nothing */ }
+        const icon = options.projects?.find(project => project.id === id);
+        const found = icon ? readProjectIcon(icon) : null;
+        if (!found) return new Response('Not found\n', { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+        return new Response(found.bytes, { headers: { 'Content-Type': found.type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" } });
+      }
       const dataDir = dataDirOf(req, dir, options.projects);
       const page = path.match(/^\/__feedback\/a\/(a[0-9a-f]{12})\/v(\d+)$/);
       if (page && req.method === 'GET') {
@@ -656,7 +666,7 @@ export function serverOptions(env: Record<string, string | undefined> = process.
   const areas = loadAreas(env);
   const secretTarget = loadSecretTarget(env), vaultDir = loadVaultDir(env);
   loadReplayDays(env); // a bad FEEDBACK_REPLAY_DAYS stops the server at startup, like the other settings
-  const configured = env.FEEDBACK_PROJECTS?.trim() ? loadProjects(env) : null;
+  const configured = env.FEEDBACK_PROJECTS?.trim() ? checkIcons(loadProjects(env)) : null;
   const feedbackDir = configured?.[0]?.dir ?? env.FEEDBACK_DIR ?? resolve(process.cwd(), 'feedback-data');
   for (const folder of configured ? configured.map(project => project.dir) : [feedbackDir]) validateVault(folder, vaultDir);
   files.validateLimits(env);

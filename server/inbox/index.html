@@ -221,7 +221,8 @@ button.primary kbd { color: var(--paper); border-color: currentColor; background
 .qcard .qbar { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .qcard .locked { font-size: 13px; color: var(--teal); font-weight: 700; }
 .qclosed { display: flex; align-items: baseline; gap: 6px; color: var(--ink-2); font-size: 13px; min-width: 0; }
-.qclosed .qsum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qclosed .qlink { flex-shrink: 0; white-space: nowrap; }
+.qclosed .qsum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qcard .qlink { color: var(--teal); text-decoration: underline; background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
 .qrescue { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 .qrescue .qother { margin-top: 0; flex: 1 1 12rem; }
@@ -269,7 +270,7 @@ table.keys td:first-child { white-space: nowrap; width: 1%; }
 .msg.collapsed { display: flex; align-items: center; gap: 8px; align-self: stretch; max-width: 100%; padding: 4px 10px; border-style: dashed; background: transparent; }
 .msg.collapsed .peek { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .msg.collapsed time { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
-.show { min-height: 28px; padding: 0 10px; border-width: 1px; border-radius: 999px; font-size: 13px; }
+.show { flex-shrink: 0; white-space: nowrap; min-height: 28px; padding: 0 10px; border-width: 1px; border-radius: 999px; font-size: 13px; }
 .aside-group { align-self: stretch; max-width: min(560px, 92%); margin: 0 0 0 28px; border: 1px dashed var(--ink-2); border-radius: 12px; background: transparent; min-width: 0; }
 .aside-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 4px 10px; border: 0; background: transparent; text-align: left; font-size: 13px; color: var(--ink-2); }
 .aside-head .chev { display: inline-block; transition: transform .12s; }
@@ -509,7 +510,14 @@ button.danger { background: var(--berry); border-color: var(--berry); color: #ff
 .project-switch > button { width: 100%; text-align: left; display: flex; justify-content: space-between; gap: 8px; }
 .project-menu { position: absolute; z-index: 6; left: 14px; right: 14px; top: calc(100% + 4px); background: var(--white); border: 2px solid var(--ink); border-radius: 12px; padding: 6px; display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow: auto; }
 .project-menu[hidden] { display: none; }
-.project-menu button { display: flex; justify-content: space-between; gap: 8px; text-align: left; }
+.project-menu button { display: flex; justify-content: space-between; align-items: center; gap: 8px; text-align: left; }
+.project-menu button .pname { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.project-menu button .pname > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.project-switch > button { align-items: center; justify-content: flex-start; }
+.project-switch > button #project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbadge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 7px; background: var(--pb, #00796f); color: #fff; font-size: 12px; font-weight: 800; letter-spacing: .02em; line-height: 1; overflow: hidden; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); user-select: none; }
+.pbadge img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.project-switch > button .pbadge { width: 32px; height: 32px; border-radius: 8px; font-size: 13px; }
 .project-menu button[aria-current="true"] { background: var(--teal-tint); }
 .waiting { flex: none; margin: 0 12px 8px; padding: 8px 10px; border: 2px solid var(--ochre); border-radius: 12px; background: var(--ochre-tint); min-width: 0; }
 .waiting[hidden] { display: none; }
@@ -590,11 +598,11 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
 <div class="app" id="app">
   <nav class="list" aria-label="Threads">
     <div class="project-switch" id="project-switch" hidden>
-      <button type="button" id="project-button" aria-haspopup="menu" aria-expanded="false" aria-controls="project-menu"><span id="project-name">Feedback</span></button>
+      <button type="button" id="project-button" aria-haspopup="menu" aria-expanded="false" aria-controls="project-menu"><span class="pbadge" id="project-badge" aria-hidden="true"></span><span id="project-name">Feedback</span></button>
       <div class="project-menu" id="project-menu" role="menu" hidden></div>
     </div>
     <header>
-      <div class="brand"><h1>Feedback inbox</h1></div>
+      <div class="brand"><h1 id="app-title">Feedback inbox</h1></div>
       <span style="display:flex;gap:6px;align-items:center"><button type="button" class="icon-btn" id="help" aria-label="Keyboard shortcuts"><kbd data-keys="?" style="margin:0">?</kbd></button><button type="button" class="primary" id="new-thread">New thread<kbd data-keys="N">N</kbd></button></span>
     </header>
     <div class="search"><label class="sr" for="search">Search threads</label><input type="search" id="search" placeholder="Search titles and messages" autocomplete="off"><kbd data-keys="mod+K">K</kbd></div>

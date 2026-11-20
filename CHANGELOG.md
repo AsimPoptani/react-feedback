@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.1
+
+### Added
+- **Project artwork.** Every project has a badge: up to two initials from its name ("Field Manual" is FM, "react-feedback" is RF) on a colour picked from the project id out of a small palette (white initials, readable in light and dark). It shows on the closed project button (32 px), on every row of the open menu (28 px) and in the phone header, which is the same control.
+- **`icon` per project.** A `FEEDBACK_PROJECTS` entry may add `"icon": "/path/to/logo.png"` (PNG, JPEG or WebP, at most 1 MB). The server serves it at `/__feedback/api/projects/<id>/icon` with a sniffed type (SVG is refused), `nosniff` and a sandbox CSP. The path is resolved at startup; a missing, oversize or wrong file logs one warning and the badge is used. Only that configured file is ever read. `GET api/projects` returns `has_icon` (a boolean), never the path.
+
+### Changed
+- With more than one project the "Feedback inbox" heading is gone from the sidebar: the project menu is the header. One project keeps the heading.
+- The **show** / **hide** button on a withdrawn or re-asked question line stays on one line; the prompt text truncates instead.
+- On a thread that was merged into another, **Attach file** (and the paperclip on a phone) is disabled like Attach image.
+- The service worker cache is `fb-inbox-0.10.1`.
+
 ## 0.10.0
 
 ### Added

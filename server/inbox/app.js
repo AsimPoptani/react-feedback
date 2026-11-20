@@ -1187,7 +1187,7 @@ function drawMerged(d) {
   if (into) keepDraft(d);
   const kept = !!into && !!state.carryDraft && state.carryDraft.from === d.id && !!$('text')?.value; // typed text stays visible and selectable so it can be copied out
   $('composer')?.setAttribute('aria-disabled', String(off));
-  for (const id of ['text', 'send', 'attach', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = off && !(kept && id === 'text'); }
+  for (const id of ['text', 'send', 'attach', 'attach-file', 'btw', 'plus']) { const node = $(id); if (node) node.disabled = off && !(kept && id === 'text'); }
   if ($('text')) $('text').readOnly = off && kept;
 }
 // What the person had typed (composer, or an Other box) when a thread turned merged. It is restored on the target, so a merge never loses typing.
@@ -1938,6 +1938,24 @@ function drawArtifactCards(d) {
   const rows = d?.artifacts || [];
   host.replaceChildren(...rows.map(artifactCard));
 }
+// A badge for a project: its picture when the server has one, else up to two initials on a colour picked from the id (white text on each, enough contrast in light and dark).
+const BADGE_COLOURS = ['#00796f', '#1f5fa8', '#8a3a8f', '#a3470f', '#b02f62', '#4d6b0f', '#3f4fa8', '#7a5a00'];
+function badgeColour(id) { let h = 5381; for (const ch of String(id)) h = ((h * 33) ^ ch.codePointAt(0)) >>> 0; return BADGE_COLOURS[h % BADGE_COLOURS.length]; }
+function badgeInitials(name) {
+  const words = String(name || '').match(/[\p{L}\p{N}]+/gu) || [];
+  const letters = words.length > 1 ? words[0][0] + words[1][0] : (words[0] || '?').slice(0, 2);
+  return letters.toUpperCase();
+}
+function fillBadge(node, p) {
+  node.style.setProperty('--pb', badgeColour(p.id));
+  node.dataset.project = p.id;
+  node.textContent = badgeInitials(p.name);
+  if (!p.has_icon) return;
+  const img = el('img', { alt: '', src: `${API}projects/${encodeURIComponent(p.id)}/icon` });
+  img.addEventListener('error', () => { node.textContent = badgeInitials(p.name); }); // a picture that fails leaves the initials
+  node.replaceChildren(img);
+}
+function projectBadge(p) { const node = el('span', { class: 'pbadge', 'aria-hidden': 'true' }); fillBadge(node, p); return node; }
 function drawProjects() {
   const box = $('project-switch');
   const move = $('move-open');
@@ -1945,11 +1963,13 @@ function drawProjects() {
   if (move) move.hidden = !many || !!state.detail?.merged_into;
   if (!box) return;
   box.hidden = !many;
+  const title = $('app-title'); if (title) title.hidden = many; // with a project menu, the menu is the header
   if (!many) return;
   const current = state.projects.find(p => p.id === state.project) || state.projects[0];
   $('project-name').textContent = current?.name || 'Project';
+  if ($('project-badge') && current) fillBadge($('project-badge'), current);
   $('project-menu').replaceChildren(...state.projects.map(p => el('button', { type: 'button', role: 'menuitem', 'aria-current': p.id === state.project ? 'true' : 'false', onclick: () => chooseProject(p.id) },
-    el('span', { text: p.name }), el('span', { class: 'count', text: p.unread ? String(p.unread) : '' }))));
+    el('span', { class: 'pname' }, projectBadge(p), el('span', { text: p.name })), el('span', { class: 'count', text: p.unread ? String(p.unread) : '' }))));
 }
 function chooseProject(id) {
   $('project-menu').hidden = true;
