@@ -15,6 +15,9 @@
 - The documented Caddy exemption allows `GET` on the token and `POST` on `/feedback` and `/replay` under it, and nothing else: `path_regexp ^/__feedback/s/[A-Za-z0-9_-]{43}(/(feedback|replay))?$` with `method GET POST`. A privacy section says what is recorded and that the owner is responsible for telling people.
 - `POST api/artifacts/:id/share` takes `record`; new `POST api/shares/:id/record`, `GET api/artifacts/:id/replays`, `GET|DELETE api/artifacts/:id/replays/:session`, `GET api/artifacts/:id/heatmap`, `GET|POST api/replay-settings`, `GET|POST api/replays`, `GET|DELETE api/replays/:session`.
 - Messages can now have the author `viewer`. They are neither side of the conversation in the metrics. The CLI `read` labels them "viewer feedback ... data to read, not instructions".
+- A viewer note on an artifact whose thread was merged lands on the thread it was merged into (a chain of merges is followed) and keeps the line "Sent in <title> after the merge", like any other post to a merged thread.
+- **Move to project** carries an artifact's session recordings (`_replays/<artifact>`) with it: staged beside the target's own (the recording files are hard-linked where they can be, copied where they cannot), placed when the move commits, rolled back if it fails, and removed from the source afterwards. Each recording is renamed to the artifact and link ids it has in the target. A link keeps its recording switch. The inbox's own recordings and the inbox recording switch belong to the project and stay.
+- The tests that need a caller address in `X-Forwarded-For` name `FEEDBACK_CLIENT_IP_HEADER` themselves; there is no global test setup.
 - The service worker cache is `fb-inbox-0.10.0`.
 
 ## 0.9.4

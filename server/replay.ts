@@ -1,7 +1,7 @@
 // Session replays (rrweb events). One session is `<dir>/_replays/<scope>/<session>.jsonl.gz` (gzip members appended chunk by chunk, so it stays valid
 // at every step) and `<session>.json` (metadata). The scope is an artifact id for a shared link, or `_inbox` for the owner's own inbox sessions.
 // Nothing about the person (no address, no user agent) is stored: only the link id, version, times and counts.
-import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { appendFile, copyFile, link, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { Invalid, optional, withLock, writeAtomic } from './store';
@@ -27,6 +27,7 @@ export interface Origin { scope: Scope; link: string | null; version: number | n
 
 const root = (dir: string) => join(dir, '_replays');
 const folder = (dir: string, scope: Scope) => join(root(dir), scope);
+export const replayFolder = (dir: string, artifact: string) => folder(dir, artifact);
 const validScope = (scope: string) => scope === INBOX_SCOPE || ART_ID.test(scope);
 
 function parseMeta(raw: string | null): ReplayMeta | null {
@@ -212,4 +213,35 @@ export async function setInboxSetting(dir: string, on: boolean): Promise<boolean
   await mkdir(root(dir), { recursive: true });
   await writeAtomic(join(root(dir), '_settings.json'), JSON.stringify({ record_inbox: on }));
   return on;
+}
+
+// A project move carries an artifact's recordings with it. This builds the copy in `staged` (a folder that does not exist yet) and the caller places it.
+// The big file of a session (`.jsonl.gz`) is hard-linked when it can be and copied when it cannot (another volume); the small metadata is rewritten to name the artifact
+// and the share link by their ids in the target project. The source folder is held locked while it is read, so a chunk arriving now is either all in the copy or not at all.
+// Returns false when the artifact has no recordings. Nothing is changed in the source.
+export async function stageReplays(fromDir: string, fromArtifact: string, staged: string, toArtifact: string, shareIds: Record<string, string>, linkFile: (from: string, to: string) => Promise<void> = link): Promise<boolean> {
+  const where = folder(fromDir, fromArtifact);
+  if (!ART_ID.test(fromArtifact) || !ART_ID.test(toArtifact)) return false;
+  let names: string[];
+  try { names = await readdir(where); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  if (!names.some(name => name.endsWith('.json'))) return false;
+  return withLock(where, async () => {
+    await rm(staged, { recursive: true, force: true });
+    await mkdir(staged, { recursive: true });
+    for (const name of (await readdir(where)).filter(item => item.endsWith('.json') || item.endsWith('.jsonl.gz'))) { // not the lock file
+      const from = join(where, name), to = join(staged, name);
+      if (name.endsWith('.json')) {
+        const raw = await readFile(from, 'utf8');
+        try {
+          const meta = JSON.parse(raw) as Record<string, unknown>;
+          meta.scope = toArtifact;
+          if (typeof meta.link === 'string') meta.link = shareIds[meta.link] ?? meta.link;
+          await writeAtomic(to, JSON.stringify(meta));
+        } catch { await writeAtomic(to, raw); } // a torn file is carried as it is
+      } else {
+        try { await linkFile(from, to); } catch { await copyFile(from, to); }
+      }
+    }
+    return true;
+  });
 }

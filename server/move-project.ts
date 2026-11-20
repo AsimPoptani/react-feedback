@@ -1,5 +1,5 @@
 // Move a whole thread from one project to another. The folder (messages, images, checklist, reminders),
-// the artifacts and share links that belong to it, and the vault entries for its redacted messages all go together.
+// the artifacts (with their session recordings) and share links that belong to it, and the vault entries for its redacted messages all go together.
 // A thread id that is free in the target is kept. One that is taken gets a new id, and every reference is rewritten
 // from one map built before anything is written — the same idea as the merge id remap — so quotes, merges and the vault still resolve.
 // The copy lands in the target before the source is removed, so a failure leaves the thread where it was. Running it again finishes or changes nothing.
@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { ART_ID, listArtifacts, readArtifact } from './artifacts';
 import { projectById, type Project } from './projects';
 import { isActive, readShares, transferShares, type Share } from './shares';
+import { replayFolder, stageReplays } from './replay';
 import { checkVault, copyVaultEntry, removeVaultEntry } from './sensitive';
 import { ID, Invalid, itemDir, logEvent, materialise, newId, optional, readItem, readPins, setPin, summarise, withLock, writeAtomic } from './store';
 
@@ -304,6 +305,24 @@ async function ensureArtifact(from: Project, to: Project, fromId: string, toId: 
   await placeDir(staged, final);
   return true;
 }
+// An artifact's session recordings (`_replays/<artifact>`) go with it: staged beside the target's own, placed at commit, and removed from the source afterwards.
+// A link keeps its recording switch (it lives on the share record) and its token, so it goes on recording into the artifact's new folder. The inbox's own sessions
+// (`_replays/_inbox`) and the inbox recording switch belong to the project, not to a thread, and stay where they are.
+async function ensureReplays(from: Project, to: Project, fromId: string, toId: string, plan: Plan): Promise<boolean> {
+  const final = replayFolder(to.dir, toId);
+  const sourceThere = await isDir(replayFolder(from.dir, fromId));
+  if (await isDir(final)) {
+    if (!sourceThere || plan.journal.state !== 'copying') return false;
+    await rm(final, { recursive: true, force: true }); // the source is the truth until the move commits
+  }
+  if (!sourceThere) return false;
+  const staged = join(to.dir, '_replays', '.incoming', toId);
+  await rm(staged, { recursive: true, force: true });
+  await mkdir(dirname(staged), { recursive: true });
+  if (!(await stageReplays(from.dir, fromId, staged, toId, plan.journal.shares))) return false;
+  await placeDir(staged, final);
+  return true;
+}
 async function movePins(from: Project, to: Project, ids: Map<string, string>): Promise<void> {
   const pins = await readPins(from.dir);
   for (const [fromId, toId] of ids) {
@@ -323,6 +342,7 @@ async function writeEvents(from: Project, to: Project, thread: string, plan: Pla
 async function removeSources(from: Project, to: Project, plan: Plan): Promise<void> {
   for (const [fromId, toId] of plan.arts) {
     if (await isDir(join(to.dir, '_artifacts', toId))) await rm(join(from.dir, '_artifacts', fromId), { recursive: true, force: true });
+    if (await isDir(replayFolder(to.dir, toId))) await rm(replayFolder(from.dir, fromId), { recursive: true, force: true });
   }
   for (const fromId of plan.ids.keys()) await rm(join(from.dir, fromId), { recursive: true, force: true });
 }
@@ -342,7 +362,7 @@ async function leftoverShares(from: Project, plan: Plan): Promise<Share[]> {
 async function commit(from: Project, to: Project, thread: string, plan: Plan, vault: string | null): Promise<void> {
   await mkdir(to.dir, { recursive: true });
   const line = movedLine(plan.journal.fromName);
-  const placedThreads: string[] = [], placedArts: string[] = [];
+  const placedThreads: string[] = [], placedArts: string[] = [], placedReplays: string[] = [];
   let vaultCopied = false;
   try {
     for (const [fromId, toId] of plan.ids) {
@@ -354,6 +374,7 @@ async function commit(from: Project, to: Project, thread: string, plan: Plan, va
       const threadId = meta ? (plan.ids.get(meta.thread) ?? meta.thread) : (plan.ids.get(thread) ?? thread);
       if (!meta && await isDir(join(to.dir, '_artifacts', toId))) continue;
       if (await ensureArtifact(from, to, fromId, toId, threadId, plan)) placedArts.push(toId);
+      if (await ensureReplays(from, to, fromId, toId, plan)) placedReplays.push(toId);
     }
     if (vault && plan.journal.vault.length) { vaultCopied = true; await shiftVault(vault, plan.journal.vault, false); }
     plan.journal.state = 'committed';
@@ -363,6 +384,7 @@ async function commit(from: Project, to: Project, thread: string, plan: Plan, va
     if (plan.journal.state !== 'committed') {
       for (const id of placedThreads) await rm(join(to.dir, id), { recursive: true, force: true }).catch(() => {});
       for (const id of placedArts) await rm(join(to.dir, '_artifacts', id), { recursive: true, force: true }).catch(() => {});
+      for (const id of placedReplays) await rm(replayFolder(to.dir, id), { recursive: true, force: true }).catch(() => {});
       if (vault && vaultCopied) for (const item of plan.journal.vault) await removeVaultEntry(vault, item.newKey).catch(() => {});
     }
     throw error;
@@ -430,6 +452,7 @@ export async function moveThreadToProject(input: MoveInput): Promise<MoveProject
     } finally {
       await rm(join(to.dir, '_incoming'), { recursive: true, force: true });
       await rm(join(to.dir, '_artifacts', '.incoming'), { recursive: true, force: true });
+      await rm(join(to.dir, '_replays', '.incoming'), { recursive: true, force: true });
     }
     return planResult(from, to, input.thread, plan, !(await isDir(join(from.dir, input.thread))), false);
   });
