@@ -710,7 +710,9 @@ This is meant for **local or development use**. The server has **no authenticati
 
 ### Allowed hosts
 
-The server answers only to `Host` names it expects: `localhost`, `*.localhost`, any IP address, the name in `FEEDBACK_HOST`, and the names in `FEEDBACK_ALLOWED_HOSTS` (a comma-separated list). Anything else gets `403`. This stops a web page from reaching your inbox under its own name (DNS rebinding), which matters because what is written in the inbox can wake a Claude Code session. Share links (`/__feedback/s/…`) are protected by their token and answer to any Host. **Behind a reverse proxy, a tunnel or in Docker you must add the name you reach it by**, for example `FEEDBACK_ALLOWED_HOSTS=inbox.example.com,feedback`; the allowed names are printed at startup. `react-feedback proxy` applies the same check to the requests it receives.
+The server answers only to `Host` names it expects: `localhost`, `*.localhost`, any IP address, the name in `FEEDBACK_HOST`, and the names in `FEEDBACK_ALLOWED_HOSTS` (a comma-separated list). Anything else gets `403`. This stops a web page from reaching your inbox under its own name (DNS rebinding), which matters because what is written in the inbox can wake a Claude Code session. Share links (`/__feedback/s/…`) are protected by their token and answer to any Host. **Behind a reverse proxy, a tunnel or in Docker you must add the name you reach it by**, for example `FEEDBACK_ALLOWED_HOSTS=inbox.example.com,feedback`; the allowed names are printed at startup. `react-feedback proxy` applies the same check to the requests it receives. A malformed `Host` (a comma list, a bad port, an IPv6 address without brackets) is a 403 too.
+
+**If you put the inbox behind a Vite dev server proxy** (`changeOrigin: true` rewrites `Host`, so the check above never sees the original), protect the dev server itself with Vite's `server.allowedHosts` (fixed in Vite 6.0.9, 5.4.12 and 4.5.6; keep it current). Never set `allowedHosts: true`: that lets any web page reach the proxied inbox by DNS rebinding.
 
 ## Development
 

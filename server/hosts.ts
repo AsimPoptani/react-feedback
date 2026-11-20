@@ -4,22 +4,29 @@
 const SHARE = /^\/__feedback\/s\//;
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 
-// "name:port", "[::1]:port" or "[::1]" to the lower-cased name (without brackets or port).
-export function hostName(header: string | null | undefined): string {
+// A Host header as a name and whether it is an IP literal: "name", "name:port", "1.2.3.4:port" or a bracketed "[::1]:port". Anything else (a comma list,
+// spaces, a port that is not a number, an IPv6 address without brackets) is not a host at all.
+export function parseHost(header: string | null | undefined): { name: string; ip: boolean } | null {
   const h = (header ?? '').trim().toLowerCase();
-  if (h.startsWith('[')) return h.slice(1, h.indexOf(']') < 0 ? undefined : h.indexOf(']'));
-  return h.replace(/:\d*$/, '');
+  const v6 = /^\[([0-9a-f:.]+)\](?::\d{1,5})?$/.exec(h);
+  if (v6) return v6[1]!.includes(':') ? { name: v6[1]!, ip: true } : null;
+  const m = /^([a-z0-9]([a-z0-9._-]*[a-z0-9])?)(?::\d{1,5})?$/.exec(h);
+  return m ? { name: m[1]!, ip: IPV4.test(m[1]!) } : null;
 }
+export const hostName = (header: string | null | undefined): string => parseHost(header)?.name ?? '';
 export function allowedNames(env: Record<string, string | undefined> = process.env): string[] {
   const own = hostName(env.FEEDBACK_HOST);
   return [...(own ? [own] : []), ...(env.FEEDBACK_ALLOWED_HOSTS ?? '').split(',').map(x => hostName(x)).filter(Boolean)];
 }
+// Never throws: a header that cannot be read is a refusal.
 export function hostAllowed(req: Request, env: Record<string, string | undefined> = process.env): boolean {
-  if (SHARE.test(new URL(req.url).pathname)) return true;
-  const name = hostName(req.headers.get('host'));
-  if (!name) return false;
-  if (name === 'localhost' || name.endsWith('.localhost') || IPV4.test(name) || name.includes(':')) return true; // an IP literal, v4 or v6
-  return allowedNames(env).includes(name);
+  try {
+    if (SHARE.test(new URL(req.url).pathname)) return true;
+    const host = parseHost(req.headers.get('host'));
+    if (!host) return false;
+    if (host.ip || host.name === 'localhost' || host.name.endsWith('.localhost')) return true;
+    return allowedNames(env).includes(host.name);
+  } catch { return false; }
 }
 export const hostRefusal = () => new Response('Host not allowed. Add the name you reach this server by (a custom domain, a tunnel host, a Docker service name) to FEEDBACK_ALLOWED_HOSTS, a comma-separated list.', { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
 export const describeHosts = (env: Record<string, string | undefined> = process.env) =>

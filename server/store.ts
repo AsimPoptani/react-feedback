@@ -292,12 +292,15 @@ export function parseExpiry(value: unknown, now = Date.now()): string {
 }
 // A question whose expiry has passed. It is judged when read, never by a timer; whether it was answered is for the caller.
 export const isExpired = (q: Question | undefined, now = Date.now()): boolean => !!q?.expires_at && Date.parse(q.expires_at) <= now;
+const oneLine = (text: string): string => [...text].map(ch => { const c = ch.charCodeAt(0); return c < 32 || (c >= 127 && c <= 159) || c === 0x2028 || c === 0x2029 ? ' ' : ch; }).join('').replace(/ {2,}/g, ' ').trim();
 export function buildQuestion(id: string, input: QuestionInput): Question {
   if (!str(input.prompt, 1000)) throw new Invalid('A question needs a prompt of 1–1000 characters');
   if (!Array.isArray(input.options) || input.options.length < 1 || input.options.length > MAX_OPTIONS) throw new Invalid(`A question needs 1–${MAX_OPTIONS} options`);
   const options = input.options.map((o, i) => {
     if (!o || !str(o.label, 100) || (o.description !== undefined && (typeof o.description !== 'string' || o.description.length > 300))) throw new Invalid('Option labels are 1–100 characters and descriptions up to 300');
-    return { id: `o${i + 1}`, label: o.label.trim(), ...(o.description?.trim() ? { description: o.description.trim() } : {}) };
+    // One line each: a newline or control character in an option's words must not be able to start a line of its own in what a reader prints.
+    const description = o.description === undefined ? undefined : oneLine(o.description);
+    return { id: `o${i + 1}`, label: oneLine(o.label), ...(description ? { description } : {}) };
   });
   const expires_at = input.expires === undefined || input.expires === null || input.expires === '' ? undefined : parseExpiry(input.expires);
   return { id, prompt: (input.prompt as string).trim(), options, multi: input.multi === true, allow_other: input.allow_other !== false, ...(expires_at ? { expires_at } : {}) };
