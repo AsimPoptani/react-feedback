@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.2
+
+On a phone, the inbox list gets its height back. The sidebar footer is one short row instead of a stack that covered about half the screen.
+
+### Changed
+- At a width below 760px the footer is a single row: your avatar (it still opens your profile), Artifacts, Tracker and Metrics as chips that scroll sideways if they do not fit, and **⋯ More**. More holds Secret links, Paired devices and the version. **Open on phone** is in that menu only when this is a desktop pointer and this inbox is not the paired device itself. A phone, and a browser served by the remote listener, do not offer to pair another device.
+- The empty band under the footer is gone. The safe-area inset is added only when the page is installed (standalone or fullscreen), the same rule as the composer.
+- While the inbox is recording, **● Recording** sits in that row.
+- The service worker cache is `fb-inbox-0.16.2`.
+
 ## 0.16.1
 
 Removed: quick reactions (👍, Done, close it).

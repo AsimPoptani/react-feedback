@@ -75,9 +75,20 @@ function ensureStyle() {
   const style = document.createElement('style'); style.id = 'pair-style'; style.textContent = STYLE; document.head.append(style);
 }
 let started = null;
+// A coarse pointer is a phone or tablet. A device with `current: true` in the devices list is this browser, served by the remote listener. Neither should offer to pair another device.
+const coarsePointer = () => !!matchMedia?.('(hover: none) and (pointer: coarse)')?.matches;
 export function initPair({ api, el, showToast, context, openLabel = 'Open on phone' }) {
   if (started) return started;
   ensureStyle();
+  let remoteClient = false;
+  const offerPhone = () => !coarsePointer() && !remoteClient;
+  function syncPhoneOffer() {
+    const hide = !offerPhone();
+    const link = document.getElementById('phone-link');
+    if (link) link.hidden = hide;
+    const header = document.getElementById('phone-open');
+    if (header) header.hidden = hide;
+  }
   const inboxPath = new URL('./', location.href).pathname;
   const send = (path, method) => api(path, { method, headers: { 'Content-Type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}) });
   let page = null, pageReturn = null;
@@ -210,7 +221,13 @@ export function initPair({ api, el, showToast, context, openLabel = 'Open on pho
   }
   const more = document.getElementById('more');
   if (more?.parentNode) more.parentNode.insertBefore(el('button', { type: 'button', class: 'desk', id: 'phone-open', onclick: () => openPhone(context?.().thread || '') }, `\u{1F4F1} ${openLabel}`), more);
-  started = { openPhone, openDevices };
+  syncPhoneOffer();
+  // The devices list marks this browser when the page was served by the remote listener. A failure only means we cannot tell, so the desktop button stays.
+  void api('devices').then(data => {
+    const devices = Array.isArray(data?.devices) ? data.devices : [];
+    if (devices.some(d => d && d.current)) { remoteClient = true; syncPhoneOffer(); }
+  }).catch(() => {});
+  started = { openPhone, openDevices, offerPhone };
   return started;
 }
 

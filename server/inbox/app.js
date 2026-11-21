@@ -1991,7 +1991,7 @@ function openMore() {
     { label: 'Reminders', onclick: openReminders },
     { label: 'Share a secret', onclick: openSecret },
     { label: 'Secret links', onclick: () => { void openSecretList(); } },
-    ...(!COARSE && pairing ? [{ label: '\u{1F4F1} Open on phone', onclick: () => { void pairing.openPhone(d.id); } }] : []),
+    ...(!COARSE && pairing?.offerPhone?.() ? [{ label: '\u{1F4F1} Open on phone', onclick: () => { void pairing.openPhone(d.id); } }] : []),
     { label: d.status === 'done' ? 'Reopen' : 'Mark done', onclick: toggleDone },
     ...(COARSE && document.querySelector('.fb-launcher') ? [{ label: 'Feedback on this page', onclick: () => document.querySelector('.fb-launcher')?.click() }] : []),
     ...(d.read_only ? [{ note: "Read-only: updates only. You can't reply here." }] : []), ...(d.merged_into ? [{ note: 'This thread was merged into another one.' }] : []),
@@ -2902,6 +2902,17 @@ setInterval(poll, POLL_MS);
 document.addEventListener('visibilitychange', poll);
 drawMe();
 const pairing = initPair({ api, el, showToast, context: () => ({ thread: /^[\w-]{1,64}$/.test(state.openId || '') ? state.openId : '', project: state.project && state.project !== state.defaultProject ? state.project : '' }) });
+// The phone footer's ⋯ More: the links that no longer fit in the one row. Open on phone is left out on a coarse pointer and on the remote listener (offerPhone).
+$('foot-more')?.addEventListener('click', () => {
+  const thread = /^[\w-]{1,64}$/.test(state.openId || '') ? state.openId : '';
+  const version = $('app-version')?.textContent || '';
+  openMenu($('foot-more'), [
+    { label: 'Secret links', onclick: () => { void openSecretList(); } },
+    ...(pairing.offerPhone() ? [{ label: '\u{1F4F1} Open on phone', onclick: () => { void pairing.openPhone(thread); } }] : []),
+    { label: 'Paired devices', onclick: () => { void pairing.openDevices(); } },
+    ...(version ? [{ note: version, foot: true }] : []),
+  ], { up: true });
+});
 refreshPins();
 fitViewport(); drawOffline(); outbox.start();
 Promise.all([refreshProfile(), refreshAreas(), refreshConfig(), refreshProjects()]).then(refreshList).then(() => { void refreshWaiting(); }).then(route).then(refreshPresence).then(refreshReplaySetting);

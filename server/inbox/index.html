@@ -296,6 +296,7 @@ table.keys td:first-child { white-space: nowrap; width: 1%; }
 :root { --lime: #3f7d0a; --lime-tint: #e1f1c2; }
 @media (prefers-color-scheme: dark) { :root { --lime: #b9e86a; --lime-tint: #2f4416; } }
 .me-panel { border-top: 2px solid var(--rule); background: var(--panel); padding: 8px 10px; }
+.foot-more { display: none; }
 .me { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border-width: 1px; min-height: 48px; }
 .me .avatar { width: 34px; height: 34px; font-size: 16px; }
 .me-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
@@ -470,13 +471,29 @@ table.areas tr:last-child td, table.areas tr:last-child th { border-bottom: 0; }
 @media (max-width: 759px) { .tiles.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } table.areas th, table.areas td { padding: 6px 5px; font-size: 13px; } table.areas th { font-size: 11px; } .thread-head .winbar { order: 3; flex: 1 1 100%; } .two { grid-template-columns: 1fr; } .tiles.four .big { font-size: 18px; } .tile .big { font-size: 22px; } }
 @media (max-width: 759px) { .thread-head { gap: 6px; } .thread-head h2 { flex: 1 1 100%; order: 2; } .thread-head .back { order: 0; } .thread-head button { order: 1; } }
 @media (max-width: 759px) {
-  .me-panel { padding-bottom: 64px; } /* the launcher sits bottom-right over the profile button otherwise */
   .app { grid-template-columns: 1fr; }
   .thread { display: none; }
   .app.has-thread .list { display: none; }
   .app.has-thread .thread { display: flex; }
   .back { display: inline-block; }
   .msg { max-width: 94%; }
+}
+/* Phone list: one row (avatar, the three chips, More). Secret links, Open on phone, paired devices and the version live in More. No empty band: a normal tab is already clear of the browser chrome, so the safe-area inset is added only when the page is installed, the same rule as the composer. */
+@media (max-width: 759px) {
+  .me-panel { display: flex; flex-direction: row; align-items: center; gap: 4px; padding: 6px; min-width: 0; }
+  .me-panel .me { order: 0; width: auto; flex: none; gap: 0; min-height: 0; height: 36px; padding: 0; border-width: 1px; }
+  .me-panel .me .me-text { display: none; }
+  .me-panel .me .avatar { width: 28px; height: 28px; font-size: 13px; }
+  .me-panel .foot-links { order: 1; flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+  .me-panel .foot-links::-webkit-scrollbar { display: none; }
+  .me-panel .foot-links .metrics-link { flex: 0 0 auto; min-height: 0; height: 32px; margin: 0; padding: 0 8px; font-size: 13px; white-space: nowrap; }
+  .me-panel .foot-links > #secret-links, .me-panel .foot-links > #phone-link, .me-panel .foot-links > .ver { display: none; }
+  .me-panel .rec { order: 2; margin: 0; flex: none; width: 0.95em; overflow: hidden; white-space: nowrap; font-size: 13px; line-height: 1; }
+  .me-panel .foot-more { order: 3; display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 2px; height: 36px; min-height: 0; padding: 0 8px; font-size: 13px; line-height: 1; white-space: nowrap; }
+}
+@media (max-width: 759px) and (display-mode: standalone),
+       (max-width: 759px) and (display-mode: fullscreen) {
+  .me-panel { padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px)); }
 }
 /* RF6: offline banner, queued and redacted messages, the key box, popup menus */
 .update { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; background: var(--teal-tint); color: var(--ink); border-bottom: 2px solid var(--teal); padding: 6px 10px; font-size: 14px; font-weight: 600; }
@@ -695,7 +712,7 @@ dialog.replay { max-width: min(1100px, 96vw); max-height: 94dvh; overflow: auto;
     <button type="button" class="close-done" id="close-done" hidden>Close all done threads</button>
     <div id="groups"></div>
     <p class="empty" id="list-empty" hidden>No threads here.</p>
-    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><button type="button" class="metrics-link" id="secret-links">Secret links</button><span class="ver" id="app-version">react-feedback v0.10.0</span></div><p class="rec" id="rec-dot" role="status" hidden><span aria-hidden="true">●</span> Recording</p><button type="button" class="me" id="me" aria-label="Your profile"></button></div>
+    <div class="me-panel"><div class="foot-links"><a href="#/artifacts" class="metrics-link" id="artifacts-link">Artifacts</a><a href="#/tracker" class="metrics-link" id="tracker-link">Tracker</a><a href="#/metrics" class="metrics-link" id="metrics-link">Metrics</a><button type="button" class="metrics-link" id="secret-links">Secret links</button><span class="ver" id="app-version">react-feedback v0.10.0</span></div><p class="rec" id="rec-dot" role="status" hidden><span aria-hidden="true">●</span> Recording</p><button type="button" class="me" id="me" aria-label="Your profile"></button><button type="button" class="foot-more" id="foot-more" aria-haspopup="menu" aria-expanded="false" aria-label="More"><span aria-hidden="true">&#8943;</span> More</button></div>
   </nav>
   <main class="thread" id="thread" aria-label="Thread">
     <p class="placeholder" id="placeholder">Select a thread, or start a new one.</p>

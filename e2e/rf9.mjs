@@ -42,7 +42,7 @@ const shot = (page, name) => SHOTS ? page.screenshot({ path: join(SHOTS, `${name
 const shotOf = (locator, name) => SHOTS ? locator.screenshot({ path: join(SHOTS, `${name}.png`) }) : null;
 
 async function ready(page) {
-  await page.waitForSelector('#app-version');
+  await page.waitForSelector('#app-version', { state: 'attached' });
   await page.evaluate(async () => { try { await navigator.serviceWorker?.ready; } catch { /* no worker in this browser */ } });
 }
 async function showBanner(page) {
@@ -57,7 +57,10 @@ try {
   newer = false; shell = false;
   await phone.goto(`${origin}/__feedback/inbox/#/`);
   await ready(phone);
-  check('phone: the footer shows the loaded version next to Tracker', (await phone.locator('#app-version').innerText()) === `react-feedback v${VERSION}` && await phone.locator('#tracker-link').isVisible());
+  check('phone: Tracker stays in the footer; the version text is kept for More', (await phone.locator('#app-version').textContent()) === `react-feedback v${VERSION}` && await phone.locator('#tracker-link').isVisible());
+  await phone.locator('#foot-more').tap();
+  check('phone: More shows the loaded version', (await phone.locator('#popmenu .ver').innerText()) === `react-feedback v${VERSION}`);
+  await phone.keyboard.press('Escape');
   check('phone: no banner while the page matches the server', await phone.locator('#update-banner').isHidden());
   await shotOf(phone.locator('.me-panel'), 'footer-390');
   await phone.goto(`${origin}/__feedback/inbox/#/${id}`);
@@ -83,8 +86,8 @@ try {
   check('phone: Reload loads the new shell', await phone.locator('html').getAttribute('data-shell') === 'next');
   check('phone: the new shell shows its own version and drops the banner', (await phone.locator('#app-version').textContent()) === `react-feedback v${NEXT}` && await phone.locator('#update-banner').isHidden());
   await phone.goto(`${origin}/__feedback/inbox/#/`);
-  await phone.waitForSelector('#app-version', { state: 'visible' });
-  check('phone: the reloaded footer shows the new version', (await phone.locator('#app-version').innerText()) === `react-feedback v${NEXT}`);
+  await phone.waitForSelector('#foot-more', { state: 'visible' });
+  check('phone: the reloaded footer shows the new version', (await phone.locator('#app-version').textContent()) === `react-feedback v${NEXT}`);
   check('no page errors', errors.length === 0);
 
   const wide = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
