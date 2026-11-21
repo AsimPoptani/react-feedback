@@ -515,7 +515,7 @@ export async function saveImages(path: string, images: Image[]): Promise<string[
   }
   return names;
 }
-export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder' | 'expired' | 'reaction'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
+export async function logEvent(dir: string, event: { id: string; kind: 'message' | 'thread' | 'answer' | 'checklist' | 'checklist_claim' | 'merge' | 'move' | 'moved' | 'secret' | 'reminder' | 'expired'; text: string; reply_to?: string; aside?: boolean; author?: MessageAuthor | 'system'; set_by?: 'agent' | 'user' | 'default'; agent_name?: string }): Promise<void> {
   await mkdir(dir, { recursive: true });
   const first_line = event.text.split('\n')[0]!.slice(0, 200) || '[image]';
   await appendFile(join(dir, '_events.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), id: event.id, author: event.author ?? 'user', kind: event.kind, first_line, ...(event.set_by ? { set_by: event.set_by } : {}), ...(event.agent_name ? { agent_name: event.agent_name } : {}), ...(event.reply_to ? { reply_to: event.reply_to } : {}), ...(event.aside ? { aside: true } : {}) })}\n`);
@@ -875,44 +875,8 @@ export async function assertNotTyping(dir: string, ids: string[], guard: TypingG
   for (const id of ids) if (await isTyping(dir, id, guard.now ?? Date.now())) throw new Invalid(TYPING_REFUSED, 409);
 }
 
-// ---- Quick reactions: a one-tap answer to an agent's message. A reaction is an event the agent sees (kind `reaction` in the event feed), never a message: it changes nothing about who is waiting.
-// "Done, close it" also closes the thread. They live in reactions.json beside the thread: { <message id>: { thumbs_up?: <time>, done?: <time> } }.
-export const REACTIONS = ['thumbs_up', 'done'] as const;
-export type Reaction = (typeof REACTIONS)[number];
-export type Reactions = Record<string, Partial<Record<Reaction, string>>>;
-export async function readReactions(path: string): Promise<Reactions> {
-  try {
-    const raw = JSON.parse(await optional(join(path, 'reactions.json')) ?? 'null');
-    if (!isObject(raw)) return {};
-    const out: Reactions = {};
-    for (const [mid, value] of Object.entries(raw)) {
-      if (!/^m\d+$/.test(mid) || !isObject(value)) continue;
-      const row: Partial<Record<Reaction, string>> = {};
-      for (const r of REACTIONS) if (typeof value[r] === 'string') row[r] = value[r] as string;
-      if (Object.keys(row).length) out[mid] = row;
-    }
-    return out;
-  } catch { return {}; }
-}
-export async function reactTo(dir: string, id: string, mid: string, reaction: unknown): Promise<{ reaction: Reaction; first: boolean; closed: boolean }> {
-  if (typeof reaction !== 'string' || !(REACTIONS as readonly string[]).includes(reaction)) throw new Invalid('reaction must be thumbs_up or done');
-  const kind = reaction as Reaction;
-  const path = await itemDir(dir, id);
-  const result = await withLock(path, async () => {
-    if ((await readMerge(path))?.state === 'done') throw new Invalid('That thread was merged into another one; react there', 409);
-    const message = (await materialise(path, await readItem(path))).find(m => m.id === mid);
-    if (!message || message.divider) throw new Invalid('No such message', 404);
-    if (message.author !== 'agent') throw new Invalid('Only an agent message can be reacted to');
-    const all = await readReactions(path);
-    const row = all[mid] ?? {};
-    const first = row[kind] === undefined;
-    if (first) { row[kind] = new Date().toISOString(); all[mid] = row; await writeAtomic(join(path, 'reactions.json'), JSON.stringify(all, null, 2)); }
-    if (kind === 'done') await writeStatus(path, 'done');
-    return { reaction: kind, first, closed: kind === 'done' };
-  });
-  if (result.first || result.closed) await logEvent(dir, { id, kind: 'reaction', text: kind === 'done' ? `Done, close it (on ${mid})` : `\u{1F44D} on ${mid}`, reply_to: mid });
-  return result;
-}
+// Quick reactions (a thumbs up and "Done, close it" on an agent message) were removed in 0.16.1. A thread folder from 0.15 or 0.16.0 may still
+// contain reactions.json. Nothing reads it, so the thread loads and the file is ignored. Older event lines with kind "reaction" are ordinary JSON and still read.
 // Closes every open thread whose agent said "done" last and that waits on nobody (not on you, not on the agent to check something you ticked). A thread you reopened after that message stays open.
 // One tap in the inbox ("Close all done threads"), with an Undo that reopens exactly these.
 export async function closeDoneThreads(dir: string): Promise<{ closed: string[] }> {

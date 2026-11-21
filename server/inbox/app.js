@@ -866,23 +866,6 @@ function jumpToQuestion(qid) {
   card.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
 }
-// One-tap answers to an agent's message. The agent sees them as events, not messages: nothing new is waiting on it, and "Done, close it" also closes the thread.
-function reactionsNode(d, m) {
-  if (m.author !== 'agent' || m.redacted || m.divider || m.kind || m.question || d.merged_into) return null;
-  const mine = d.reactions?.[m.id] || {};
-  const tap = async reaction => {
-    try { await post(`threads/${d.id}/messages/${m.id}/react`, { reaction }); state.shown = ''; await Promise.all([loadThread(d.id, { quiet: true }), refreshList()]); }
-    catch (error) { showError($('error'), error.message); }
-  };
-  const row = el('div', { class: 'reacts', role: 'group', 'aria-label': 'Quick reactions' },
-    el('button', { type: 'button', class: 'react', 'aria-pressed': String(!!mine.thumbs_up), 'aria-label': 'Thumbs up', title: 'Thumbs up', onclick: () => { void tap('thumbs_up'); } }, '\u{1F44D}'));
-  if (d.status !== 'done' || mine.done) {
-    const done = el('button', { type: 'button', class: 'react', 'aria-pressed': String(!!mine.done), onclick: () => { void tap('done'); } }, 'Done, close it');
-    done.disabled = d.status === 'done';
-    row.append(done);
-  }
-  return row;
-}
 // Copy puts the message's own words on the clipboard as plain Markdown (not the drawn HTML, and without the quote of what it replied to). navigator.clipboard where there is one,
 // a hidden textarea and execCommand where there is not (older iOS, or a page the browser will not let write).
 const copyIcon = () => svg('svg', { viewBox: '0 0 24 24', width: 16, height: 16, 'aria-hidden': 'true' }, svg('rect', { x: 9, y: 9, width: 11, height: 11, rx: 2, fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }), svg('path', { d: 'M5 15V6a2 2 0 0 1 2-2h9', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round' }));
@@ -943,7 +926,6 @@ function messageNode(d, m) {
   if (m.images.length) node.append(el('div', { class: 'imgs' }, ...m.images.map((f, i) => imageButton(f, `Image ${i + 1} from ${who.name}`, fileUrl(d.id, f)))));
   appendFiles(node, d, m, who);
   const attached = attachedNode(d, m); if (attached) node.append(attached);
-  const reacts = reactionsNode(d, m); if (reacts) node.append(reacts);
   return node;
 }
 // ---- The key box. The value goes from this page straight to the app's own key store (FEEDBACK_SECRET_TARGET, a path on this same site).
@@ -1097,7 +1079,7 @@ function drawMessages(d) {
   const open = [...state.expanded].filter(k => k.startsWith(`${d.id}:`)).sort();
   const qopen = [...state.qopen].sort();
   const asides = [...state.asideOpen].filter(([k]) => k.startsWith(`${d.id}:`));
-  const key = JSON.stringify([d.id, d.status, d.reactions || {}, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.moved_to ? `>${m.moved_to}` : '') + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.question?.expired ? 'x' : '') + (m.quote?.message_id ? 'k' : '') + (m.kind || '')),
+  const key = JSON.stringify([d.id, d.status, d.user_read_at, d.agent_read_at, d.acked_through, state.profile, open, qopen, asides, d.messages.map(m => m.id + m.created_at + (m.moved_to ? `>${m.moved_to}` : '') + (m.answer ? 'a' : '') + (m.flag || '') + (m.aside ? 's' : '') + (m.added_items || []).join() + (m.ticked_items || []).join() + (m.redacted ? 'r' : '') + (m.secret?.status || '') + (m.secret?.hint || '') + (m.question?.withdrawn ? 'w' : '') + (m.question?.reasked ? 'q' : '') + (m.question?.expired ? 'x' : '') + (m.quote?.message_id ? 'k' : '') + (m.kind || '')),
     queuedEntries(d).map(e => e.cid + e.state + e.attempts + e.sending), state.offline, state.config?.secret_target || '', state.config?.redact === true, [...state.replacing],
     (d.checklist_items || []).filter(i => d.messages.some(m => (m.added_items || []).includes(i.id) || (m.ticked_items || []).includes(i.id))).map(i => i.id + i.text)]);
   state.gallery = buildGallery(d);

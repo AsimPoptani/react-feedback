@@ -247,7 +247,7 @@ function takeProject(args: string[]): { args: string[]; project?: string } {
   return { args: out, project };
 }
 // `path` is the thread's folder: with it, each attachment is listed with the absolute path of its file.
-export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null; path?: string; reactions?: store.Reactions }
+export interface TranscriptExtra { items?: store.ChecklistItem[]; acked?: string | null; path?: string }
 export function transcript(messages: store.Message[], names: Record<store.MessageAuthor, string> = { user: 'user', agent: 'agent', viewer: 'viewer' }, extra: TranscriptExtra = {}): string {
   const byId = new Map(messages.map(m => [m.id, m]));
   const itemText = (id: string) => `${id}${extra.items?.find(i => i.id === id) ? ` ${extra.items.find(i => i.id === id)!.text}` : ''}`;
@@ -265,9 +265,7 @@ export function transcript(messages: store.Message[], names: Record<store.Messag
     const asked = m.question && !m.redacted && !m.divider ? questionNote(messages, m.question) : [];
     const secret = m.secret ? [`  [key request ${m.secret.name}: ${m.secret.status === 'saved' ? `saved${m.secret.hint ? `, ends ${m.secret.hint}` : ''}${m.secret.check === 'rejected' ? ', but the provider rejected it' : ''}` : 'not saved yet'}]`] : [];
     const attached = [...(m.added_items?.length ? [`  + added to checklist: ${m.added_items.map(itemText).join('; ')}`] : []), ...(m.ticked_items?.length ? [`  [x] ticked: ${m.ticked_items.map(itemText).join('; ')}`] : [])];
-    const reacted = Object.keys(extra.reactions?.[m.id] ?? {}).map(r => (r === 'done' ? 'Done, close it' : 'thumbs up'));
-    const reaction = reacted.length ? [`  [you reacted: ${reacted.join(', ')}]`] : [];
-    const text = `${m.id}  ${m.author === 'user' ? 'user ' : m.author === 'viewer' ? 'viewer' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[...viewer, ...(own ? [own] : []), body, ...asked, ...attachments, ...secret, ...attached, ...reaction].join('\n')}`;
+    const text = `${m.id}  ${m.author === 'user' ? 'user ' : m.author === 'viewer' ? 'viewer' : 'agent'}  ${m.created_at.slice(0, 16)}${m.written_at && Math.abs(Date.parse(m.created_at) - Date.parse(m.written_at)) > 60e3 ? ` (written ${m.written_at.slice(0, 16)}, sent offline)` : ''}${label}${quote}\n${[...viewer, ...(own ? [own] : []), body, ...asked, ...attachments, ...secret, ...attached].join('\n')}`;
     return pad ? text.split('\n').map(l => `${pad}${l}`).join('\n') : text;
   };
   const groups = asideGroups(messages, extra.acked ?? null);
@@ -439,7 +437,7 @@ export async function run(argv: string[], dir = defaultDir(), areas?: AreasConfi
     for (const line of (await presenceText(dir, me)).split('\n').filter(Boolean)) notice(line);
     if (await store.isTyping(dir, words[0]!)) notice('The person is typing in this thread right now: a withdraw, merge or move is refused for a few seconds (--force overrides).');
     const captured = captureLines(item);
-    return `Marked ${words[0]} read${captured ? `\n\n${captured}` : ''}${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through, path, reactions: await store.readReactions(path) })}` : ''}`;
+    return `Marked ${words[0]} read${captured ? `\n\n${captured}` : ''}${messages.length ? `\n\n${transcript(messages, undefined, { items: await store.readChecklist(path), acked: summary.acked_through, path })}` : ''}`;
   }
   if (command === 'ask-cancel' && words.length === 2) {
     const result = await store.cancelQuestion(dir, words[0]!, words[1]!, named.reason, guard);

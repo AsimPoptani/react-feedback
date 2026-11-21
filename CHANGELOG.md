@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.1
+
+Removed: quick reactions (👍, Done, close it).
+
+The thumbs up and **Done, close it** buttons are gone from agent messages, on a wide screen and on a phone, including the message ⋯ menu. **Close all done threads** and its Undo stay. `POST api/threads/:id/messages/:mid/react` and the `reactions` field on a thread are gone. A thread that already has `reactions.json` still opens; that file is ignored. `read` and MCP `read_thread` no longer show them.
+
+### Changed
+- The service worker cache is `fb-inbox-0.16.1`.
+
 ## 0.16.0
 
 One-time secret links: send a password or a key to someone as a link. The browser encrypts it. The server stores only ciphertext, and the link works once.

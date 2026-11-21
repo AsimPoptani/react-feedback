@@ -1,5 +1,5 @@
 // Browser test for 0.15 (working together), at 390 and 1280 px: "the thread changes while I type" (poll, withdraw, re-ask, merge, move: the text is never lost), kept drafts across a reload,
-// typing presence refusing an agent, multi-choice cards, Waiting on you across projects, the Move chip, reactions, answers given offline, and the phone's bottom gap.
+// typing presence refusing an agent, multi-choice cards, Waiting on you across projects, the Move chip, answers given offline, and the phone's bottom gap.
 // Needs Playwright (NODE_PATH points at it, or PLAYWRIGHT=/path/to/playwright). Run: bun e2e/rf-meta.mjs   Screenshots: RF_SHOTS (default ./rf-meta-shots)
 import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -103,16 +103,6 @@ async function scenario(label, contextOptions) {
   await page.locator('#msgs .qcard input[type=checkbox]').first().check();
   check(tag('picking an option clears Other with a visible hint'), (await page.locator('#msgs .qother').inputValue()) === '' && (await page.locator('#msgs .qhint').innerText()).includes('cleared'));
   await shot('multi-card');
-
-  // ---- reactions
-  const rid = (await store.createThread(alpha, { title: `React ${label}`, text: 'I finished it.', origin: 'agent', flag: 'fyi' })).id;
-  await page.goto(`${origin}/__feedback/inbox/#/${rid}`);
-  await page.waitForSelector('#msgs .react');
-  await page.locator('#msgs .react[aria-label="Thumbs up"]').click();
-  check(tag('a thumbs up is an event, not a message'), await until(async () => (await store.readReactions(join(alpha, rid))).m1?.thumbs_up !== undefined) && (await store.summarise(alpha, rid)).messages.length === 1);
-  await page.getByRole('button', { name: 'Done, close it' }).click();
-  check(tag('Done, close it closes the thread'), await until(async () => (await store.summarise(alpha, rid)).summary.status === 'done'));
-  await shot('reactions');
 
   // ---- Waiting on you across projects, and the Move chip
   await store.createThread(beta, { title: `Beta asks ${label}`, text: 'Pick?', origin: 'agent', question: { prompt: 'Pick one?', options: [{ label: 'a' }] } });

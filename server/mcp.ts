@@ -163,7 +163,7 @@ export function createMcpServer(options: McpOptions): McpServer {
     await store.markAgentRead(dir, a.id, agent);
     const { summary, messages, path, item } = await store.summarise(dir, a.id);
     const capture = shapeCapture(item);
-    return { thread: shapeSummary(summary), ...(capture ? { capture } : {}), messages: store.withExpired(messages).map(x => shapeMessage(x, path)), checklist: (await store.readChecklist(path)).map(shapeItem), reactions: await store.readReactions(path), ...(await store.isTyping(dir, a.id) ? { typing: true } : {}), acked_through: summary.acked_through, presence: forViewer(await store.readPresence(dir), { agent }) };
+    return { thread: shapeSummary(summary), ...(capture ? { capture } : {}), messages: store.withExpired(messages).map(x => shapeMessage(x, path)), checklist: (await store.readChecklist(path)).map(shapeItem), ...(await store.isTyping(dir, a.id) ? { typing: true } : {}), acked_through: summary.acked_through, presence: forViewer(await store.readPresence(dir), { agent }) };
   });
   tool('reply', 'Post a reply on a thread. Optionally quote a message (to), flag it (fyi, needs_you or done), add checklist items (todo, for "agent" by default) and tick items (check, like "c3"). aside: true answers a side question and needs to.', {
     id: thread, text, to: z.string().optional().describe('Id of a message in this thread to quote (or the side question to answer)'), ...flags,

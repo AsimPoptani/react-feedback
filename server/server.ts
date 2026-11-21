@@ -266,11 +266,10 @@ async function threadDetail(dir: string, id: string, projects?: Project[]) {
   const allShares = await shares.readShares(dir);
   const published = (await artifacts.listArtifacts(dir, id)).map(meta => ({ id: meta.id, thread: meta.thread, title: meta.title, latest: meta.latest, updated_at: meta.updated_at,
     versions: meta.versions.map(version => version.n), ...(meta.suggest ? { suggest: true } : {}), ...shares.statsFor(allShares, meta.id) }));
-  const reactions = await store.readReactions(path);
   const first = projects?.[0];
   const unmatched = item.unmatched === true && !!first && resolve(first.dir) === resolve(dir) && routesByUrl(projects);
   const suggested = unmatched ? closestProject(projects!, typeof context.url === 'string' ? context.url : '', first!.id) : null;
-  return { ...summary, ...(unmatched ? { unmatched: true, suggested_project: suggested ? { id: suggested.id, name: suggested.name } : null } : {}), ...(Object.keys(reactions).length ? { reactions } : {}),
+  return { ...summary, ...(unmatched ? { unmatched: true, suggested_project: suggested ? { id: suggested.id, name: suggested.name } : null } : {}),
     url: typeof context.url === 'string' ? context.url : null, viewport: context.viewport ?? null, target: store.cleanTarget(item.target ?? null),
     note: typeof item.note === 'string' ? item.note : '', checklist_items: await store.listChecklist(dir, id), files: { image: await has('image.png'), annotated: await has('annotated.png'), context: await has('context.png') }, messages: store.withExpired(messages),
     reminders_fired: (await reminders.readStored(path)).fired, artifacts: published };
@@ -620,8 +619,6 @@ async function threadRoute(req: Request, dir: string, path: string, read: (req: 
   if (remind) return remind;
   if (path === `${base}/close-done` && req.method === 'POST') { await read(req); return json(await store.closeDoneThreads(dir)); }
   if (path === `${base}/reopen` && req.method === 'POST') return json(await store.reopenThreads(dir, (await read(req)).ids));
-  const reaction = path.match(/^\/__feedback\/api\/threads\/([^/]+)\/messages\/([^/]+)\/react$/);
-  if (reaction && req.method === 'POST') { const data = await read(req); return json(await store.reactTo(dir, reaction[1]!, reaction[2]!, data.reaction)); }
   if (path === base && req.method === 'POST') {
     const data = await read(req);
     return json(await store.createThread(dir, { title: data.title, text: data.text, images: store.dataUrlImages(data.images), attachments: data.attachments, origin: 'user' }), 201);

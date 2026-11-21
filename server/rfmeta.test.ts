@@ -197,23 +197,6 @@ describe('split', () => {
 });
 
 describe('reactions, closing done threads, waiting on you', () => {
-  test('a reaction is an event, not a message; Done closes the thread; reading shows it', async () => {
-    const handle = createHandler(dir);
-    const id = (await store.createThread(dir, { title: 'One', text: 'all fixed', origin: 'agent' })).id;
-    const before = (await store.summarise(dir, id)).messages.length;
-    expect((await post(handle, `threads/${id}/messages/m1/react`, { reaction: 'wave' })).status).toBe(400);
-    expect((await post(handle, `threads/${id}/messages/m1/react`, { reaction: 'thumbs_up' })).status).toBe(200);
-    expect((await store.summarise(dir, id)).messages.length).toBe(before);
-    const done = await (await post(handle, `threads/${id}/messages/m1/react`, { reaction: 'done' })).json();
-    expect(done.closed).toBe(true);
-    expect((await store.summarise(dir, id)).summary.status).toBe('done');
-    const events = (await readFile(join(dir, '_events.jsonl'), 'utf8')).trim().split('\n').map(l => JSON.parse(l)).filter(e => e.kind === 'reaction');
-    expect(events.map(e => e.first_line)).toEqual(['\u{1F44D} on m1', 'Done, close it (on m1)']);
-    expect((await (await get(handle, `threads/${id}`)).json()).reactions.m1).toMatchObject({ thumbs_up: expect.any(String), done: expect.any(String) });
-    expect((await cli(['read', id])).out).toContain('you reacted: thumbs up, Done, close it');
-    await store.appendMessage(dir, id, { author: 'user', text: 'actually' });
-    expect((await post(handle, `threads/${id}/messages/m2/react`, { reaction: 'done' })).status).toBe(400); // only an agent message
-  });
   test('Close all done threads closes the ones the agent called done and nobody waits on', async () => {
     const handle = createHandler(dir);
     const finished = (await store.createThread(dir, { title: 'Finished', text: 'ok', origin: 'agent', flag: 'done' })).id;

@@ -183,14 +183,6 @@ describe('a new topic', () => {
 });
 
 describe('reactions and closing', () => {
-  it('thumbs up and Done, close it are one tap on an agent message', async () => {
-    messages = [{ id: 'm1', author: 'agent', text: 'All shipped', images: [], created_at: at(1), flag: 'done' }];
-    await load();
-    document.querySelector<HTMLButtonElement>('#msgs .react[aria-label="Thumbs up"]')!.click();
-    await vi.waitFor(() => expect(posts.find(p => p.path === `threads/${ID}/messages/m1/react`)?.body).toEqual({ reaction: 'thumbs_up' }));
-    [...document.querySelectorAll<HTMLButtonElement>('#msgs .react')].find(b => b.textContent === 'Done, close it')!.click();
-    await vi.waitFor(() => expect(posts.some(p => p.body.reaction === 'done')).toBe(true));
-  });
   it('Close all done threads shows how many and closes them', async () => {
     messages = [{ id: 'm1', author: 'agent', text: 'All shipped', images: [], created_at: at(1), flag: 'done' }];
     detailExtra = { waiting: 'idle', last_flag: 'done', last_author: 'agent' };
